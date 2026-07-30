@@ -89,10 +89,8 @@
         "@effect/platform-bun": "catalog:effect",
         "@effect/platform-node": "catalog:effect",
         "@effect/vitest": "catalog:effect",
-        "@types/http-cache-semantics": "^4.2.0",
         "capnp-es": "^0.0.14",
         "capnweb": "^0.8.0",
-        "http-cache-semantics": "^4.2.0",
         "rolldown": "catalog:",
         "tsdown": "catalog:",
         "vitest": "catalog:",
@@ -627,6 +625,16 @@
     },
     "examples/aws-lambda-httpapi": {
       "name": "aws-lambda-httpapi",
+      "version": "0.0.0",
+      "dependencies": {
+        "@distilled.cloud/aws": "catalog:",
+        "@effect/platform-node": "catalog:",
+        "alchemy": "workspace:*",
+        "effect": "catalog:",
+      },
+    },
+    "examples/aws-lambda-opentelemetry": {
+      "name": "aws-lambda-opentelemetry",
       "version": "0.0.0",
       "dependencies": {
         "@distilled.cloud/aws": "catalog:",
@@ -2584,8 +2592,6 @@
 
     "@types/hast": ["@types/hast@3.0.5", "", { "dependencies": { "@types/unist": "*" } }, "sha512-rp/ezSWaD1m44dPKICGhiskI13nVr7qTloFwDa/IYkhhf5nzwP+zIQcIJh3WIFSBOy/H1PzB40jPjMDksN4F+g=="],
 
-    "@types/http-cache-semantics": ["@types/http-cache-semantics@4.2.0", "", {}, "sha512-L3LgimLHXtGkWikKnsPg0/VFx9OGZaC+eN1u4r+OB1XRqH3meBIAVC2zr1WdMH+RHmnRkqliQAOHNJ/E0j/e0Q=="],
-
     "@types/js-yaml": ["@types/js-yaml@4.0.9", "", {}, "sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg=="],
 
     "@types/jsesc": ["@types/jsesc@2.5.1", "", {}, "sha512-9VN+6yxLOPLOav+7PwjZbxiID2bVaeq0ED4qSQmdQTdjnXJSaCVKTR58t15oqH1H5t8Ng2ZX1SabJVoN9Q34bw=="],
@@ -2883,6 +2889,8 @@
     "aws-lambda": ["aws-lambda@workspace:examples/aws-lambda"],
 
     "aws-lambda-httpapi": ["aws-lambda-httpapi@workspace:examples/aws-lambda-httpapi"],
+
+    "aws-lambda-opentelemetry": ["aws-lambda-opentelemetry@workspace:examples/aws-lambda-opentelemetry"],
 
     "aws-lambda-rpc": ["aws-lambda-rpc@workspace:examples/aws-lambda-rpc"],
 
