@@ -13,11 +13,28 @@ const testOptions = { providers: AWS.providers() };
 const { test, beforeAll, afterAll } = Test.make(testOptions);
 const sharedStack = Core.scratchStack(testOptions, "SESBindings");
 
-// The account is in the SES sandbox with no verified identities: sends from
-// the fixture's (unverified) domain identity fail with the typed
-// MessageRejected tag — that IS the ungated assertion. Set AWS_TEST_SES_FROM
-// to a verified from-address to exercise the success path.
+// A verified from-address on the account. It does NOT unlock a successful
+// `SendEmail` — that binding is scoped to the identity the fixture binds — but
+// the suppression-list write plane needs production access, and an account
+// that has a verified sender is invariably out of the sandbox.
 const VERIFIED_FROM = process.env.AWS_TEST_SES_FROM;
+
+// Names an existing custom verification email template. Creating one requires
+// a verified sender, so the fixture cannot declare it — pass a template you
+// created out of band to exercise the real send.
+const CVE_TEMPLATE = process.env.AWS_TEST_SES_CVE_TEMPLATE;
+
+// Recipient for the real custom-verification send. Defaults to the mailbox
+// simulator; override only with an address you own.
+const CVE_RECIPIENT = process.env.AWS_TEST_SES_CVE_RECIPIENT;
+
+// Never skips a test — tightens it. With Virtual Deliverability Manager
+// enabled the insight bindings must return real data rather than the typed
+// rejection a VDM-less account gives.
+const VDM_ENABLED = !!process.env.AWS_TEST_SES_VDM;
+
+// The SES mailbox simulator accepts mail without affecting reputation.
+const SIMULATOR = "success@simulator.amazonses.com";
 
 // A syntactically valid address at the fixture's (unverified) domain
 // identity — SES rejects it with the typed MessageRejected tag in sandbox.
@@ -164,39 +181,35 @@ describe("SES Bindings", () => {
         }),
     );
 
-    test.provider.skipIf(!VERIFIED_FROM)(
-      "sends to the mailbox simulator from a verified identity (AWS_TEST_SES_FROM)",
+    // `SendEmail` is identity-scoped: the binding grants ses:SendEmail only on
+    // the ARN of the identity it was bound to (plus that domain's addresses,
+    // its templates, and the configuration set). A sender outside that
+    // identity is refused by IAM before SES ever evaluates the message —
+    // including one that is verified on the account. Verified in a live
+    // production account with a verified sender, where the send returns
+    // AccessDeniedException rather than a MessageId.
+    //
+    // Exercising a genuine successful send therefore needs an identity the
+    // FIXTURE binds and that is really verified, i.e. a domain under our
+    // control with DKIM published — the setup Receiving.smoke.test.ts builds
+    // on the standing Cloudflare test zone. AWS_TEST_SES_FROM alone cannot
+    // grant it.
+    test.provider(
+      "a sender outside the bound identity is denied by the scoped IAM policy",
       (_stack) =>
         Effect.gen(function* () {
+          const outsider = encodeURIComponent(
+            "sender@not-the-bound-domain.test",
+          );
           const response = (yield* send(
-            HttpClientRequest.post(
-              `${baseUrl}/send-simple?from=${encodeURIComponent(VERIFIED_FROM!)}`,
-            ),
-          ).pipe(Effect.flatMap((r) => r.json))) as {
-            messageId?: string;
-            error?: string;
-            message?: string;
-          };
-
-          expect(response.error).toBeUndefined();
-          expect(response.messageId).toBeTruthy();
-        }),
-    );
-
-    test.provider.skipIf(!VERIFIED_FROM)(
-      "sends without a configuration set (AWS_TEST_SES_FROM)",
-      (_stack) =>
-        Effect.gen(function* () {
-          const response = (yield* send(
-            HttpClientRequest.post(
-              `${baseUrl}/send-plain?from=${encodeURIComponent(VERIFIED_FROM!)}`,
-            ),
+            HttpClientRequest.post(`${baseUrl}/send-simple?from=${outsider}`),
           ).pipe(Effect.flatMap((r) => r.json))) as {
             messageId?: string;
             error?: string;
           };
-          expect(response.error).toBeUndefined();
-          expect(response.messageId).toBeTruthy();
+
+          expect(response.error).toBe("AccessDeniedException");
+          expect(response.messageId).toBeUndefined();
         }),
     );
   });
@@ -422,6 +435,161 @@ describe("SES Bindings", () => {
           };
           expect(response.error).toBeUndefined();
           expect(response.messageId).toBeTruthy();
+        }),
+    );
+  });
+
+  describe("SendCustomVerificationEmail", () => {
+    // The unknown-template case never leaves SES, so its recipient is
+    // irrelevant. The gated case sends for real, so it goes to the mailbox
+    // simulator, which accepts mail without touching reputation — an address
+    // at the fixture's example.com domain would hard-bounce.
+    const sendCustomVerification = (template?: string) => {
+      const email = encodeURIComponent(
+        template
+          ? (CVE_RECIPIENT ?? SIMULATOR)
+          : "verify-target@ses-bindings.alchemy-test.example.com",
+      );
+      const query = template
+        ? `?email=${email}&template=${encodeURIComponent(template)}`
+        : `?email=${email}`;
+      return send(
+        HttpClientRequest.post(`${baseUrl}/send-custom-verification${query}`),
+      ).pipe(Effect.flatMap((r) => r.json)) as Effect.Effect<
+        { messageId?: string; error?: string; message?: string },
+        any,
+        any
+      >;
+    };
+
+    test.provider(
+      "an unknown template surfaces a typed SES error through the binding",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = yield* sendCustomVerification();
+
+          // The fixture declares no template — SES rejects
+          // CreateCustomVerificationEmailTemplate unless its sender is already
+          // verified, which a bare account has none of. So the request names a
+          // template that does not resolve and SES answers with a typed error,
+          // which still proves ses:SendCustomVerificationEmail IAM + request
+          // marshalling reach the deployed Lambda.
+          expect(typeof response.error).toBe("string");
+          expect(response.messageId).toBeUndefined();
+        }),
+    );
+
+    test.provider.skipIf(!CVE_TEMPLATE)(
+      "sends through a real template (AWS_TEST_SES_CVE_TEMPLATE)",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = yield* sendCustomVerification(CVE_TEMPLATE);
+          expect(response.error).toBeUndefined();
+          expect(response.messageId).toBeTruthy();
+        }),
+    );
+  });
+
+  describe("GetMessageInsights", () => {
+    test.provider(
+      "looking up a non-existent message id surfaces a typed SES error through the binding",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = (yield* send(
+            HttpClientRequest.get(`${baseUrl}/message-insights`),
+          ).pipe(Effect.flatMap((r) => r.json))) as {
+            messageId?: string;
+            error?: string;
+          };
+
+          // No real send backs the fabricated MessageId, so SES rejects it
+          // with a typed error — NotFoundException, or BadRequestException when
+          // VDM is disabled on the account. That proves the binding wires
+          // ses:GetMessageInsights IAM + request marshalling into the Lambda.
+          // With VDM on (AWS_TEST_SES_VDM=1) the tag is unambiguous.
+          expect(typeof response.error).toBe("string");
+          expect(response.messageId).toBeUndefined();
+          if (VDM_ENABLED) expect(response.error).toBe("NotFoundException");
+        }),
+    );
+  });
+
+  describe("BatchGetMetricData", () => {
+    test.provider(
+      "requesting a metric time-series round-trips through the binding",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = (yield* send(
+            HttpClientRequest.post(`${baseUrl}/metric-data`),
+          ).pipe(Effect.flatMap((r) => r.json))) as {
+            results?: number;
+            error?: string;
+          };
+
+          // With VDM enabled SES returns a (possibly empty) Results array; with
+          // VDM disabled it rejects with a typed BadRequestException. Both
+          // prove the binding wires ses:BatchGetMetricData IAM + the query
+          // payload into the deployed Lambda. Set AWS_TEST_SES_VDM=1 on a
+          // VDM-enabled account to demand the series instead.
+          if (VDM_ENABLED) {
+            expect(response.error).toBeUndefined();
+            expect(typeof response.results).toBe("number");
+          } else if (response.error === undefined) {
+            expect(typeof response.results).toBe("number");
+          } else {
+            expect(typeof response.error).toBe("string");
+          }
+        }),
+    );
+  });
+
+  describe("GetDomainStatisticsReport", () => {
+    test.provider(
+      "requesting a domain deliverability report round-trips through the binding",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = (yield* send(
+            HttpClientRequest.get(`${baseUrl}/domain-statistics`),
+          ).pipe(Effect.flatMap((r) => r.json))) as {
+            days?: number;
+            error?: string;
+          };
+
+          // Without the deliverability-dashboard subscription (or for a domain
+          // with no data) SES rejects with a typed error; with it, it returns
+          // DailyVolumes. Both prove the binding wires
+          // ses:GetDomainStatisticsReport IAM + the request into the Lambda.
+          // Live testing should pin the tag for the account's subscription.
+          if (response.error === undefined) {
+            expect(typeof response.days).toBe("number");
+          } else {
+            expect(typeof response.error).toBe("string");
+          }
+        }),
+    );
+  });
+
+  describe("GetBlacklistReports", () => {
+    test.provider(
+      "requesting blacklist reports for dedicated IPs round-trips through the binding",
+      (_stack) =>
+        Effect.gen(function* () {
+          const response = (yield* send(
+            HttpClientRequest.get(`${baseUrl}/blacklist-reports`),
+          ).pipe(Effect.flatMap((r) => r.json))) as {
+            ips?: string[];
+            error?: string;
+          };
+
+          // SES returns a BlacklistReport keyed by the requested IPs (empty
+          // when none are blacklisted, or the account owns no dedicated IPs).
+          // A typed error is also acceptable — either proves the binding wires
+          // ses:GetBlacklistReports IAM + the request into the deployed Lambda.
+          if (response.error === undefined) {
+            expect(Array.isArray(response.ips)).toBe(true);
+          } else {
+            expect(typeof response.error).toBe("string");
+          }
         }),
     );
   });
