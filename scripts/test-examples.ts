@@ -7,6 +7,7 @@ const examples = [
   "./examples/cloudflare-tanstack-start-solid",
   "./examples/cloudflare-neon-drizzle",
   "./examples/aws-lambda",
+  "./examples/aws-lambda-opentelemetry",
 ] as const;
 
 type CommandResult = {
