@@ -70,6 +70,26 @@ const readVersion = (url: string, expected: string, platform: string) =>
     }),
   );
 
+const envHandlerSource = `
+import * as Lambda from "alchemy/AWS/Lambda";
+import * as Effect from "effect/Effect";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+
+class LiveEnv extends Lambda.Function<Lambda.Function>()("LiveLambdaEnv") {}
+
+export default LiveEnv.make(
+  { main: import.meta.url, url: true },
+  Effect.succeed({
+    fetch: Effect.succeed(
+      HttpServerResponse.jsonUnsafe({
+        marker: process.env.LIVE_LOCAL_MARKER,
+        largeLength: process.env.LIVE_LOCAL_LARGE?.length,
+      }),
+    ),
+  }),
+);
+`;
+
 /**
  * Vertical tracer for Live Lambda:
  *
@@ -153,6 +173,59 @@ test.provider(
       expect(
         yield* readVersion(`${restored.functionUrl}tracer`, "v2", "linux"),
       ).toEqual({ version: "v2", path: "/tracer", platform: "linux" });
+
+      yield* stack.destroy();
+    }),
+  { timeout: 220_000 },
+);
+
+class LiveEnv extends AWS.Lambda.Function<AWS.Lambda.Function>()(
+  "LiveLambdaEnv",
+) {}
+
+test.provider(
+  "injects an in-budget app env locally without consuming the bridge Lambda env budget",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixtureDir = path.resolve(
+        import.meta.dirname,
+        "../../..",
+        ".alchemy",
+        "test",
+        `live-lambda-env-${crypto.randomUUID()}`,
+      );
+      yield* fs.makeDirectory(fixtureDir, { recursive: true });
+      yield* Effect.addFinalizer(() =>
+        fs.remove(fixtureDir, { recursive: true }).pipe(Effect.ignore),
+      );
+      const main = path.join(fixtureDir, "handler.ts");
+      yield* fs.writeFileString(main, envHandlerSource);
+
+      yield* stack.destroy();
+      const deployed = yield* stack.deploy(
+        LiveEnv.pipe(
+          Effect.provide(
+            LiveEnv.make(
+              {
+                main,
+                url: true,
+                env: {
+                  LIVE_LOCAL_MARKER: "local-target",
+                  LIVE_LOCAL_LARGE: "x".repeat(3_000),
+                },
+              },
+              Effect.succeed({}) as any,
+            ),
+          ),
+        ),
+      );
+
+      const body = yield* HttpClient.get(deployed.functionUrl!).pipe(
+        Effect.flatMap((response) => response.json),
+      );
+      expect(body).toEqual({ marker: "local-target", largeLength: 3_000 });
 
       yield* stack.destroy();
     }),

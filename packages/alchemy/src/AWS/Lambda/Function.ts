@@ -6,12 +6,15 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Region } from "@distilled.cloud/aws/Region";
 import type * as lambda from "aws-lambda";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -47,6 +50,7 @@ import * as Serverless from "../../Serverless/index.ts";
 import { buildEventTelemetry } from "../../Telemetry.ts";
 import { Stack } from "../../Stack.ts";
 import { Stage } from "../../Stage.ts";
+import { CloudflareEnvironment } from "../../Cloudflare/CloudflareEnvironment.ts";
 import {
   createInternalTags,
   createTagsList,
@@ -332,6 +336,157 @@ export const toTimeoutSeconds = (
       : timeout;
   const seconds = Duration.toSeconds(input);
   return Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : undefined;
+};
+
+/** AWS Lambda's aggregate limit for configured environment variables. */
+export const LambdaEnvironmentMaxBytes = 4 * 1024;
+
+export interface LambdaEnvironmentEntrySize {
+  readonly key: string;
+  readonly bytes: number;
+}
+
+/**
+ * Raised before a Lambda mutation when its serialized environment is larger
+ * than the AWS 4 KiB aggregate limit. Values are deliberately omitted: the
+ * environment frequently contains credentials.
+ */
+export class LambdaEnvironmentTooLarge extends Data.TaggedError(
+  "LambdaEnvironmentTooLarge",
+)<{
+  readonly message: string;
+  readonly sizeBytes: number;
+  readonly limitBytes: number;
+  readonly largestEntries: ReadonlyArray<LambdaEnvironmentEntrySize>;
+}> {}
+
+export type LambdaEnvironment = Record<string, any>;
+
+const resolveLambdaEnvironmentValue = (value: unknown): unknown =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value;
+
+/**
+ * Produces the same compact JSON map that Lambda receives after redacted
+ * values have been unwrapped by the AWS client. Undefined entries are omitted
+ * by the SDK schema and do not consume Lambda's configured-env budget.
+ */
+const serializeLambdaEnvironment = (
+  environment: LambdaEnvironment | undefined,
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(environment ?? {}).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : [[key, resolveLambdaEnvironmentValue(value)] as const],
+    ),
+  );
+
+/** Resolve redacted values before passing an environment to a child process. */
+export const materializeLambdaEnvironment = (
+  environment: LambdaEnvironment | undefined,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(serializeLambdaEnvironment(environment)).map(
+      ([key, value]) => [key, String(value)],
+    ),
+  );
+
+const encodedSize = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+/**
+ * Returns the UTF-8 size of the compact environment-variable map Lambda
+ * receives. This includes JSON syntax and escapes as well as keys and values.
+ */
+export const lambdaEnvironmentSize = (
+  environment: LambdaEnvironment | undefined,
+): number => encodedSize(serializeLambdaEnvironment(environment));
+
+const lambdaEnvironmentLargestEntries = (
+  environment: LambdaEnvironment | undefined,
+): ReadonlyArray<LambdaEnvironmentEntrySize> =>
+  Object.entries(serializeLambdaEnvironment(environment))
+    .map(([key, value]) => ({
+      key,
+      // A single map member without the enclosing object braces. This is a
+      // diagnostic contribution, not a reconstruction of a secret value.
+      bytes: encodedSize({ [key]: value }) - 2,
+    }))
+    .sort(
+      (left, right) =>
+        right.bytes - left.bytes || left.key.localeCompare(right.key),
+    )
+    .slice(0, 5);
+
+/**
+ * Fails before any Lambda API call if AWS would reject the complete runtime
+ * environment. Local Live Lambda calls this against the application env
+ * before replacing it with its small bridge env.
+ */
+export const validateLambdaEnvironment = (
+  environment: LambdaEnvironment | undefined,
+): Effect.Effect<void, LambdaEnvironmentTooLarge> => {
+  const sizeBytes = lambdaEnvironmentSize(environment);
+  if (sizeBytes <= LambdaEnvironmentMaxBytes) {
+    return Effect.void;
+  }
+  const largestEntries = lambdaEnvironmentLargestEntries(environment);
+  return Effect.fail(
+    new LambdaEnvironmentTooLarge({
+      sizeBytes,
+      limitBytes: LambdaEnvironmentMaxBytes,
+      largestEntries,
+      message:
+        `Lambda environment is ${sizeBytes} bytes; AWS limits the aggregate to ${LambdaEnvironmentMaxBytes} bytes. ` +
+        `Largest entries: ${largestEntries.map(({ key, bytes }) => `${key} (${bytes} bytes)`).join(", ")}.`,
+    }),
+  );
+};
+
+const withNodeSourceMaps = (
+  environment: LambdaEnvironment | undefined,
+  props: FunctionProps,
+): LambdaEnvironment | undefined => {
+  const sourcemap = props.build?.output?.sourcemap ?? true;
+  const uploadSourceMap = props.uploadSourceMap ?? true;
+  const shouldEnableSourceMaps =
+    sourcemap === "inline" ||
+    (uploadSourceMap && (sourcemap === true || sourcemap === "hidden"));
+
+  if (!shouldEnableSourceMaps) {
+    return environment;
+  }
+
+  const current = environment?.NODE_OPTIONS;
+  if (current?.split(/\s+/).includes("--enable-source-maps")) {
+    return environment;
+  }
+
+  return {
+    ...environment,
+    NODE_OPTIONS: current
+      ? `${current} --enable-source-maps`
+      : "--enable-source-maps",
+  };
+};
+
+/** Explicit Function env values override same-named binding values. */
+export const mergeFunctionEnvironment = (
+  bindingEnvironment: LambdaEnvironment | undefined,
+  props: Pick<FunctionProps, "env">,
+): LambdaEnvironment => ({ ...bindingEnvironment, ...props.env });
+
+/**
+ * Resolves the exact environment that the normal Lambda provider sends to
+ * AWS, including Alchemy's runtime identity and Node source-map setting.
+ */
+export const resolveFunctionEnvironment = (
+  environment: LambdaEnvironment | undefined,
+  props: FunctionProps,
+  alchemyEnvironment: Record<string, string>,
+): LambdaEnvironment => {
+  const runtimeEnvironment = withNodeSourceMaps(environment, props);
+  return { ...runtimeEnvironment, ...alchemyEnvironment };
 };
 
 export interface Function extends Resource<
@@ -948,7 +1103,11 @@ export const resolveFunctionBundleConfig = Effect.fn(function* (
 import { layer as nodeServicesLayer } from "@effect/platform-node/NodeServices";
 import { Stack } from "alchemy/Stack";
 import { makeEntrypointLayer, reifyBoundConfigProvider } from "alchemy/Runtime";
+import { RuntimeContext } from "alchemy/RuntimeContext";
 import { registerLambdaExtension } from "alchemy/AWS/Lambda/RuntimeExtension";
+import { AWSEnvironment } from "alchemy/AWS/Environment";
+import { CloudflareEnvironment } from "alchemy/Cloudflare/CloudflareEnvironment";
+import { Stage } from "alchemy/Stage";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Credentials from "@distilled.cloud/aws/Credentials";
@@ -987,10 +1146,39 @@ const stack = Layer.effect(
     }))
   )
 );
+const stage = Layer.effect(Stage, Config.string("ALCHEMY_STAGE"));
+const awsRuntime = Layer.mergeAll(Credentials.fromEnv(), Region.fromEnv());
+const awsEnvironment = Layer.effect(
+  AWSEnvironment,
+  Effect.all({
+    accountId: Config.string("ALCHEMY_AWS_ACCOUNT_ID"),
+    credentials: Credentials.Credentials,
+    region: Region.Region,
+  }).pipe(
+    Effect.map(({ accountId, credentials, region }) =>
+      region.pipe(
+        Effect.map((region) => ({ accountId, credentials, region })),
+      ),
+    ),
+  ),
+).pipe(Layer.provide(awsRuntime));
+const cloudflareEnvironment = Layer.succeed(
+  CloudflareEnvironment,
+  Config.string("ALCHEMY_CLOUDFLARE_ACCOUNT_ID").pipe(
+    Effect.map((accountId) => ({
+      type: "runtime",
+      accountId,
+      source: { type: "runtime" },
+    } as const)),
+    Effect.orDie,
+  ),
+);
 const entryLayer = layer.pipe(
   Layer.provideMerge(stack),
-  Layer.provideMerge(Credentials.fromEnv()),
-  Layer.provideMerge(Region.fromEnv()),
+  Layer.provideMerge(stage),
+  Layer.provideMerge(awsRuntime),
+  Layer.provideMerge(awsEnvironment),
+  Layer.provideMerge(cloudflareEnvironment),
   Layer.provideMerge(platform),
   Layer.provideMerge(
     Layer.succeed(
@@ -1008,8 +1196,14 @@ const entryLayer = layer.pipe(
 const handlerEffect = Layer.buildWithScope(entryLayer, instanceScope).pipe(
   Effect.flatMap((context) =>
     tag.pipe(
-      Effect.flatMap(func => func.RuntimeContext.exports),
-      Effect.flatMap(exports => exports.handler),
+      Effect.flatMap(func =>
+        func.RuntimeContext.exports.pipe(
+          Effect.flatMap(exports => exports.handler),
+          Effect.provide(
+            Layer.succeed(RuntimeContext, func.RuntimeContext)
+          ),
+        )
+      ),
       Effect.provideContext(context),
     )
   ),
@@ -1031,20 +1225,6 @@ export default handler;
     cwd,
     external,
     platform: "node",
-    resolve: {
-      ...userInputOptions.resolve,
-      conditionNames: [
-        "bun",
-        ...(
-          userInputOptions.resolve?.conditionNames ?? [
-            "node",
-            "import",
-            "module",
-            "default",
-          ]
-        ).filter((condition) => condition !== "bun"),
-      ],
-    },
     plugins: [userInputOptions.plugins, entryPlugin],
   };
   const outputOptions: rolldown.OutputOptions = {
@@ -1099,15 +1279,34 @@ export type FunctionLifecycleInput<
   Extract<Provider.ProviderService<Function>[K], (...args: any) => any>
 >[0];
 
+/** Internal identity required when an Effect Function init graph replays. */
+export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
+  const stack = yield* Stack;
+  const { accountId } = yield* AWSEnvironment.current;
+  const cloudflareEnvironment = yield* Effect.serviceOption(
+    CloudflareEnvironment,
+  );
+  const configuredCloudflareAccountId = yield* Config.string(
+    "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
+  ).pipe(Config.option, Effect.orDie);
+  const cloudflareAccountId = Option.isSome(cloudflareEnvironment)
+    ? (yield* cloudflareEnvironment.value).accountId
+    : Option.getOrUndefined(configuredCloudflareAccountId);
+
+  return {
+    ALCHEMY_AWS_ACCOUNT_ID: accountId,
+    ...(cloudflareAccountId === undefined
+      ? {}
+      : { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId }),
+    ALCHEMY_STACK_NAME: stack.name,
+    ALCHEMY_STAGE: stack.stage,
+    ALCHEMY_PHASE: "runtime",
+  };
+});
+
 export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
   Effect.gen(function* () {
-    const stack = yield* Stack;
-
-    const alchemyEnv = {
-      ALCHEMY_STACK_NAME: stack.name,
-      ALCHEMY_STAGE: stack.stage,
-      ALCHEMY_PHASE: "runtime",
-    };
+    const alchemyEnv = yield* resolveFunctionRuntimeEnv;
 
     const createFunctionName = (id: string, functionName: string | undefined) =>
       Effect.gen(function* () {
@@ -1399,33 +1598,6 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
 
     const bundleCode = options?.bundleCode ?? defaultBundleCode;
 
-    const withNodeSourceMaps = (
-      env: Record<string, string> | undefined,
-      props: FunctionProps,
-    ) => {
-      const sourcemap = props.build?.output?.sourcemap ?? true;
-      const uploadSourceMap = props.uploadSourceMap ?? true;
-      const shouldEnableSourceMaps =
-        sourcemap === "inline" ||
-        (uploadSourceMap && (sourcemap === true || sourcemap === "hidden"));
-
-      if (!shouldEnableSourceMaps) {
-        return env;
-      }
-
-      const current = env?.NODE_OPTIONS;
-      if (current?.split(/\s+/).includes("--enable-source-maps")) {
-        return env;
-      }
-
-      return {
-        ...env,
-        NODE_OPTIONS: current
-          ? `${current} --enable-source-maps`
-          : "--enable-source-maps",
-      };
-    };
-
     const retryFunctionMutation = Effect.retry({
       while: (e: any) =>
         e._tag === "ResourceConflictException" ||
@@ -1551,6 +1723,8 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         );
 
       const tags = yield* createInternalTags(id);
+      const runtimeEnv = resolveFunctionEnvironment(env, news, alchemyEnv);
+      yield* validateLambdaEnvironment(runtimeEnv);
 
       // Try to use S3 if assets bucket is available, otherwise fall back to inline ZipFile
       const assets = (yield* Effect.serviceOption(Assets)).pipe(
@@ -1571,7 +1745,6 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
           return { ZipFile: archive } as const;
         }
       });
-      const runtimeEnv = withNodeSourceMaps(env, news);
 
       const createFunctionRequest: CreateFunctionRequest = {
         FunctionName: functionName,
@@ -1592,10 +1765,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         Layers: (news.layers ?? []).map(layerVersionArnOf),
         Environment: runtimeEnv
           ? {
-              Variables: {
-                ...runtimeEnv,
-                ...alchemyEnv,
-              },
+              Variables: runtimeEnv,
             }
           : undefined,
         Tags: tags,
@@ -2214,10 +2384,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
           roleArn,
           archive,
           hash: archiveHash,
-          env: {
-            ...env,
-            ...news.env,
-          },
+          env: mergeFunctionEnvironment(env, news),
           functionName,
           vpc,
           preferUpdate: output !== undefined,

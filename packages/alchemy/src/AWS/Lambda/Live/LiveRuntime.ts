@@ -66,12 +66,33 @@ export interface FunctionTarget {
   bundlePath: string;
   /** Export name of the handler (`default` for Effect Functions). */
   handler: string;
+  /**
+   * Binding/app env resolved on the dev side. The deployed bridge carries
+   * only the ALCHEMY_LIVE_* vars, while the separately validated application
+   * configuration is injected into the handler child here.
+   */
+  env?: Record<string, string>;
 }
 
 interface RegisteredTarget extends FunctionTarget {
   /** Bumped on every rebuild; children on an older version are recycled. */
   version: number;
 }
+
+/**
+ * Builds the local child environment without allowing application config to
+ * replace Lambda credentials or Live Lambda's control-plane variables.
+ */
+export const liveChildEnvironment = (
+  workerEnvironment: Record<string, string>,
+  target: FunctionTarget,
+): Record<string, string> => ({
+  ...target.env,
+  ...workerEnvironment,
+  ALCHEMY_LIVE_BUNDLE: target.bundlePath,
+  ALCHEMY_LIVE_HANDLER: target.handler,
+  NODE_OPTIONS: "--enable-source-maps",
+});
 
 interface Worker {
   functionId: string;
@@ -197,16 +218,7 @@ export const makeLiveLambdaRuntime = Effect.gen(function* () {
         stdout: "pipe",
         stderr: "pipe",
         detached: false,
-        env: {
-          // The deployed sandbox's environment: binding env vars, ALCHEMY_*,
-          // AWS_REGION and the execution role's credentials — so local code
-          // runs with the same configuration and permissions as the real
-          // function.
-          ...worker.environment,
-          ALCHEMY_LIVE_BUNDLE: target.bundlePath,
-          ALCHEMY_LIVE_HANDLER: target.handler,
-          NODE_OPTIONS: "--enable-source-maps",
-        },
+        env: liveChildEnvironment(worker.environment, target),
         extendEnv: true,
       },
     );

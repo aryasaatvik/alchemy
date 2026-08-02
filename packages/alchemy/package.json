@@ -79,6 +79,12 @@
       "worker": "./src/AWS/Endpoint.ts",
       "import": "./lib/AWS/Endpoint.js"
     },
+    "./AWS/Environment": {
+      "types": "./lib/AWS/Environment.d.ts",
+      "bun": "./src/AWS/Environment.ts",
+      "worker": "./src/AWS/Environment.ts",
+      "import": "./lib/AWS/Environment.js"
+    },
     "./AWS/Region": {
       "types": "./lib/AWS/Region.d.ts",
       "bun": "./src/AWS/Region.ts",
@@ -150,6 +156,12 @@
       "bun": "./src/Cloudflare/Live.ts",
       "worker": "./src/Cloudflare/Live.ts",
       "import": "./lib/Cloudflare/Live.js"
+    },
+    "./Cloudflare/CloudflareEnvironment": {
+      "types": "./lib/Cloudflare/CloudflareEnvironment.d.ts",
+      "bun": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "worker": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "import": "./lib/Cloudflare/CloudflareEnvironment.js"
     },
     "./Cloudflare/*": {
       "types": "./lib/Cloudflare/*/index.d.ts",
