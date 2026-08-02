@@ -77,10 +77,8 @@ describe("local AWS auth", () => {
   it.effect("resolves service overrides before the local endpoint", () =>
     Effect.gen(function* () {
       const endpoints = yield* Endpoint.ServiceEndpoint;
-      expect((yield* endpoints).resolve("ses")).toBe(
-        "http://samva-emulate.test/ses",
-      );
-      expect((yield* endpoints).resolve("sqs")).toBe("http://floci.test:4566");
+      expect(endpoints.resolve("ses")).toBe("http://samva-emulate.test/ses");
+      expect(endpoints.resolve("sqs")).toBe("http://floci.test:4566");
     }).pipe(
       Effect.provide(AwsEndpoint.fromEnvironment),
       Effect.provideService(

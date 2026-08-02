@@ -96,7 +96,7 @@ export interface AwsResolvedCredentials {
     sessionToken: Redacted.Redacted<string> | undefined;
   }>;
   region: string;
-  /** Applied to every AWS SDK call through {@link Endpoint.fromEnvironment}. */
+  /** Global local-endpoint fallback after operation and service overrides. */
   endpoint?: string;
   /** Applied by SigV4 service name before the global {@link endpoint}. */
   serviceEndpoints?: Readonly<Record<string, string>>;
