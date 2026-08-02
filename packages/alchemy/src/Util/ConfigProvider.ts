@@ -3,12 +3,16 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 
+/** Shell/process configuration wins; dotenv supplies only missing values. */
+export const withDotEnvFallback = (
+  dotEnv: ConfigProvider.ConfigProvider,
+  environment: ConfigProvider.ConfigProvider = ConfigProvider.fromEnv(),
+): ConfigProvider.ConfigProvider => ConfigProvider.orElse(environment, dotEnv);
+
 export const loadConfigProvider = (envFile: Option.Option<string>) => {
   if (Option.isSome(envFile)) {
     return ConfigProvider.fromDotEnv({ path: envFile.value }).pipe(
-      Effect.map((dotEnv) =>
-        ConfigProvider.orElse(dotEnv, ConfigProvider.fromEnv()),
-      ),
+      Effect.map((dotEnv) => withDotEnvFallback(dotEnv)),
     );
   }
   return Effect.gen(function* () {
@@ -17,9 +21,8 @@ export const loadConfigProvider = (envFile: Option.Option<string>) => {
     if (!exists) {
       return ConfigProvider.fromEnv();
     }
-    return ConfigProvider.orElse(
+    return withDotEnvFallback(
       yield* ConfigProvider.fromDotEnv({ path: ".env" }),
-      ConfigProvider.fromEnv(),
     );
   });
 };
