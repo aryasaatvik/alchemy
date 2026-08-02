@@ -5,6 +5,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { AWSEnvironment } from "./Environment.ts";
@@ -85,11 +86,17 @@ export const AssetsLive = Layer.effect(
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.die(
-              new Error(
-                "Assets bucket not found. Run 'alchemy aws bootstrap' to create it.",
-              ),
-            ),
+            Effect.gen(function* () {
+              const environment = yield* AWSEnvironment.current;
+              if (!environment.endpoint) {
+                return yield* Effect.die(
+                  new Error(
+                    "Assets bucket not found. Run 'alchemy aws bootstrap' to create it.",
+                  ),
+                );
+              }
+              return yield* createAssetsBucket;
+            }),
           onSome: (bucketName) => Effect.succeed(bucketName),
         }),
       ),
@@ -232,4 +239,41 @@ export const ensureAssetsBucketTags = Effect.fn(function* (bucketName: string) {
       })),
     },
   });
+});
+
+/**
+ * Create the tagged assets bucket for the current account and region. This is
+ * shared by explicit bootstrap and local-emulator startup.
+ */
+export const createAssetsBucket = Effect.gen(function* () {
+  const { accountId, region } = yield* AWSEnvironment.current;
+  const bucketName = createAssetsBucketName(accountId, region);
+  yield* s3
+    .createBucket({
+      Bucket: bucketName,
+      BucketNamespace: "account-regional",
+      CreateBucketConfiguration: {
+        Tags: [{ Key: ASSETS_BUCKET_TAG, Value: "true" }],
+        ...(region === "us-east-1"
+          ? {}
+          : { LocationConstraint: region as s3.BucketLocationConstraint }),
+      },
+    })
+    .pipe(
+      Effect.catchTag("BucketAlreadyOwnedByYou", () => Effect.void),
+      Effect.retry({
+        while: (error) =>
+          error._tag === "OperationAborted" ||
+          error._tag === "ServiceUnavailable",
+        schedule: Schedule.exponential(100),
+      }),
+    );
+
+  yield* s3.headBucket({ Bucket: bucketName }).pipe(
+    Effect.retry({
+      schedule: Schedule.max([Schedule.exponential(100), Schedule.recurs(10)]),
+    }),
+  );
+  yield* Effect.logInfo(`Created assets bucket: ${bucketName}`);
+  return bucketName;
 });
