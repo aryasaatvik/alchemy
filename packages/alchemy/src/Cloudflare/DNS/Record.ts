@@ -173,6 +173,7 @@ export const Record = Resource<Record>("Cloudflare.DNS.Record", {
 export const RecordProvider = () =>
   Provider.succeed(Record, {
     stables: ["recordId", "zoneId", "type", "name"],
+    identity: ["recordId"],
 
     // Zone-scoped collection: DNS records live under `/zones/{id}/dns_records`
     // with no account-wide enumeration API. Fan out over every zone in the
@@ -214,7 +215,10 @@ export const RecordProvider = () =>
       if (o.type !== undefined && o.type !== n.type) {
         return { action: "replace" } as const;
       }
-      if (o.name !== undefined && o.name !== n.name) {
+      if (
+        o.name !== undefined &&
+        canonicalRecordName(o.name) !== canonicalRecordName(n.name)
+      ) {
         return { action: "replace" } as const;
       }
       // zoneId is Input<string>; by reconcile time both sides are
@@ -395,6 +399,10 @@ export const RecordProvider = () =>
     }),
   });
 
+/** Cloudflare stores DNS names as lowercase FQDNs without a trailing dot. */
+export const canonicalRecordName = (name: string): string =>
+  name.replace(/\.$/, "").toLowerCase();
+
 const observeById = (zoneId: string, dnsRecordId: string) =>
   Effect.gen(function* () {
     const r = yield* dns.getRecord({ zoneId, dnsRecordId }).pipe(
@@ -412,14 +420,18 @@ const observeById = (zoneId: string, dnsRecordId: string) =>
 // name first and then its zone-qualified form. Used both for the adoption path
 // and to surface a conflict when the caller hasn't opted into adoption.
 const findByNameType = (zoneId: string, name: string, type: RecordType) =>
-  findExactByNameType(zoneId, name, type).pipe(
+  findExactByNameType(zoneId, canonicalRecordName(name), type).pipe(
     Effect.flatMap((found) => {
       if (found) return Effect.succeed(found);
 
       return zones.getZone({ zoneId }).pipe(
         Effect.flatMap((zone) => {
-          const normalizedName = normalizeRecordName(name, zone.name);
-          return normalizedName === name
+          const canonicalName = canonicalRecordName(name);
+          const normalizedName = normalizeRecordName(
+            canonicalName,
+            canonicalRecordName(zone.name),
+          );
+          return normalizedName === canonicalName
             ? Effect.succeed(undefined)
             : findExactByNameType(zoneId, normalizedName, type);
         }),
@@ -437,7 +449,12 @@ const findExactByNameType = (zoneId: string, name: string, type: RecordType) =>
     .pipe(
       Stream.runCollect,
       Effect.map((chunk) =>
-        Array.from(chunk).find((r) => r.name === name && r.type === type),
+        Array.from(chunk).find(
+          (r) =>
+            r.name !== undefined &&
+            canonicalRecordName(r.name) === canonicalRecordName(name) &&
+            r.type === type,
+        ),
       ),
       Effect.map((found) =>
         found === undefined
