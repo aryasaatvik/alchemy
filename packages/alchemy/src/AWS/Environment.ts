@@ -7,13 +7,16 @@ import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { getAuthProvider } from "../Auth/AuthProvider.ts";
 import { ALCHEMY_PROFILE, AlchemyProfile } from "../Auth/Profile.ts";
 import {
   AWS_AUTH_PROVIDER_NAME,
   type AwsAuthConfig,
   type AwsResolvedCredentials,
+  localAwsCredentials,
 } from "./AuthProvider.ts";
+import { ensureLocalEmulator } from "./LocalEmulator.ts";
 
 export const AWS_PROFILE = Config.string("AWS_PROFILE").pipe(
   Config.withDefault("default"),
@@ -64,6 +67,30 @@ export class AWSEnvironment extends Context.Service<
 export const Default = Layer.effect(
   AWSEnvironment,
   Effect.gen(function* () {
+    // An explicit endpoint is a target selection, not an ambient profile
+    // override. This lets a supervisor derive a worktree-local Floci account
+    // without writing to the developer's shared Alchemy profile, while an
+    // ordinary deploy keeps its existing profile-driven identity.
+    const endpoint = yield* Config.string("AWS_ENDPOINT_URL").pipe(
+      Config.option,
+    );
+    if (Option.isSome(endpoint)) {
+      const accountId = yield* AWS_ACCOUNT_ID;
+      const region = yield* AWS_REGION;
+      const local = yield* localAwsCredentials({
+        method: "local",
+        endpoint: endpoint.value,
+        accountId,
+        region,
+        autoStart: false,
+      });
+      yield* ensureLocalEmulator({
+        endpoint: endpoint.value,
+        autoStart: false,
+      });
+      return local;
+    }
+
     const profile = yield* AlchemyProfile;
     const auth = yield* getAuthProvider<AwsAuthConfig, AwsResolvedCredentials>(
       AWS_AUTH_PROVIDER_NAME,
