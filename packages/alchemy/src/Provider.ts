@@ -257,6 +257,18 @@ export interface ProviderService<
    * Properties that are always stable across any update.
    */
   stables?: Extract<keyof Res["Attributes"], string>[];
+  /**
+   * Output properties that uniquely identify the physical resource.
+   *
+   * Replacement recovery can converge onto the same physical object as the
+   * previous generation (for example, when a provider finds the result of an
+   * interrupted create). When every declared identity property matches, the
+   * engine drops the duplicate state generation without deleting the object.
+   *
+   * Unlike {@link stables}, these keys describe provider-side identity, not
+   * which outputs can remain stable for dependency planning.
+   */
+  identity?: Extract<keyof Res["Attributes"], string>[];
   diff?(input: {
     id: string;
     /**

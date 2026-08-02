@@ -154,6 +154,8 @@ export interface NoopUpdate<
   R extends ResourceLike = ResourceLike,
 > extends BaseNode<R> {
   action: "noop";
+  /** Desired inputs retained so apply-time convergence can re-evaluate noops. */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1215,6 +1217,7 @@ export const make = <A>(
             } else {
               return Node<NoopUpdate>({
                 action: "noop",
+                props: news,
                 state: oldState,
               });
             }

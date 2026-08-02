@@ -1449,7 +1449,6 @@ const converge = Effect.fn(function* (
     let anyUpdated = false;
 
     for (const [fqn, node] of Object.entries(plan.resources)) {
-      if (node.action === "noop") continue;
       if (!tracker[fqn]) continue;
 
       const outputs = Object.fromEntries(
@@ -1920,9 +1919,19 @@ const collectGarbage = Effect.fn(function* (
             const retainOldGeneration =
               !isDeleteNode(node) && node.removalPolicy === "retain";
 
+            const reusesCurrentPhysicalResource =
+              !isDeleteNode(node) &&
+              providerMode === node.providerMode &&
+              hasSamePhysicalIdentity(provider.identity, node.attr, attr);
+
             if (retainOldGeneration) {
               yield* scopedSession.note(
                 "Retaining replaced resource (removal policy: retain)...",
+              );
+            } else if (reusesCurrentPhysicalResource) {
+              yield* scopedSession.note(
+                "Replacement resolved to the same physical resource; " +
+                  "dropping the duplicate state generation without deleting it.",
               );
             }
 
@@ -2016,7 +2025,11 @@ const collectGarbage = Effect.fn(function* (
               });
             }
 
-            if (attr !== undefined && !retainOldGeneration) {
+            if (
+              attr !== undefined &&
+              !retainOldGeneration &&
+              !reusesCurrentPhysicalResource
+            ) {
               yield* provider
                 .delete({
                   id: logicalId,
@@ -2154,6 +2167,23 @@ const collectGarbage = Effect.fn(function* (
     );
   }
 });
+
+/** @internal */
+export const hasSamePhysicalIdentity = (
+  identity: readonly PropertyKey[] | undefined,
+  current: Record<PropertyKey, unknown> | undefined,
+  previous: Record<PropertyKey, unknown> | undefined,
+): boolean =>
+  identity !== undefined &&
+  identity.length > 0 &&
+  current !== undefined &&
+  previous !== undefined &&
+  identity.every(
+    (key) =>
+      current[key] !== undefined &&
+      previous[key] !== undefined &&
+      Object.is(current[key], previous[key]),
+  );
 
 const excludeDeletedBindings = (
   bindings: ReadonlyArray<ResourceBinding & { action?: string }>,

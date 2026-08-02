@@ -1307,6 +1307,26 @@ describe("prop-flow convergence", () => {
   );
 
   test.provider(
+    "planned noops should converge to an upstream replacement's final value",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string, replaceKey: string) =>
+          Effect.gen(function* () {
+            const A = yield* PhasedTarget("A", { desired, replaceKey });
+            const B = yield* TestResource("B", { string: A.value });
+            return { A, B };
+          });
+
+        yield* program("old-a", "v1").pipe(stack.deploy);
+
+        const output = yield* program("new-a", "v2").pipe(stack.deploy);
+
+        expect(output.A.value).toEqual("new-a");
+        expect(output.B.string).toEqual("new-a");
+      }),
+  );
+
+  test.provider(
     "stale precreate values should not propagate transitively",
     (stack) =>
       Effect.gen(function* () {
