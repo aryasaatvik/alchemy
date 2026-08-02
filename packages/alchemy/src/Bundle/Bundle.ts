@@ -4,6 +4,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import assert from "node:assert";
+import { fileURLToPath } from "node:url";
 import type * as rolldown from "rolldown";
 import { sha256, sha256Object } from "../Util/sha256.ts";
 import {
@@ -274,6 +275,28 @@ export const watch = (
 const ENTRY_PREFIX = "\0virtual:alchemy-entry:";
 // oxlint-disable-next-line no-control-regex
 const ENTRY_REGEX = /^\0virtual:alchemy-entry:/;
+const ALCHEMY_PRIVATE_DEPENDENCY_REGEX = /^@distilled\.cloud\//;
+
+/**
+ * Resolve Alchemy's private dependencies from Alchemy's own package
+ * installation.
+ *
+ * A virtual module has no filesystem location, and Alchemy's bundled runtime
+ * packages may intentionally contain source-only private packages. Resolving
+ * either through the consumer's package graph only works when the package
+ * manager happens to hoist those dependencies. Peer dependencies such as
+ * Effect are deliberately not handled here: they must continue to resolve from
+ * the consumer's graph so the runtime has a single Effect identity.
+ */
+const selfResolvePlugin = (): rolldown.Plugin => ({
+  name: "alchemy:self-resolve",
+  resolveId: {
+    filter: { id: ALCHEMY_PRIVATE_DEPENDENCY_REGEX },
+    handler(source) {
+      return fileURLToPath(import.meta.resolve(source));
+    },
+  },
+});
 
 export const virtualEntryPlugin = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -367,6 +390,7 @@ async function builtInPlugins(
           extra.bundleAnalyzer === true ? {} : extra.bundleAnalyzer,
         )
       : undefined,
+    selfResolvePlugin(),
     extra?.pure !== false ? purePlugin(extra?.pure ?? {}) : undefined,
     rawPlugin(),
   ];
