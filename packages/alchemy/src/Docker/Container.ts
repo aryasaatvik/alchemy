@@ -86,7 +86,10 @@ export declare namespace Container {
     aliases?: string[];
   }
   interface Healthcheck {
-    /** Command to run for health checks. */
+    /**
+     * Shell command to run for health checks. Array form joins command and
+     * arguments; optional Dockerfile-style `CMD` / `CMD-SHELL` is ignored.
+     */
     cmd: string[] | string;
     /** Time between checks. */
     interval?: Duration.Input;
@@ -428,7 +431,13 @@ const makeCreateArgs = (id: string, news: ContainerProps, instanceId: string) =>
         ...(news.healthcheck
           ? {
               "health-cmd": Array.isArray(news.healthcheck.cmd)
-                ? news.healthcheck.cmd.join(" ")
+                ? news.healthcheck.cmd
+                    .filter((part, index) =>
+                      index === 0
+                        ? part !== "CMD" && part !== "CMD-SHELL"
+                        : true,
+                    )
+                    .join(" ")
                 : news.healthcheck.cmd,
               "health-interval": normalizeDuration(news.healthcheck.interval),
               "health-timeout": normalizeDuration(news.healthcheck.timeout),
@@ -463,8 +472,10 @@ const toContainerAttributes = (
   imageRef,
   ports: Object.fromEntries(
     Object.entries({
-      ...info.NetworkSettings.Ports,
       ...info.HostConfig.PortBindings,
+      // `HostConfig` retains the requested `HostPort: "0"`; runtime network
+      // settings contain Docker's assigned ephemeral port and must win.
+      ...info.NetworkSettings.Ports,
     }).flatMap(([internal, bindings]) => {
       if (!bindings?.[0]?.HostPort) return [];
       return [[internal, Number.parseInt(bindings[0].HostPort, 10)]];
