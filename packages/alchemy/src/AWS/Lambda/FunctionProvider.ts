@@ -1,8 +1,9 @@
 /**
  * First-class live/local provider selection for Lambda Functions.
  *
- * Local mode still provisions a real Lambda, but substitutes a small bridge
- * bundle and executes the user's bundle in the persistent AWS dev sidecar.
+ * Local mode provisions the ordinary Lambda resource against the configured
+ * LocalStack-compatible emulator. The live bridge remains available as an
+ * explicit provider for the separate Live Lambda development mode.
  */
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -41,12 +42,19 @@ import { LiveLambdaRuntime } from "./Live/LiveRuntime.ts";
 export const FunctionProvider = () =>
   ProviderLayer.dual(Function, {
     live: () => LiveFunctionProvider(),
-    local: () =>
-      LocalFunctionProvider().pipe(Layer.provide(localRuntimeServices())),
+    local: () => LocalEmulatorFunctionProvider(),
     modeTransition: "in-place",
   });
 
 export const LiveFunctionProvider = () =>
+  Provider.effect(Function, makeFunctionProvider());
+
+/**
+ * The normal Lambda lifecycle pointed at an account-scoped local AWS endpoint.
+ * `AWSEnvironment` provides the endpoint and credentials; keeping this as the
+ * ordinary provider exercises the same bundle/create/update path as deploys.
+ */
+export const LocalEmulatorFunctionProvider = () =>
   Provider.effect(Function, makeFunctionProvider());
 
 const usableSession = (
