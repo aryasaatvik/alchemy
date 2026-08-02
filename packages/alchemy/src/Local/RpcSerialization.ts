@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import { flow } from "effect/Function";
@@ -8,6 +9,11 @@ import * as Stream from "effect/Stream";
 import * as NodeUtil from "node:util";
 import * as Output from "../Output.ts";
 import { isRedactedMarker, type RedactedMarker } from "../RuntimeContext.ts";
+import {
+  DURATION_MARKER,
+  encodeState,
+  reviveStateRecursive,
+} from "../State/StateEncoding.ts";
 
 type RpcEffectHandler<Args extends Array<any>, Success, Error> = (
   ...args: Args
@@ -189,6 +195,9 @@ const serializeRpcArgs = (value: unknown): unknown => {
       value: Redacted.value(value),
     } satisfies RedactedMarker;
   }
+  if (Duration.isDuration(value)) {
+    return encodeState(value);
+  }
   if (Output.isOutput(value)) {
     return {
       _tag: "Output",
@@ -220,6 +229,9 @@ const deserializeRpcArgs = (value: unknown): unknown => {
     // so we need to detect them manually - Redacted.isRedacted and Output.isOutput do not work.
     if (isRedactedMarker(value)) {
       return Redacted.make(value.value);
+    } else if (DURATION_MARKER in value) {
+      const duration = reviveStateRecursive(value);
+      if (Duration.isDuration(duration)) return duration;
     } else if (
       "_tag" in value &&
       value._tag === "Output" &&

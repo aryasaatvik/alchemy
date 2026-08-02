@@ -33,6 +33,8 @@ export interface RpcSpawnPayload extends Pick<
   "alchemyContext" | "stack"
 > {
   serverEntryUrl: string;
+  /** Non-secret provider context required to bootstrap the local sidecar. */
+  environment?: Record<string, string>;
 }
 
 export const make = Effect.fn(function* ({
@@ -51,6 +53,7 @@ export const make = Effect.fn(function* ({
     serverEntryUrl,
     alchemyContext,
     stack,
+    environment: payloadEnvironment = {},
   }: RpcSpawnPayload) {
     const bin = typeof globalThis.Bun !== "undefined" ? "bun" : "node";
     const main = fileURLToPath(serverEntryUrl);
@@ -86,6 +89,7 @@ export const make = Effect.fn(function* ({
         stderr: "pipe",
         detached: false,
         env: {
+          ...payloadEnvironment,
           [RPC_SERVER_ENVIRONMENT_KEY]: JSON.stringify(environment),
         },
         extendEnv: true,

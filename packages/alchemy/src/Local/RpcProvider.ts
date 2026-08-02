@@ -96,6 +96,20 @@ type RpcProviderService<
     >
   >;
 
+export interface RpcProviderOptions<EnvironmentReq = never> {
+  /**
+   * Environment required to bootstrap the retained local sidecar. It is
+   * resolved only in the engine process; the sidecar receives the resulting
+   * strings before constructing the concrete provider. Values are never
+   * included in diagnostics.
+   */
+  readonly sidecarEnvironment?: Effect.Effect<
+    Record<string, string>,
+    never,
+    EnvironmentReq
+  >;
+}
+
 /**
  * Ensures a provider satisfies the now-required `list()` contract. If the
  * provider already implements `list` (enumerating its local runtime state) it
@@ -156,6 +170,7 @@ const withDefaultList = <
 export const effect = <
   R extends ResourceLike,
   Req = never,
+  EnvironmentReq = never,
   ReadReq = never,
   DiffReq = never,
   PrecreateReq = never,
@@ -182,6 +197,7 @@ export const effect = <
     never,
     Req
   >,
+  options?: RpcProviderOptions<EnvironmentReq>,
 ) =>
   Provider.effect(
     cls,
@@ -223,7 +239,12 @@ export const effect = <
           },
         });
       }
-      return withDefaultList(yield* client.value.get(serverEntryUrl, cls.Type));
+      const sidecarEnvironment = options?.sidecarEnvironment
+        ? yield* options.sidecarEnvironment
+        : {};
+      return withDefaultList(
+        yield* client.value.get(serverEntryUrl, cls.Type, sidecarEnvironment),
+      );
     }),
   );
 

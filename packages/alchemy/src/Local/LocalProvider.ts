@@ -288,10 +288,12 @@ export const make = <
   Config = DefaultLocalConfig<R>,
   StartR = never,
   Req = never,
+  EnvironmentReq = never,
 >(
   cls: ResourceClassLike<R> | Platform<R, any, any, any, any>,
   serverEntryUrl: string,
   spec: Effect.Effect<LocalProviderSpec<R, Config, StartR>, never, Req>,
+  options?: RpcProvider.RpcProviderOptions<EnvironmentReq>,
 ) =>
   RpcProvider.effect(
     cls,
@@ -556,6 +558,7 @@ export const make = <
       never,
       Req | Exclude<StartR, Scope.Scope>
     >,
+    options,
   );
 
 const defaultResolveConfig = <R extends ResourceLike, Config>(

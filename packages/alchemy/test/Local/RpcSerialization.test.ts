@@ -6,6 +6,7 @@ import {
 import * as Output from "@/Output.ts";
 import { describe, expect, it } from "alchemy-test";
 import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Redacted from "effect/Redacted";
@@ -107,6 +108,27 @@ describe("Local.RpcSerialization", () => {
           Redacted.make(3),
         ]);
         expect(result).toBe(6);
+      }),
+    );
+
+    it.effect("round-trips Duration arguments and results", () =>
+      Effect.gen(function* () {
+        const handlers = {
+          echo: (duration: Duration.Duration) => Effect.succeed(duration),
+        };
+        const client = roundTrip(handlers);
+        const durations = [
+          Duration.millis(60_000),
+          Duration.nanos(123_456_789n),
+          Duration.infinity,
+          Duration.negativeInfinity,
+        ];
+
+        for (const duration of durations) {
+          const result = yield* client.echo(duration);
+          expect(Duration.isDuration(result)).toBe(true);
+          expect(Duration.equals(result, duration)).toBe(true);
+        }
       }),
     );
 
