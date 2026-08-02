@@ -25,6 +25,11 @@ import {
   retryOnce,
 } from "../Auth/Env.ts";
 import * as Clank from "../Util/Clank.ts";
+import * as Endpoint from "./Endpoint.ts";
+import {
+  DEFAULT_LOCAL_ENDPOINT,
+  ensureLocalEmulator,
+} from "./LocalEmulator.ts";
 import * as Region from "./Region.ts";
 
 export const AWS_AUTH_PROVIDER_NAME = "AWS";
@@ -32,7 +37,19 @@ export const AWS_AUTH_PROVIDER_NAME = "AWS";
 export type AwsAuthConfig =
   | { method: "sso"; ssoProfile: string }
   | { method: "stored" }
-  | { method: "env" };
+  | { method: "env" }
+  | {
+      /** A LocalStack-compatible AWS emulator such as Floci. */
+      method: "local";
+      /** @default "http://localhost:4566" */
+      endpoint?: string;
+      /** @default "us-east-1" */
+      region?: string;
+      /** @default "000000000000" */
+      accountId?: string;
+      /** @default true for the default endpoint */
+      autoStart?: boolean;
+    };
 
 const options: Array<{
   value: AwsAuthConfig["method"];
@@ -54,6 +71,11 @@ const options: Array<{
     label: "Stored",
     hint: "stored in ~/.alchemy/credentials",
   },
+  {
+    value: "local",
+    label: "Local emulator",
+    hint: "Floci / LocalStack — no AWS account",
+  },
 ];
 
 export interface AwsStoredCredentials {
@@ -72,6 +94,8 @@ export interface AwsResolvedCredentials {
     sessionToken: Redacted.Redacted<string> | undefined;
   }>;
   region: string;
+  /** Applied to every AWS SDK call through {@link Endpoint.fromEnvironment}. */
+  endpoint?: string;
   source: {
     type: AwsAuthConfig["method"];
     details?: string;
@@ -93,6 +117,38 @@ export const applyEnvRegionOverride = <C extends { region: string }>(
     ),
   );
 
+const LOCAL_ACCOUNT_ID = "000000000000";
+
+/**
+ * Resolve the local identity without an STS request. Floci uses the SigV4
+ * access-key id as its account selector, so the selected account and key must
+ * be identical.
+ */
+export const localAwsCredentials = (
+  config: Extract<AwsAuthConfig, { method: "local" }>,
+) => {
+  const accountId = config.accountId ?? LOCAL_ACCOUNT_ID;
+  if (!/^\d{12}$/.test(accountId)) {
+    return Effect.fail(
+      new AuthError({
+        message: `local AWS accountId must be exactly 12 digits, got ${JSON.stringify(accountId)}`,
+      }),
+    );
+  }
+  const endpoint = config.endpoint ?? DEFAULT_LOCAL_ENDPOINT;
+  return Effect.succeed({
+    accountId,
+    credentials: Effect.succeed({
+      accessKeyId: Redacted.make(accountId),
+      secretAccessKey: Redacted.make("alchemy-local-emulator"),
+      sessionToken: undefined,
+    }),
+    region: config.region ?? "us-east-1",
+    endpoint,
+    source: { type: "local" as const, details: endpoint },
+  } satisfies AwsResolvedCredentials);
+};
+
 /**
  * Layer that registers the AWS {@link AuthProvider} into the
  * {@link AuthProviders} registry when built. Include this in the AWS
@@ -111,11 +167,13 @@ export const AwsAuth = AuthProviderLayer<
       secretAccessKey,
       sessionToken,
       region,
+      endpoint,
     }: {
       accessKeyId: Redacted.Redacted<string>;
       secretAccessKey: Redacted.Redacted<string>;
       sessionToken?: Redacted.Redacted<string>;
       region: string;
+      endpoint?: string;
     }) =>
       STS.getCallerIdentity({}).pipe(
         Effect.provide(
@@ -133,6 +191,7 @@ export const AwsAuth = AuthProviderLayer<
             // deadlock: it derives the region from AWSEnvironment, which is the
             // very service still being constructed by this STS call.
             Region.of(region),
+            endpoint ? Endpoint.of(endpoint) : Layer.empty,
           ),
         ),
         Effect.flatMap((self) =>
@@ -210,6 +269,25 @@ export const AwsAuth = AuthProviderLayer<
               }),
             ),
             Match.when("stored", () => loginStored(profileName)),
+            Match.when("local", () =>
+              Effect.gen(function* () {
+                const endpoint = yield* Clank.text({
+                  message: "Emulator endpoint",
+                  placeholder: DEFAULT_LOCAL_ENDPOINT,
+                  defaultValue: DEFAULT_LOCAL_ENDPOINT,
+                });
+                const region = yield* Clank.text({
+                  message: "Region",
+                  placeholder: "us-east-1",
+                  defaultValue: "us-east-1",
+                });
+                return {
+                  method: "local" as const,
+                  endpoint: endpoint || DEFAULT_LOCAL_ENDPOINT,
+                  region: region || "us-east-1",
+                };
+              }),
+            ),
             Match.exhaustive,
           ),
         ),
@@ -258,6 +336,7 @@ export const AwsAuth = AuthProviderLayer<
                   }),
                 );
               }
+              const endpoint = yield* getEnv("AWS_ENDPOINT_URL");
               const accountId = yield* getEnvRequired("AWS_ACCOUNT_ID").pipe(
                 Effect.catch(() =>
                   getAccountId({
@@ -265,6 +344,7 @@ export const AwsAuth = AuthProviderLayer<
                     secretAccessKey,
                     sessionToken,
                     region,
+                    endpoint,
                   }),
                 ),
               );
@@ -276,8 +356,30 @@ export const AwsAuth = AuthProviderLayer<
                   sessionToken,
                 }),
                 region,
+                endpoint,
                 source: { type: "env" as const },
               } satisfies AwsResolvedCredentials;
+            }),
+          ),
+          Match.when(
+            { method: "local" },
+            Effect.fn(function* (config) {
+              const resolved = yield* localAwsCredentials(config);
+              yield* ensureLocalEmulator({
+                endpoint: resolved.endpoint!,
+                autoStart:
+                  config.autoStart ??
+                  resolved.endpoint === DEFAULT_LOCAL_ENDPOINT,
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new AuthError({
+                      message: cause.message,
+                      cause,
+                    }),
+                ),
+              );
+              return resolved;
             }),
           ),
           Match.when({ method: "stored" }, () =>
@@ -414,6 +516,7 @@ export const AwsAuth = AuthProviderLayer<
     const logout = (profileName: string, config: AwsAuthConfig) =>
       Match.value(config).pipe(
         Match.when({ method: "env" }, () => Effect.void),
+        Match.when({ method: "local" }, () => Effect.void),
         Match.when({ method: "sso" }, (config) =>
           Clank.info(
             `AWS: running 'aws sso logout --profile ${config.ssoProfile}'...`,
@@ -441,6 +544,7 @@ export const AwsAuth = AuthProviderLayer<
       Match.value(config)
         .pipe(
           Match.when({ method: "env" }, () => Effect.void),
+          Match.when({ method: "local" }, () => Effect.void),
           Match.when({ method: "sso" }, loginSSO),
           Match.when({ method: "stored" }, () =>
             store

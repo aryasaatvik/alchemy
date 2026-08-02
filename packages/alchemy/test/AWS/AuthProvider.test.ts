@@ -1,7 +1,14 @@
-import { applyEnvRegionOverride } from "@/AWS/AuthProvider.ts";
+import {
+  applyEnvRegionOverride,
+  localAwsCredentials,
+} from "@/AWS/AuthProvider.ts";
+import * as AwsEndpoint from "@/AWS/Endpoint.ts";
+import { AWSEnvironment } from "@/AWS/Environment.ts";
+import { Endpoint } from "@distilled.cloud/aws";
 import { describe, expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 const withEnv = (env: Record<string, string>) =>
   Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
@@ -33,5 +40,55 @@ describe("applyEnvRegionOverride", () => {
       const creds = yield* applyEnvRegionOverride(profileCreds);
       expect(creds.region).toBe("us-west-2");
     }).pipe(withEnv({})),
+  );
+});
+
+describe("local AWS auth", () => {
+  it.effect("uses a selected 12-digit account as the signing access key", () =>
+    Effect.gen(function* () {
+      const resolved = yield* localAwsCredentials({
+        method: "local",
+        accountId: "123456789012",
+        endpoint: "http://floci.test:4566",
+        region: "eu-west-1",
+      });
+      const credentials = yield* resolved.credentials;
+
+      expect(resolved.accountId).toBe("123456789012");
+      expect(Redacted.value(credentials.accessKeyId)).toBe("123456789012");
+      expect(resolved.endpoint).toBe("http://floci.test:4566");
+      expect(resolved.region).toBe("eu-west-1");
+    }),
+  );
+
+  it.effect(
+    "rejects non-account-shaped local identities before any STS lookup",
+    () =>
+      localAwsCredentials({ method: "local", accountId: "worktree-a" }).pipe(
+        Effect.flip,
+        Effect.tap((error) =>
+          Effect.sync(() => {
+            expect(error.message).toContain("exactly 12 digits");
+          }),
+        ),
+      ),
+  );
+
+  it.effect("propagates the local endpoint through the AWS environment", () =>
+    Effect.gen(function* () {
+      const endpoint = yield* Endpoint.Endpoint;
+      expect(yield* endpoint).toBe("http://floci.test:4566");
+    }).pipe(
+      Effect.provide(AwsEndpoint.fromEnvironment),
+      Effect.provideService(
+        AWSEnvironment,
+        Effect.succeed({
+          accountId: "123456789012",
+          region: "us-east-1",
+          endpoint: "http://floci.test:4566",
+          credentials: Effect.die("not used"),
+        }),
+      ),
+    ),
   );
 });
