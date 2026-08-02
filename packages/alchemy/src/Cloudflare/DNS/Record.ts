@@ -300,7 +300,10 @@ export const RecordProvider = () =>
       if (o.type !== undefined && o.type !== n.type) {
         return { action: "replace" } as const;
       }
-      if (o.name !== undefined && o.name !== n.name) {
+      if (
+        o.name !== undefined &&
+        canonicalRecordName(o.name) !== canonicalRecordName(n.name)
+      ) {
         return { action: "replace" } as const;
       }
       // zoneId is Input<string>; by reconcile time both sides are
@@ -482,6 +485,10 @@ export const RecordProvider = () =>
     }),
   });
 
+/** Cloudflare stores DNS names as lowercase FQDNs without a trailing dot. */
+export const canonicalRecordName = (name: string): string =>
+  name.replace(/\.$/, "").toLowerCase();
+
 const observeById = (zoneId: string, dnsRecordId: string) =>
   Effect.gen(function* () {
     const r = yield* dns.getRecord({ zoneId, dnsRecordId }).pipe(
@@ -543,14 +550,18 @@ const findByNameType = (
   type: RecordType,
   match: RecordMatch,
 ) =>
-  listExactByNameType(zoneId, name, type).pipe(
+  listExactByNameType(zoneId, canonicalRecordName(name), type).pipe(
     Effect.flatMap((found) => {
       if (found.length > 0) return Effect.succeed(found);
 
       return zones.getZone({ zoneId }).pipe(
         Effect.flatMap((zone) => {
-          const normalizedName = normalizeRecordName(name, zone.name);
-          return normalizedName === name
+          const canonicalName = canonicalRecordName(name);
+          const normalizedName = normalizeRecordName(
+            canonicalName,
+            canonicalRecordName(zone.name),
+          );
+          return normalizedName === canonicalName
             ? Effect.succeed([] as ObservedRecord[])
             : listExactByNameType(zoneId, normalizedName, type);
         }),
@@ -612,7 +623,12 @@ const listExactByNameType = (zoneId: string, name: string, type: RecordType) =>
       Stream.runCollect,
       Effect.map((chunk) =>
         Array.from(chunk)
-          .filter((r) => r.name === name && r.type === type)
+          .filter(
+            (r) =>
+              r.name !== undefined &&
+              canonicalRecordName(r.name) === canonicalRecordName(name) &&
+              r.type === type,
+          )
           .map((r) => narrowRecord(r as Parameters<typeof narrowRecord>[0])),
       ),
     );
