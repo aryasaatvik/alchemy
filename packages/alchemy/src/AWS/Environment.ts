@@ -53,6 +53,8 @@ export interface AWSEnvironmentShape {
   region: RegionID;
   credentials: Effect.Effect<ResolvedCredentials, CredentialsError>;
   endpoint?: string;
+  /** Endpoint overrides keyed by AWS SigV4 service name (for example `ses`). */
+  serviceEndpoints?: Readonly<Record<string, string>>;
   profile?: string;
 }
 

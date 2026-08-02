@@ -7,17 +7,23 @@ export const of = (endpoint: string) =>
   Layer.succeed(Endpoint.Endpoint, Effect.succeed(endpoint));
 
 /**
- * Derive a custom endpoint (if any) from the surrounding
- * {@link AWSEnvironment}. If the environment has no `endpoint` set, this
- * Layer is empty (the SDK uses its default endpoint resolver).
+ * Derive a service-aware endpoint policy from the surrounding
+ * {@link AWSEnvironment}. An operation-scoped {@link of} layer remains more
+ * specific; otherwise distilled resolves the SigV4 service name first in
+ * `serviceEndpoints`, then through the global local endpoint, then through
+ * its normal AWS endpoint rules.
  */
-export const fromEnvironment: Layer.Layer<never, never, AWSEnvironment> =
-  Layer.effect(
-    Endpoint.Endpoint,
-    Effect.gen(function* () {
-      return Effect.map(
-        yield* AWSEnvironment,
-        (env) => env.endpoint ?? undefined!,
-      );
-    }),
-  );
+export const fromEnvironment: Layer.Layer<
+  Endpoint.ServiceEndpoint,
+  never,
+  AWSEnvironment
+> = Layer.effect(
+  Endpoint.ServiceEndpoint,
+  Effect.gen(function* () {
+    const env = yield* AWSEnvironment;
+    return {
+      resolve: (service: string) =>
+        env.serviceEndpoints?.[service] ?? env.endpoint,
+    } satisfies Endpoint.ServiceEndpointResolver;
+  }),
+);

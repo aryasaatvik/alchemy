@@ -47,6 +47,8 @@ export type AwsAuthConfig =
       region?: string;
       /** @default "000000000000" */
       accountId?: string;
+      /** Per-SigV4-service endpoint overrides, e.g. `{ ses: "http://localhost:4300/ses" }`. */
+      serviceEndpoints?: Readonly<Record<string, string>>;
       /** @default true for the default endpoint */
       autoStart?: boolean;
     };
@@ -96,6 +98,8 @@ export interface AwsResolvedCredentials {
   region: string;
   /** Applied to every AWS SDK call through {@link Endpoint.fromEnvironment}. */
   endpoint?: string;
+  /** Applied by SigV4 service name before the global {@link endpoint}. */
+  serviceEndpoints?: Readonly<Record<string, string>>;
   source: {
     type: AwsAuthConfig["method"];
     details?: string;
@@ -145,6 +149,7 @@ export const localAwsCredentials = (
     }),
     region: config.region ?? "us-east-1",
     endpoint,
+    serviceEndpoints: config.serviceEndpoints,
     source: { type: "local" as const, details: endpoint },
   } satisfies AwsResolvedCredentials);
 };

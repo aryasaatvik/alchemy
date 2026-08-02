@@ -74,10 +74,13 @@ describe("local AWS auth", () => {
       ),
   );
 
-  it.effect("propagates the local endpoint through the AWS environment", () =>
+  it.effect("resolves service overrides before the local endpoint", () =>
     Effect.gen(function* () {
-      const endpoint = yield* Endpoint.Endpoint;
-      expect(yield* endpoint).toBe("http://floci.test:4566");
+      const endpoints = yield* Endpoint.ServiceEndpoint;
+      expect((yield* endpoints).resolve("ses")).toBe(
+        "http://samva-emulate.test/ses",
+      );
+      expect((yield* endpoints).resolve("sqs")).toBe("http://floci.test:4566");
     }).pipe(
       Effect.provide(AwsEndpoint.fromEnvironment),
       Effect.provideService(
@@ -86,6 +89,7 @@ describe("local AWS auth", () => {
           accountId: "123456789012",
           region: "us-east-1",
           endpoint: "http://floci.test:4566",
+          serviceEndpoints: { ses: "http://samva-emulate.test/ses" },
           credentials: Effect.die("not used"),
         }),
       ),
