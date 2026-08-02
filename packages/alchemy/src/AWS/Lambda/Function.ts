@@ -32,6 +32,7 @@ import {
 import * as TempRoot from "../../Bundle/TempRoot.ts";
 import { deepEqual, havePropsChanged, isResolved } from "../../Diff.ts";
 import { isScopeEjected, type HttpEffect } from "../../Http.ts";
+import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as Output from "../../Output.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import { Platform, type Main, type PlatformProps } from "../../Platform.ts";
@@ -871,7 +872,19 @@ export const Function: Platform<
   },
 });
 
+/**
+ * Lambda remains an ordinary AWS provider in both modes. In a local dev run
+ * the current provider-mode engine selects the local variant; the surrounding
+ * `AWSEnvironment` supplies Floci's endpoint, so bundle/create/update keep
+ * their normal AWS lifecycle without depending on Live Lambda.
+ */
 export const FunctionProvider = () =>
+  ProviderLayer.dual(Function, {
+    live: ordinaryFunctionProvider,
+    local: ordinaryFunctionProvider,
+  });
+
+const ordinaryFunctionProvider = () =>
   Provider.effect(
     Function,
     Effect.gen(function* () {
@@ -1588,6 +1601,17 @@ export default handler;
         const getAndUpdate = Lambda.getFunction({
           FunctionName: functionName,
         }).pipe(
+          // AWS returns tags from GetFunction. Floci deliberately exposes the
+          // same data through ListTags instead, so hydrate only an omitted
+          // field before enforcing Alchemy's ownership invariant.
+          Effect.flatMap((function_) =>
+            function_.Tags !== undefined
+              ? Effect.succeed(function_)
+              : Lambda.listTags({
+                  Resource:
+                    function_.Configuration?.FunctionArn ?? functionName,
+                }).pipe(Effect.map(({ Tags }) => ({ ...function_, Tags }))),
+          ),
           Effect.filterOrFail(
             // if it exists and contains these tags, we will assume it was created by alchemy
             // but state was lost, so if it exists, let's adopt it
