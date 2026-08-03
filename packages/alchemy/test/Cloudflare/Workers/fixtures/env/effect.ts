@@ -115,9 +115,9 @@ export default class EnvEffectWorker extends Cloudflare.Worker<EnvEffectWorker>(
           // request time, deep inside a nested effect, where the env-backed
           // runtime ConfigProvider (not the Init interceptor) answers the
           // read. The bound values arrive in `env` as
-          // `{"_tag":"Redacted","value":...}` markers and must be reified
+          // Alchemy's versioned packed env wire and must be reified
           // transparently: `Config.number` must decode the raw source value,
-          // not the marker JSON.
+          // not the wire payload.
           const nested = yield* Effect.gen(function* () {
             const allObj = yield* Config.all({
               str: Config.string("CONFIG_STR"),

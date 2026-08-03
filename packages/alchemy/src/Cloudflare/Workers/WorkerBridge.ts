@@ -297,10 +297,9 @@ const getSharedBuild = (
               ConfigProvider.ConfigProvider,
               ConfigProvider.orElse(
                 ConfigProvider.fromUnknown({ ALCHEMY_PHASE: "runtime" }),
-                // Auto-bound `Config` values arrive in `env` as
-                // `{"_tag":"Redacted","value":...}` markers; reify them so a
-                // `Config` re-read inside a request handler decodes the raw
-                // source value instead of the marker JSON.
+                // Auto-bound `Config` values arrive through Alchemy's
+                // versioned packed env wire; reify them so a `Config` re-read
+                // inside a request handler decodes the raw source value.
                 reifyBoundConfigProvider(
                   ConfigProvider.fromUnknown(env),
                   env as Record<string, unknown>,

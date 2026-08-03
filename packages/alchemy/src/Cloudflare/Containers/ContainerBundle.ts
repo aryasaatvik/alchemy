@@ -402,9 +402,9 @@ const serverEffect = tag.pipe(
       Layer.provideMerge(
         Layer.succeed(
           ConfigProvider.ConfigProvider,
-          // Auto-bound \`Config\` values arrive in the env as
-          // \`{"_tag":"Redacted","value":...}\` markers; reify them so a
-          // \`Config\` re-read inside a handler decodes the raw source value.
+          // Auto-bound \`Config\` values arrive through Alchemy's versioned
+          // packed env wire; reify them so a \`Config\` re-read inside a
+          // handler decodes the raw source value.
           reifyBoundConfigProvider(ConfigProvider.fromEnv(), process.env)
         )
       ),

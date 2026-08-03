@@ -51,6 +51,13 @@ export interface BaseRuntimeContext {
 export const sanitizeKey = (key: string): string =>
   key.replaceAll(/[^a-zA-Z0-9]/g, "_");
 
+/** Versioned discriminator for values serialized by {@link packEnvValue}. */
+export const PACKED_ENV_VALUE_PREFIX = "alchemy:env:v1:";
+
+/** Whether an environment string uses Alchemy's explicit packed-value wire. */
+export const isPackedEnvValue = (raw: string): boolean =>
+  raw.startsWith(PACKED_ENV_VALUE_PREFIX);
+
 /**
  * The wire format `RuntimeContext.set`/`get` use to carry a `Redacted` value
  * through an environment variable. `JSON.stringify(Redacted)` emits the
@@ -74,16 +81,25 @@ export const isRedactedMarker = (value: unknown): value is RedactedMarker =>
   "value" in value;
 
 /**
- * Serialize a binding value for an env var: `Redacted` values are packed as
- * a {@link RedactedMarker}, everything else is plain `JSON.stringify`.
+ * Serialize a binding value for an env var behind an explicit versioned
+ * discriminator. `Redacted` values are packed as a {@link RedactedMarker};
+ * other JSON values retain their types without making ordinary env strings
+ * such as `"123"`, `"false"`, or `"null"` ambiguous at runtime.
  */
-export const packEnvValue = (value: unknown): string =>
-  Redacted.isRedacted(value)
-    ? JSON.stringify({
-        _tag: "Redacted",
-        value: Redacted.value(value),
-      } satisfies RedactedMarker)
-    : JSON.stringify(value);
+export const packEnvValue = (value: unknown): string => {
+  const payload = JSON.stringify(
+    Redacted.isRedacted(value)
+      ? ({
+          _tag: "Redacted",
+          value: Redacted.value(value),
+        } satisfies RedactedMarker)
+      : value,
+  );
+  if (payload === undefined) {
+    throw new TypeError("Cannot pack undefined as an environment value");
+  }
+  return `${PACKED_ENV_VALUE_PREFIX}${payload}`;
+};
 
 /**
  * Like {@link packEnvValue}, but a `Redacted` input keeps its `Redacted`
@@ -101,9 +117,9 @@ export const packEnvValueKeepRedacted = (
 
 /**
  * Parse an env-var string produced by {@link packEnvValue} back into its
- * value: rebuild `Redacted` from the marker, return other JSON values
- * as-is, and fall back to the raw string for non-JSON input (e.g. an env
- * var the user set directly). `undefined` passes through.
+ * value. Unprefixed values are ordinary environment strings and always pass
+ * through verbatim, even when their contents are valid JSON. `undefined`
+ * passes through.
  *
  * Runtime `get` accessors MUST feed this from the raw environment
  * (`process.env[key]` / the platform env object) — never through
@@ -118,15 +134,14 @@ export const unpackEnvValue = <T>(raw: string | undefined): T | undefined => {
   if (raw === undefined) {
     return undefined;
   }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (isRedactedMarker(parsed)) {
-      return Redacted.make(parsed.value) as unknown as T;
-    }
-    return parsed as T;
-  } catch {
-    return raw as unknown as T; // assume it's just a string
+  if (!isPackedEnvValue(raw)) {
+    return raw as unknown as T;
   }
+  const parsed: unknown = JSON.parse(raw.slice(PACKED_ENV_VALUE_PREFIX.length));
+  if (isRedactedMarker(parsed)) {
+    return Redacted.make(parsed.value) as unknown as T;
+  }
+  return parsed as T;
 };
 
 /**
