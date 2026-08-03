@@ -44,20 +44,76 @@ describe("applyEnvRegionOverride", () => {
 });
 
 describe("local AWS auth", () => {
-  it.effect("uses a selected 12-digit account as the signing access key", () =>
-    Effect.gen(function* () {
-      const resolved = yield* localAwsCredentials({
-        method: "local",
-        accountId: "123456789012",
-        endpoint: "http://floci.test:4566",
-        region: "eu-west-1",
-      });
-      const credentials = yield* resolved.credentials;
+  it.effect(
+    "uses the selected account and explicit fallback when credentials are absent",
+    () =>
+      Effect.gen(function* () {
+        const resolved = yield* localAwsCredentials({
+          method: "local",
+          accountId: "123456789012",
+          endpoint: "http://floci.test:4566",
+          region: "eu-west-1",
+        });
+        const credentials = yield* resolved.credentials;
 
-      expect(resolved.accountId).toBe("123456789012");
-      expect(Redacted.value(credentials.accessKeyId)).toBe("123456789012");
-      expect(resolved.endpoint).toBe("http://floci.test:4566");
-      expect(resolved.region).toBe("eu-west-1");
+        expect(resolved.accountId).toBe("123456789012");
+        expect(Redacted.value(credentials.accessKeyId)).toBe("123456789012");
+        expect(Redacted.value(credentials.secretAccessKey)).toBe(
+          "alchemy-local-emulator",
+        );
+        expect(credentials.sessionToken).toBeUndefined();
+        expect(resolved.endpoint).toBe("http://floci.test:4566");
+        expect(resolved.region).toBe("eu-west-1");
+      }).pipe(withEnv({})),
+  );
+
+  it.effect(
+    "preserves the exact configured credential tuple used by the local Lambda runtime",
+    () =>
+      Effect.gen(function* () {
+        const resolved = yield* localAwsCredentials({
+          method: "local",
+          accountId: "100000000004",
+          endpoint: "http://floci.test:4566",
+        });
+        const credentials = yield* resolved.credentials;
+
+        expect(resolved.accountId).toBe("100000000004");
+        expect(Redacted.value(credentials.accessKeyId)).toBe("100000000004");
+        expect(Redacted.value(credentials.secretAccessKey)).toBe(
+          "samva-local-floci",
+        );
+        expect(Redacted.value(credentials.sessionToken!)).toBe(
+          "samva-local-session",
+        );
+      }).pipe(
+        withEnv({
+          AWS_ACCESS_KEY_ID: "100000000004",
+          AWS_SECRET_ACCESS_KEY: "samva-local-floci",
+          AWS_SESSION_TOKEN: "samva-local-session",
+        }),
+      ),
+  );
+
+  it.effect("rejects every partial local credential tuple", () =>
+    Effect.gen(function* () {
+      for (const env of [
+        { AWS_ACCESS_KEY_ID: "100000000004" },
+        { AWS_SECRET_ACCESS_KEY: "samva-local-floci" },
+        { AWS_SESSION_TOKEN: "samva-local-session" },
+        {
+          AWS_ACCESS_KEY_ID: "100000000004",
+          AWS_SESSION_TOKEN: "samva-local-session",
+        },
+      ]) {
+        const error = yield* localAwsCredentials({
+          method: "local",
+          accountId: "100000000004",
+        }).pipe(withEnv(env), Effect.flip);
+        expect(error.message).toBe(
+          "Local AWS credentials must set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY together; AWS_SESSION_TOKEN requires both.",
+        );
+      }
     }),
   );
 
@@ -65,6 +121,7 @@ describe("local AWS auth", () => {
     "rejects non-account-shaped local identities before any STS lookup",
     () =>
       localAwsCredentials({ method: "local", accountId: "worktree-a" }).pipe(
+        withEnv({}),
         Effect.flip,
         Effect.tap((error) =>
           Effect.sync(() => {

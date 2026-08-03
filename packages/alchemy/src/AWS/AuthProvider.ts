@@ -122,37 +122,69 @@ export const applyEnvRegionOverride = <C extends { region: string }>(
   );
 
 const LOCAL_ACCOUNT_ID = "000000000000";
+const LOCAL_SECRET_ACCESS_KEY = "alchemy-local-emulator";
 
 /**
- * Resolve the local identity without an STS request. Floci uses the SigV4
- * access-key id as its account selector, so the selected account and key must
- * be identical.
+ * Resolve the local identity without an STS request. A configured environment
+ * credential tuple is preserved verbatim so the emulator and Alchemy use the
+ * same signing identity. When the tuple is absent, the selected account is the
+ * fallback access key.
  */
 export const localAwsCredentials = (
   config: Extract<AwsAuthConfig, { method: "local" }>,
-) => {
-  const accountId = config.accountId ?? LOCAL_ACCOUNT_ID;
-  if (!/^\d{12}$/.test(accountId)) {
-    return Effect.fail(
-      new AuthError({
-        message: `local AWS accountId must be exactly 12 digits, got ${JSON.stringify(accountId)}`,
-      }),
-    );
-  }
-  const endpoint = config.endpoint ?? DEFAULT_LOCAL_ENDPOINT;
-  return Effect.succeed({
-    accountId,
-    credentials: Effect.succeed({
-      accessKeyId: Redacted.make(accountId),
-      secretAccessKey: Redacted.make("alchemy-local-emulator"),
-      sessionToken: undefined,
-    }),
-    region: config.region ?? "us-east-1",
-    endpoint,
-    serviceEndpoints: config.serviceEndpoints,
-    source: { type: "local" as const, details: endpoint },
-  } satisfies AwsResolvedCredentials);
-};
+) =>
+  Effect.gen(function* () {
+    const accountId = config.accountId ?? LOCAL_ACCOUNT_ID;
+    if (!/^\d{12}$/.test(accountId)) {
+      return yield* Effect.fail(
+        new AuthError({
+          message: `local AWS accountId must be exactly 12 digits, got ${JSON.stringify(accountId)}`,
+        }),
+      );
+    }
+
+    const [configuredAccessKeyId, configuredSecretAccessKey, sessionToken] =
+      yield* Effect.all([
+        getEnvRedacted("AWS_ACCESS_KEY_ID"),
+        getEnvRedacted("AWS_SECRET_ACCESS_KEY"),
+        getEnvRedacted("AWS_SESSION_TOKEN"),
+      ]);
+    const hasAccessKey = configuredAccessKeyId !== undefined;
+    const hasSecretKey = configuredSecretAccessKey !== undefined;
+    if (
+      hasAccessKey !== hasSecretKey ||
+      (sessionToken !== undefined && !hasAccessKey)
+    ) {
+      return yield* Effect.fail(
+        new AuthError({
+          message:
+            "Local AWS credentials must set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY together; AWS_SESSION_TOKEN requires both.",
+        }),
+      );
+    }
+
+    const endpoint = config.endpoint ?? DEFAULT_LOCAL_ENDPOINT;
+    const credentials =
+      configuredAccessKeyId && configuredSecretAccessKey
+        ? {
+            accessKeyId: configuredAccessKeyId,
+            secretAccessKey: configuredSecretAccessKey,
+            sessionToken,
+          }
+        : {
+            accessKeyId: Redacted.make(accountId),
+            secretAccessKey: Redacted.make(LOCAL_SECRET_ACCESS_KEY),
+            sessionToken: undefined,
+          };
+    return {
+      accountId,
+      credentials: Effect.succeed(credentials),
+      region: config.region ?? "us-east-1",
+      endpoint,
+      serviceEndpoints: config.serviceEndpoints,
+      source: { type: "local" as const, details: endpoint },
+    } satisfies AwsResolvedCredentials;
+  });
 
 /**
  * Layer that registers the AWS {@link AuthProvider} into the
