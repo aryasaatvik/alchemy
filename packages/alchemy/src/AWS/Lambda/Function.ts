@@ -1271,6 +1271,12 @@ export interface FunctionProviderOptions {
     id: string,
     props: FunctionProps,
   ) => Effect.Effect<FunctionCodeBundle, Bundle.BundleError>;
+  /**
+   * Transform the complete Lambda environment after binding, Function, and
+   * Alchemy values have been resolved. Execution substrates may use this to
+   * keep an injected runtime-owned value authoritative.
+   */
+  transformEnvironment?: (environment: LambdaEnvironment) => LambdaEnvironment;
 }
 
 export type FunctionLifecycleInput<
@@ -1723,7 +1729,14 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         );
 
       const tags = yield* createInternalTags(id);
-      const runtimeEnv = resolveFunctionEnvironment(env, news, alchemyEnv);
+      const resolvedRuntimeEnv = resolveFunctionEnvironment(
+        env,
+        news,
+        alchemyEnv,
+      );
+      const runtimeEnv = options?.transformEnvironment
+        ? options.transformEnvironment(resolvedRuntimeEnv)
+        : resolvedRuntimeEnv;
       yield* validateLambdaEnvironment(runtimeEnv);
 
       // Try to use S3 if assets bucket is available, otherwise fall back to inline ZipFile

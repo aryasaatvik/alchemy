@@ -6,7 +6,8 @@ import {
   resolveFunctionEnvironment,
   validateLambdaEnvironment,
 } from "@/AWS/Lambda/Function.ts";
-import { packEnvValue } from "@/RuntimeContext.ts";
+import { localEmulatorFunctionEnvironment } from "@/AWS/Lambda/FunctionProvider.ts";
+import { packEnvValue, unpackEnvValue } from "@/RuntimeContext.ts";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -52,6 +53,46 @@ describe("Lambda environment size", () => {
       SHARED: "function",
       ALCHEMY_STAGE: "test",
     });
+  });
+
+  it("keeps the emulator's container endpoint authoritative over the host endpoint", () => {
+    const hostEndpoint = packEnvValue(Redacted.make("http://127.0.0.1:4566"));
+    const serviceEndpoint = packEnvValue(
+      Redacted.make("http://host.docker.internal:4300/ses"),
+    );
+    const resolved = resolveFunctionEnvironment(
+      {
+        AWS_ENDPOINT_URL: hostEndpoint,
+        SES_ENDPOINT_URL: serviceEndpoint,
+      },
+      {
+        main: "handler.ts",
+        build: { output: { sourcemap: false } },
+        uploadSourceMap: false,
+      },
+      { ALCHEMY_STAGE: "test" },
+    );
+
+    // The ordinary provider retains the configured value. Only the local
+    // emulator provider strips it from the app entries Floci appends after
+    // its container-reachable baseline.
+    expect(resolved.AWS_ENDPOINT_URL).toBe(hostEndpoint);
+    const appEnvironment = localEmulatorFunctionEnvironment(resolved);
+    expect(appEnvironment).not.toHaveProperty("AWS_ENDPOINT_URL");
+    expect(appEnvironment.SES_ENDPOINT_URL).toBe(serviceEndpoint);
+
+    const containerEnvironment = Object.fromEntries([
+      ["AWS_ENDPOINT_URL", "http://floci:4566"],
+      ...Object.entries(appEnvironment),
+    ]);
+    expect(containerEnvironment).toEqual({
+      AWS_ENDPOINT_URL: "http://floci:4566",
+      SES_ENDPOINT_URL: serviceEndpoint,
+      ALCHEMY_STAGE: "test",
+    });
+    expect(unpackEnvValue(containerEnvironment.AWS_ENDPOINT_URL)).toBe(
+      "http://floci:4566",
+    );
   });
 
   it("accepts exactly 4 KiB and rejects the next byte", () => {

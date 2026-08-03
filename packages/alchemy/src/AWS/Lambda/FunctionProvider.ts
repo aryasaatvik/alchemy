@@ -32,6 +32,7 @@ import {
   resolveFunctionEnvironment,
   resolveFunctionRuntimeEnv,
   toTimeoutSeconds,
+  type LambdaEnvironment,
   type FunctionProps,
   validateLambdaEnvironment,
 } from "./Function.ts";
@@ -53,12 +54,32 @@ export const LiveFunctionProvider = () =>
   Provider.effect(Function, makeFunctionProvider());
 
 /**
+ * Remove the supervisor's host-only AWS endpoint from an embedded emulator
+ * Lambda. Floci injects its own container-reachable `AWS_ENDPOINT_URL` before
+ * application variables; omitting the host value prevents the later app entry
+ * from replacing that runtime-owned baseline. Service-specific endpoint
+ * bindings stay intact and retain their own container-reachability contract.
+ */
+export const localEmulatorFunctionEnvironment = (
+  environment: LambdaEnvironment,
+): LambdaEnvironment => {
+  const runtimeEnvironment = { ...environment };
+  delete runtimeEnvironment.AWS_ENDPOINT_URL;
+  return runtimeEnvironment;
+};
+
+/**
  * The normal Lambda lifecycle pointed at an account-scoped local AWS endpoint.
  * `AWSEnvironment` provides the endpoint and credentials; keeping this as the
  * ordinary provider exercises the same bundle/create/update path as deploys.
  */
 export const LocalEmulatorFunctionProvider = () =>
-  Provider.effect(Function, makeFunctionProvider());
+  Provider.effect(
+    Function,
+    makeFunctionProvider({
+      transformEnvironment: localEmulatorFunctionEnvironment,
+    }),
+  );
 
 const usableSession = (
   session: ScopedPlanStatusSession | undefined,
