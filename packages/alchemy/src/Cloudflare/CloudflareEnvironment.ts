@@ -25,6 +25,18 @@ export interface CloudflareRuntimeIdentity {
   readonly source: { readonly type: "runtime" };
 }
 
+/**
+ * The account-only environment available inside a deployed Worker or
+ * container. Runtime hosts deliberately receive no deployment credentials.
+ */
+export const runtimeIdentity = (
+  accountId: string,
+): CloudflareRuntimeIdentity => ({
+  type: "runtime",
+  accountId,
+  source: { type: "runtime" },
+});
+
 export type CloudflareEnvironmentShape =
   | CloudflareResolvedCredentials
   | CloudflareRuntimeIdentity;
@@ -42,11 +54,7 @@ export const fromEnv = () =>
   Layer.succeed(
     CloudflareEnvironment,
     CLOUDFLARE_ACCOUNT_ID.pipe(
-      Effect.map((accountId) => ({
-        type: "runtime" as const,
-        accountId,
-        source: { type: "runtime" as const },
-      })),
+      Effect.map((accountId) => runtimeIdentity(accountId)),
       Effect.orDie,
       Effect.cached,
     ),

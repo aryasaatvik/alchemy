@@ -2,6 +2,7 @@ import { imageSourceKind, validateImageSource } from "@/AWS/ECR/ImageSource.ts";
 import {
   buildFinalDockerfile,
   containerEnvPreamble,
+  makeContainerEnv,
   validateContainerImageProps,
 } from "@/Cloudflare/Containers/ContainerBundle.ts";
 import * as Dockerfile from "@/Docker/Dockerfile.ts";
@@ -102,6 +103,12 @@ const dies = <A>(effect: Effect.Effect<A>) =>
   });
 
 describe("Cloudflare container environment composition", () => {
+  test("injects the concrete account id consumed by the bootstrap", () => {
+    expect(makeContainerEnv({}, "concrete-account-id")).toMatchObject({
+      ALCHEMY_CLOUDFLARE_ACCOUNT_ID: "concrete-account-id",
+    });
+  });
+
   it.effect("containerEnvPreamble: image ref becomes FROM line", () =>
     Effect.gen(function* () {
       expect(yield* containerEnvPreamble({ image: "oven/bun:1" })).toBe(

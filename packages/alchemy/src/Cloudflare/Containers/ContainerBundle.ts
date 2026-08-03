@@ -339,7 +339,7 @@ const HttpServer = NodeHttpServer;
 import { Stack } from "alchemy/Stack";
 import { makeEntrypointLayer, reifyBoundConfigProvider } from "alchemy/Runtime";
 import { provideProcessTelemetry } from "alchemy/Telemetry";
-import { CloudflareEnvironment } from "alchemy/Cloudflare";
+import { CloudflareEnvironment, runtimeIdentity } from "alchemy/Cloudflare";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
@@ -367,6 +367,11 @@ const stack = Layer.succeed(Stack, {
   resources: {}
 });
 
+const cloudflareAccountId = process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID;
+if (cloudflareAccountId === undefined) {
+  throw new Error("Missing ALCHEMY_CLOUDFLARE_ACCOUNT_ID in container runtime");
+}
+
 const serverEffect = tag.pipe(
   // Process-lifetime telemetry: built once into the root scope; exporters
   // batch on their intervals and flush when the scope closes on graceful
@@ -384,15 +389,13 @@ const serverEffect = tag.pipe(
       // Capability bindings that talk to Cloudflare's HTTP API from inside the
       // container (e.g. R2/KV/Queue \`*Http\` bindings) resolve their account via
       // \`CloudflareEnvironment\` at runtime, exactly like the Worker bridge does
-      // (the service value is an \`Effect\` of the resolved credentials). The
-      // per-operation account/token are read from the container's env (the bound
-      // token outputs), so an absent account id here is harmless.
+      // (the service value is an \`Effect\` of the resolved identity).
+      // \`makeContainerEnv\` always injects the concrete account id for this
+      // bootstrap, while per-operation token outputs still come from the env.
       Layer.provideMerge(
         Layer.succeed(
           CloudflareEnvironment,
-          Effect.succeed({
-            account: process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
-          }),
+          Effect.succeed(runtimeIdentity(cloudflareAccountId)),
         )
       ),
       Layer.provideMerge(platform),
