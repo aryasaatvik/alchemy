@@ -29,7 +29,6 @@ import {
   makeFunctionProvider,
   materializeLambdaEnvironment,
   mergeFunctionEnvironment,
-  resolveFunctionBundleConfig,
   resolveFunctionEnvironment,
   resolveFunctionRuntimeEnv,
   toTimeoutSeconds,
@@ -38,6 +37,10 @@ import {
 } from "./Function.ts";
 import { bridgeCodeBundle } from "./Live/BridgeBundle.ts";
 import { LiveLambdaRuntime } from "./Live/LiveRuntime.ts";
+import {
+  prepareLocalFunctionBundle,
+  writeLocalBundleFiles,
+} from "./LocalBundle.ts";
 
 export const FunctionProvider = () =>
   ProviderLayer.dual(Function, {
@@ -101,7 +104,6 @@ export const LocalFunctionProvider = () =>
       });
       const alchemyEnv = yield* resolveFunctionRuntimeEnv;
       const runtime = yield* LiveLambdaRuntime;
-      const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { dotAlchemy } = yield* AlchemyContext;
 
@@ -194,10 +196,6 @@ export const LocalFunctionProvider = () =>
         env: Record<string, string>,
         ready: Deferred.Deferred<void>,
       ) {
-        const config = yield* resolveFunctionBundleConfig(props, {
-          externalizeAwsSdk: false,
-          registerRuntimeExtension: false,
-        });
         const bundleDir = path.join(
           dotAlchemy,
           "local",
@@ -205,7 +203,7 @@ export const LocalFunctionProvider = () =>
           "lambda",
           sanitizeId(id),
         );
-        yield* fs.makeDirectory(bundleDir, { recursive: true });
+        const config = yield* prepareLocalFunctionBundle(props, bundleDir);
         const handler = props.isExternal
           ? (props.handler ?? "default")
           : "default";
@@ -231,17 +229,7 @@ export const LocalFunctionProvider = () =>
           ),
           Stream.mapEffect((bundle) =>
             Effect.gen(function* () {
-              for (const file of bundle.files) {
-                const filePath = path.join(bundleDir, file.path);
-                yield* fs.makeDirectory(path.dirname(filePath), {
-                  recursive: true,
-                });
-                if (typeof file.content === "string") {
-                  yield* fs.writeFileString(filePath, file.content);
-                } else {
-                  yield* fs.writeFile(filePath, file.content);
-                }
-              }
+              yield* writeLocalBundleFiles(bundleDir, bundle.files);
               yield* runtime.setTarget(id, {
                 bundlePath: path.join(bundleDir, "index.js"),
                 handler,

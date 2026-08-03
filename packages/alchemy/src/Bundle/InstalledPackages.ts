@@ -47,6 +47,11 @@ export interface InstallResolvedPackagesOptions {
   /** Package-root → concrete npm version map (from {@link resolveInstallTargets}). */
   readonly resolved: Readonly<Record<string, string>>;
   readonly architecture: "x86_64" | "arm64";
+  /**
+   * Installation target. Lambda artifacts default to Linux; local handler
+   * children use the host so native packages match the process loading them.
+   */
+  readonly target?: "lambda" | "host";
   readonly runNpmInstall?: NpmInstallRunner;
 }
 
@@ -136,7 +141,11 @@ export function matchesPackageRoot(moduleId: string, root: string): boolean {
 export function npmInstallArgs(
   architecture: "x86_64" | "arm64",
   _packageNames: ReadonlyArray<string>,
+  target: "lambda" | "host" = "lambda",
 ): ReadonlyArray<string> {
+  if (target === "host") {
+    return ["install", "--force"];
+  }
   const npmArchitecture = architecture === "arm64" ? "arm64" : "x64";
   return [
     "install",
@@ -281,7 +290,7 @@ export function installResolvedPackages(
           );
           yield* runInstall(
             directory,
-            npmInstallArgs(options.architecture, packageNames),
+            npmInstallArgs(options.architecture, packageNames, options.target),
           );
           return yield* readArtifactFiles(directory);
         }),
