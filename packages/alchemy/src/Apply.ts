@@ -502,31 +502,117 @@ const executeNode = (
         yield* signalReady;
       });
 
-    // ── noop ──
-
-    if (node.action === "noop") {
-      // No work to do — the persisted attr is already stable. If the row was
-      // persisted under a legacy type name (the type was since renamed and
-      // carries the old name as an alias), migrate it to the canonical type
-      // so the state stops depending on the alias.
-      if (node.state.resourceType !== node.resource.Type) {
-        yield* commit({ ...node.state, resourceType: node.resource.Type });
-      }
-      yield* signalReadyStable;
-      yield* storeAndSignal({
-        output: node.state.attr,
-        props: node.state.props,
-        bindings: node.state.bindings ?? [],
-        instanceId: node.state.instanceId,
-      });
-      return;
-    }
-
     const allUpstreamFqns = () => {
       const propDeps = Object.keys(Output.resolveUpstream(node.props));
       const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
       return [...new Set([...propDeps, ...bindingDeps])];
     };
+
+    // ── noop ──
+
+    if (node.action === "noop") {
+      // Plan-time noops may become stale while their upstreams reconcile. A
+      // local provider is the common case: its sidecar can restart after the
+      // plan reads persisted attrs, causing the upstream to publish a new URL
+      // during apply. Wait for those upstreams and re-evaluate before exposing
+      // this node as ready; otherwise a downstream can act on the stale attr
+      // and Phase 3 convergence arrives too late to prevent the side effect.
+      //
+      // Cycle members still publish their previous attr first so peers can
+      // break the SCC deadlock. Phase 3 remains responsible for the fixed
+      // point in that path.
+      if (inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
+
+      yield* report("pending");
+      yield* waitForDeps(allUpstreamFqns());
+
+      const outputs = getOutputs();
+      const news = (yield* Output.evaluate(node.props, outputs)) as Record<
+        string,
+        any
+      >;
+      const bindingOutputs = excludeDeletedBindings(
+        yield* Output.evaluate(node.bindings, outputs),
+      );
+      const inputsChanged =
+        havePropsChanged(node.state.props, news) ||
+        JSON.stringify(node.state.bindings ?? []) !==
+          JSON.stringify(bindingOutputs);
+
+      if (inputsChanged) {
+        yield* report("updating");
+        const attr = yield* node.provider
+          .reconcile({
+            id: logicalId,
+            fqn,
+            news,
+            instanceId: node.state.instanceId,
+            bindings: bindingOutputs,
+            session: scopedSession,
+            olds: node.state.props,
+            output: node.state.attr,
+          })
+          .pipe(
+            instrumentLifecycle(
+              "update",
+              fqn,
+              node.resource.Type,
+              logicalId,
+              node.state.instanceId,
+            ),
+          );
+
+        yield* commit<UpdatedResourceState>({
+          status: "updated",
+          fqn,
+          logicalId,
+          instanceId: node.state.instanceId,
+          resourceType: node.resource.Type,
+          props: news,
+          attr,
+          bindings: bindingOutputs,
+          providerVersion: node.provider.version ?? 0,
+          downstream: node.downstream,
+          removalPolicy: node.resource.RemovalPolicy,
+          providerMode: node.mode,
+        });
+
+        tracker[fqn] = {
+          output: attr,
+          props: news,
+          bindings: bindingOutputs,
+          instanceId: node.state.instanceId,
+        };
+        yield* signalReady;
+        yield* signalReadyStable;
+        yield* markTerminal("updated");
+        return;
+      }
+
+      // The persisted attr is still stable. If the row was persisted under a
+      // legacy type name, migrate it to the canonical type so state stops
+      // depending on the alias.
+      if (node.state.resourceType !== node.resource.Type) {
+        yield* commit({ ...node.state, resourceType: node.resource.Type });
+      }
+      if (!inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
+      yield* signalReadyStable;
+      return;
+    }
 
     // ── instance ID ──
 

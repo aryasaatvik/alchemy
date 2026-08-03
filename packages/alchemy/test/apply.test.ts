@@ -1,17 +1,20 @@
 import { adopt, Unowned } from "@/AdoptPolicy";
-import type { DestroyError } from "@/Apply";
+import { apply, type DestroyError } from "@/Apply";
 import { Cli } from "@/Cli/Cli";
 import * as Namespace from "@/Namespace.ts";
 import * as Output from "@/Output";
+import type { NoopUpdate } from "@/Plan";
 import * as Provider from "@/Provider";
 import * as RemovalPolicy from "@/RemovalPolicy.ts";
 import { Stack } from "@/Stack";
 import {
   type CreatingResourceState,
+  type CreatedResourceState,
   type ReplacedResourceState,
   type ReplacingResourceState,
   type ResourceState,
   State,
+  type UpdatedResourceState,
 } from "@/State";
 import * as Test from "@/Test/Alchemy";
 import { assert, describe, expect } from "alchemy-test";
@@ -600,6 +603,65 @@ describe("linear update propagation", () => {
         // sequence as long as no stale value leaked through.
         expect(sawByB.length).toBeGreaterThan(0);
         expect(sawByB.every((v) => v === "v2")).toBe(true);
+      }),
+  );
+
+  test.provider(
+    "planned noop rechecks inputs after an acyclic upstream changes during apply",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string, includeConsumer: boolean) =>
+          Effect.gen(function* () {
+            const source = yield* PhasedTarget("Source", {
+              desired,
+            });
+            const alias = yield* TestResource("Alias", {
+              string: source.value,
+            });
+            const consumer = includeConsumer
+              ? yield* TestResource("Consumer", {
+                  string: alias.string,
+                })
+              : undefined;
+            return { source, alias, consumer };
+          });
+
+        yield* stack.deploy(program("old-url", false));
+
+        const plan = yield* stack.plan(program("new-url", true));
+        expect(plan.cycleMembers.size).toBe(0);
+        expect(plan.resources.Source.action).toBe("update");
+        expect(plan.resources.Alias.action).toBe("update");
+        expect(plan.resources.Consumer.action).toBe("create");
+
+        // Reproduce the local-sidecar race from the preserved Samva plan:
+        // the upstream changes after planning, while the downstream still
+        // carries a noop decision made against its persisted URL.
+        plan.resources.Alias = {
+          ...plan.resources.Alias,
+          action: "noop",
+          state: yield* getState<CreatedResourceState | UpdatedResourceState>(
+            "Alias",
+          ),
+        } as NoopUpdate;
+
+        const consumerCreates: string[] = [];
+        const output = yield* apply(plan).pipe(
+          Effect.provide(
+            Layer.succeed(TestResourceHooks, {
+              create: (id, props) =>
+                Effect.sync(() => {
+                  if (id === "Consumer") {
+                    consumerCreates.push(props.string!);
+                  }
+                }),
+            }),
+          ),
+        );
+
+        expect(output.alias.string).toBe("new-url");
+        expect(output.consumer!.string).toBe("new-url");
+        expect(consumerCreates).toEqual(["new-url"]);
       }),
   );
 });
