@@ -168,6 +168,93 @@ describe("AWS.Lambda.HttpServer", () => {
     });
   });
 
+  it("defaults API Gateway v2 to HTTPS when no valid forwarded scheme is present", async () => {
+    const result = asStructuredResult(
+      await invoke(
+        makeEvent({
+          version: "2.0",
+          routeKey: "GET /inspect",
+          rawPath: "/inspect",
+          headers: {
+            host: "abc123.execute-api.us-west-2.amazonaws.com",
+            "x-forwarded-proto": undefined,
+            "x-request-id": "req-apigw-v2-no-scheme",
+          },
+          requestContext: {
+            apiId: "abc123",
+            domainName: "abc123.execute-api.us-west-2.amazonaws.com",
+            domainPrefix: "abc123",
+            routeKey: "GET /inspect",
+            stage: "$default",
+            http: {
+              method: "GET",
+              path: "/inspect",
+              protocol: "HTTP/1.1",
+              sourceIp: "203.0.113.100",
+            },
+          } as LambdaFunctionURLEvent["requestContext"],
+        }),
+      ),
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body ?? "")).toMatchObject({
+      url: "https://abc123.execute-api.us-west-2.amazonaws.com/inspect",
+      originalUrl: "https://abc123.execute-api.us-west-2.amazonaws.com/inspect",
+      requestId: "req-apigw-v2-no-scheme",
+    });
+  });
+
+  it("ignores an invalid forwarded scheme", async () => {
+    const result = asStructuredResult(
+      await invoke(
+        makeEvent({
+          rawPath: "/inspect",
+          headers: {
+            "x-forwarded-proto": "HTTP/1.1",
+          },
+          requestContext: {
+            http: {
+              method: "GET",
+              path: "/inspect",
+              protocol: "HTTP/1.1",
+            },
+          } as LambdaFunctionURLEvent["requestContext"],
+        }),
+      ),
+    );
+
+    expect(JSON.parse(result.body ?? "")).toMatchObject({
+      url: "https://example.lambda-url.us-east-1.on.aws/inspect",
+      originalUrl: "https://example.lambda-url.us-east-1.on.aws/inspect",
+    });
+  });
+
+  it("honors a valid forwarded HTTP scheme", async () => {
+    const result = asStructuredResult(
+      await invoke(
+        makeEvent({
+          rawPath: "/inspect",
+          headers: {
+            "x-forwarded-proto": "HTTP",
+          },
+          requestContext: {
+            http: {
+              method: "GET",
+              path: "/inspect",
+              protocol: "HTTP/1.1",
+            },
+          } as LambdaFunctionURLEvent["requestContext"],
+        }),
+      ),
+    );
+
+    expect(JSON.parse(result.body ?? "")).toMatchObject({
+      url: "http://example.lambda-url.us-east-1.on.aws/inspect",
+      originalUrl: "http://example.lambda-url.us-east-1.on.aws/inspect",
+    });
+  });
+
   it("keeps the stage prefix in rawPath for named-stage API Gateway v2 events", async () => {
     // On the default execute-api endpoint with a named (non-$default) stage,
     // API Gateway includes the stage in rawPath (e.g. /prod/inspect). We use

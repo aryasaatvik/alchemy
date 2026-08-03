@@ -268,6 +268,10 @@ export const providers = AWS.providers({
   }),
   lambda: {
     local: {
+      endpoint: Effect.succeed("http://floci:4566"),
+      environment: Effect.succeed({
+        REDIS_URL: "redis://redis:6379",
+      }),
       serviceEndpoints: Effect.succeed({
         ses: "http://host.docker.internal:8811/ses",
       }),
@@ -300,7 +304,13 @@ export const providers = AWS.providers({
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Bundle from "alchemy/Bundle";
-import { resolveFunctionBundleConfig } from "alchemy/AWS/Lambda";
+import {
+  localEmulatorFunctionEnvironment,
+  makeFunctionHttpHandler,
+  resolveFunctionBundleConfig,
+} from "alchemy/AWS/Lambda";
+import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import {
   CloudflareEnvironment,
   fromEnv,
@@ -319,6 +329,68 @@ const acceptance = Effect.gen(function* () {
 });
 
 await Effect.runPromise(acceptance.pipe(Effect.provide(NodeServices.layer)));
+
+const localEnvironment = await Effect.runPromise(
+  localEmulatorFunctionEnvironment(
+    { REDIS_URL: "redis://127.0.0.1:56379" },
+    {
+      endpoint: Effect.succeed("http://floci:4566"),
+      environment: Effect.succeed({ REDIS_URL: "redis://redis:6379" }),
+      serviceEndpoints: Effect.succeed({
+        ses: "http://host.docker.internal:8811/ses",
+      }),
+    },
+  ),
+);
+if (
+  localEnvironment.REDIS_URL !== "redis://redis:6379" ||
+  localEnvironment.AWS_ENDPOINT_URL !== "http://floci:4566" ||
+  localEnvironment.ALCHEMY_AWS_SERVICE_ENDPOINTS !==
+    JSON.stringify({ ses: "http://host.docker.internal:8811/ses" })
+) {
+  throw new Error("Local Lambda environment policy was not applied");
+}
+
+const httpHandler = makeFunctionHttpHandler(
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest;
+    return HttpServerResponse.text(request.originalUrl);
+  }),
+);
+const httpResult = await Effect.runPromise(
+  httpHandler({
+    version: "2.0",
+    routeKey: "GET /health",
+    rawPath: "/health",
+    rawQueryString: "",
+    headers: { host: "abc123.execute-api.us-west-2.amazonaws.com" },
+    requestContext: {
+      accountId: "100000000001",
+      apiId: "abc123",
+      domainName: "abc123.execute-api.us-west-2.amazonaws.com",
+      domainPrefix: "abc123",
+      http: {
+        method: "GET",
+        path: "/health",
+        protocol: "HTTP/1.1",
+        sourceIp: "127.0.0.1",
+        userAgent: "acceptance",
+      },
+      requestId: "request-id",
+      routeKey: "GET /health",
+      stage: "$default",
+      time: "03/Aug/2026:00:00:00 +0000",
+      timeEpoch: 1,
+    },
+    isBase64Encoded: false,
+  }),
+);
+if (
+  typeof httpResult === "string" ||
+  httpResult.body !== "https://abc123.execute-api.us-west-2.amazonaws.com/health"
+) {
+  throw new Error("API Gateway v2 Lambda runtime request used an invalid scheme");
+}
 
 const accountId = "0123456789abcdef0123456789abcdef";
 const localWorkerBinding = Effect.gen(function* () {
@@ -356,7 +428,7 @@ const localWorkerBinding = Effect.gen(function* () {
 );
 
 await Effect.runPromise(localWorkerBinding);
-console.log("fresh-consumer Lambda bundle and local Worker binding passed");
+console.log("fresh-consumer Lambda bundle, runtime fixture, and local Worker binding passed");
 `,
   );
   await run(["bun", "install"], { cwd: consumer });

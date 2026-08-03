@@ -129,10 +129,11 @@ export const makeFunctionHttpHandler = <Req>(handler: Http.HttpEffect<Req>) => {
 const functionUrlEventToWebRequest = (
   event: LambdaFunctionURLEvent,
 ): Request => {
+  const forwardedProtocol = event.headers["x-forwarded-proto"]?.toLowerCase();
   const protocol =
-    event.headers["x-forwarded-proto"] ??
-    event.requestContext.http.protocol ??
-    "https";
+    forwardedProtocol === "http" || forwardedProtocol === "https"
+      ? forwardedProtocol
+      : "https";
   const host = event.headers.host ?? event.requestContext.domainName;
   const url = `${protocol}://${host}${event.rawPath}${event.rawQueryString ? `?${event.rawQueryString}` : ""}`;
   const method = event.requestContext.http.method;

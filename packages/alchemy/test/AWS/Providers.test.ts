@@ -6,7 +6,7 @@ import * as AWS from "@/AWS";
 import { Stack } from "@/Stack.ts";
 import { Stage } from "@/Stage.ts";
 import { NodeServices } from "@effect/platform-node";
-import { it } from "alchemy-test";
+import { expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -50,3 +50,65 @@ it.live(
       ),
     ),
 );
+
+it.live("does not evaluate local Lambda options in live provider mode", () => {
+  let evaluated = false;
+  const localEnvironment = Effect.sync(() => {
+    evaluated = true;
+    return { REDIS_URL: "redis://redis:6379" };
+  });
+  const localEndpoint = Effect.sync(() => {
+    evaluated = true;
+    return "http://floci:4566";
+  });
+  const localServiceEndpoints = Effect.sync(() => {
+    evaluated = true;
+    return { ses: "http://host.docker.internal:8811/ses" };
+  });
+
+  return Effect.gen(function* () {
+    yield* Layer.build(
+      AWS.providers({
+        lambda: {
+          local: {
+            endpoint: localEndpoint,
+            environment: localEnvironment,
+            serviceEndpoints: localServiceEndpoints,
+          },
+        },
+      }),
+    );
+    expect(evaluated).toBe(false);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(AuthProviders, {}),
+        Layer.sync(ArtifactStore, createArtifactStore),
+        Layer.succeed(Stage, "test"),
+        Layer.succeed(Stack, {
+          name: "test",
+          stage: "test",
+          resources: {},
+          bindings: {},
+          actions: {},
+        }),
+        Layer.succeed(AlchemyContext, {
+          dev: false,
+          adopt: false,
+          dotAlchemy: ".alchemy",
+        }),
+        Layer.succeed(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromUnknown({
+            ALCHEMY_PROFILE: `non-existent-${uuidv4()}`,
+          }),
+        ),
+        ProfileLive,
+      ).pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer),
+        ),
+      ),
+    ),
+  );
+});

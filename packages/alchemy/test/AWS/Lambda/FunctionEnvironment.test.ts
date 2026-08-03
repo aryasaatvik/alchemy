@@ -199,6 +199,111 @@ describe("Lambda environment size", () => {
       }),
   );
 
+  it.effect(
+    "overlays raw placement-specific values after final environment resolution",
+    () =>
+      Effect.gen(function* () {
+        const resolved = resolveFunctionEnvironment(
+          {
+            PRESERVED: "binding",
+            REDIS_URL: "redis://127.0.0.1:56379",
+          },
+          {
+            main: "handler.ts",
+            build: { output: { sourcemap: false } },
+            uploadSourceMap: false,
+            env: { FROM_FUNCTION: "function" },
+          },
+          { ALCHEMY_STAGE: "test" },
+        );
+        const transformed = yield* localEmulatorFunctionEnvironment(resolved, {
+          environment: Effect.succeed({
+            REDIS_URL: "redis://redis:6379",
+            DATABASE_URL: "postgres://postgres:5432/samva",
+          }),
+        });
+
+        expect(resolved.REDIS_URL).toBe("redis://127.0.0.1:56379");
+        expect(transformed).toEqual({
+          ALCHEMY_STAGE: "test",
+          DATABASE_URL: "postgres://postgres:5432/samva",
+          FROM_FUNCTION: "function",
+          PRESERVED: "binding",
+          REDIS_URL: "redis://redis:6379",
+        });
+        expect(Object.keys(transformed)).toEqual([
+          "ALCHEMY_STAGE",
+          "DATABASE_URL",
+          "FROM_FUNCTION",
+          "PRESERVED",
+          "REDIS_URL",
+        ]);
+      }),
+  );
+
+  it.effect("rejects malformed local Lambda environment overlays", () =>
+    Effect.gen(function* () {
+      for (const environment of [
+        { "": "value" },
+        { INVALID: 42 } as unknown as Readonly<Record<string, string>>,
+        { AWS_ENDPOINT_URL: "http://smuggled:4566" },
+        { AWS_ACCESS_KEY_ID: "smuggled" },
+        { AWS_SECRET_ACCESS_KEY: "smuggled" },
+        { AWS_SESSION_TOKEN: "smuggled" },
+        { ALCHEMY_AWS_SERVICE_ENDPOINTS: "{}" },
+      ]) {
+        const error = yield* Effect.flip(
+          localEmulatorFunctionEnvironment(
+            { ALCHEMY_STAGE: "test" },
+            { environment: Effect.succeed(environment) },
+          ),
+        );
+        expect(error._tag).toBe("LocalEmulatorFunctionEnvironmentError");
+      }
+    }),
+  );
+
+  it.effect(
+    "reifies the container-global endpoint with per-service exceptions",
+    () =>
+      Effect.gen(function* () {
+        const transformed = yield* localEmulatorFunctionEnvironment(
+          {
+            AWS_ENDPOINT_URL: packEnvValue(
+              Redacted.make("http://127.0.0.1:4566"),
+            ),
+            ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+              ses: "https://worktree.emulate.samva.localhost/ses",
+            }),
+          },
+          {
+            endpoint: Effect.succeed("http://floci:4566"),
+            serviceEndpoints: Effect.succeed({
+              ses: "http://host.docker.internal:8811/ses",
+              sesv2: "http://host.docker.internal:8811/ses",
+            }),
+          },
+        );
+
+        expect(transformed.AWS_ENDPOINT_URL).toBe("http://floci:4566");
+        expect(transformed.ALCHEMY_AWS_SERVICE_ENDPOINTS).toBe(
+          JSON.stringify({
+            ses: "http://host.docker.internal:8811/ses",
+            sesv2: "http://host.docker.internal:8811/ses",
+          }),
+        );
+      }),
+  );
+
+  it.effect("rejects an empty local Lambda global endpoint", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        localEmulatorFunctionEnvironment({}, { endpoint: Effect.succeed("") }),
+      );
+      expect(error._tag).toBe("LocalEmulatorFunctionEnvironmentError");
+    }),
+  );
+
   it.effect("removes an explicitly empty local Lambda service map", () =>
     Effect.gen(function* () {
       const transformed = yield* localEmulatorFunctionEnvironment(

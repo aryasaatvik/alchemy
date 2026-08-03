@@ -50,6 +50,30 @@ import {
 
 export interface LocalEmulatorFunctionProviderOptions {
   /**
+   * Raw environment values as reached from the local Lambda execution
+   * substrate. The overlay is evaluated after binding, Function, and Alchemy
+   * environment resolution. Supplied keys replace resolved values, omitted
+   * keys are preserved, and an empty record is a no-op.
+   *
+   * Provider-owned AWS normalization runs after this overlay: the host-only
+   * global endpoint is removed, credentials are reified, and an explicit
+   * `serviceEndpoints` option remains authoritative for its reserved record.
+   * This Effect is never evaluated by the live Function provider.
+   */
+  readonly environment?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    never,
+    never
+  >;
+  /**
+   * Global AWS endpoint as reached from the local Lambda execution substrate.
+   * The host-process endpoint is always removed first. `undefined` leaves the
+   * runtime without a global override; a non-empty string installs the raw
+   * container-reachable endpoint. Per-service `serviceEndpoints` remain more
+   * specific at runtime. This Effect is never evaluated by the live provider.
+   */
+  readonly endpoint?: Effect.Effect<string | undefined, never, never>;
+  /**
    * Service endpoints as reached from the local Lambda execution substrate.
    * This is separate from the provider collection's control-plane endpoint
    * map because a container may reach the same service through a different
@@ -89,6 +113,12 @@ const localCredentialKeys = [
   "AWS_SECRET_ACCESS_KEY",
   "AWS_SESSION_TOKEN",
 ] as const;
+
+const localProviderOwnedEnvironmentKeys = new Set<string>([
+  "AWS_ENDPOINT_URL",
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  ...localCredentialKeys,
+]);
 
 const decodeLocalCredential = (
   key: (typeof localCredentialKeys)[number],
@@ -131,17 +161,40 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
   environment: LambdaEnvironment,
   options: LocalEmulatorFunctionProviderOptions = {},
 ) {
+  const runtimeEnvironment = { ...environment };
+  if (options.environment !== undefined) {
+    const entries = Object.entries(yield* options.environment).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    if (
+      entries.some(
+        ([key, value]) =>
+          key.length === 0 ||
+          typeof value !== "string" ||
+          localProviderOwnedEnvironmentKeys.has(key),
+      )
+    ) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message:
+          "Local emulator Lambda environment must contain non-reserved, non-empty keys with string values; use endpoint, serviceEndpoints, or the Function environment for provider-owned AWS values",
+      });
+    }
+    for (const [key, value] of entries) {
+      runtimeEnvironment[key] = value;
+    }
+  }
+
   const accessKeyId = yield* decodeLocalCredential(
     "AWS_ACCESS_KEY_ID",
-    environment.AWS_ACCESS_KEY_ID,
+    runtimeEnvironment.AWS_ACCESS_KEY_ID,
   );
   const secretAccessKey = yield* decodeLocalCredential(
     "AWS_SECRET_ACCESS_KEY",
-    environment.AWS_SECRET_ACCESS_KEY,
+    runtimeEnvironment.AWS_SECRET_ACCESS_KEY,
   );
   const sessionToken = yield* decodeLocalCredential(
     "AWS_SESSION_TOKEN",
-    environment.AWS_SESSION_TOKEN,
+    runtimeEnvironment.AWS_SESSION_TOKEN,
   );
   if (
     (accessKeyId === undefined) !== (secretAccessKey === undefined) ||
@@ -153,7 +206,6 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
     });
   }
 
-  const runtimeEnvironment = { ...environment };
   delete runtimeEnvironment.AWS_ENDPOINT_URL;
   for (const key of localCredentialKeys) {
     delete runtimeEnvironment[key];
@@ -163,6 +215,21 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
     runtimeEnvironment.AWS_SECRET_ACCESS_KEY = secretAccessKey;
     if (sessionToken !== undefined) {
       runtimeEnvironment.AWS_SESSION_TOKEN = sessionToken;
+    }
+  }
+  if (options.endpoint !== undefined) {
+    const endpoint = yield* options.endpoint;
+    if (
+      endpoint !== undefined &&
+      (typeof endpoint !== "string" || endpoint.length === 0)
+    ) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message:
+          "Local emulator Lambda endpoint must be undefined or a non-empty string",
+      });
+    }
+    if (endpoint !== undefined) {
+      runtimeEnvironment.AWS_ENDPOINT_URL = endpoint;
     }
   }
   if (options.serviceEndpoints !== undefined) {
@@ -191,7 +258,11 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
       );
     }
   }
-  return runtimeEnvironment;
+  return Object.fromEntries(
+    Object.entries(runtimeEnvironment).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
 });
 
 /**
