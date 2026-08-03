@@ -58,13 +58,13 @@ export interface AWSEnvironmentShape {
 
 export class AWSEnvironment extends Context.Service<
   AWSEnvironment,
-  AWSEnvironmentShape
+  Effect.Effect<AWSEnvironmentShape>
 >()("AWS::Environment") {
-  static current = AWSEnvironment.use(Effect.succeed);
+  static current = AWSEnvironment.use((env) => env);
   readonly kind = "Environment" as const;
 }
 
-export const Default = Layer.effect(
+export const Default = Layer.succeed(
   AWSEnvironment,
   Effect.gen(function* () {
     // An explicit endpoint is a target selection, not an ambient profile
@@ -103,5 +103,5 @@ export const Default = Layer.effect(
       Effect.orDie,
       Effect.cached,
     );
-  }),
-).pipe(Layer.orDie);
+  }).pipe(Effect.orDie),
+);
