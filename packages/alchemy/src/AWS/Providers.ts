@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
+import { AlchemyContext } from "../AlchemyContext.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import * as Command from "../Command/index.ts";
 import { DockerLive } from "../Docker/Docker.ts";
@@ -239,7 +240,9 @@ export interface ProvidersOptions {
   readonly lambda?: Lambda.FunctionProviderModeOptions;
 }
 
-export const providers = (options: ProvidersOptions = {}) => {
+export const providers = (
+  options: ProvidersOptions = {},
+): Layer.Layer<Providers, never, AlchemyContext> => {
   const endpoint =
     options.serviceEndpoints === undefined
       ? Endpoint.fromEnvironment

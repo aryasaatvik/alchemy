@@ -258,6 +258,43 @@ const verifyFreshConsumer = async (artifact: string): Promise<void> => {
     `import { Vite } from "alchemy/Cloudflare/Website";\nexport default Vite;\n`,
   );
   await writeFile(
+    join(consumer, "provider-api.ts"),
+    `import * as AWS from "alchemy/AWS";
+import * as Effect from "effect/Effect";
+
+export const providers = AWS.providers({
+  serviceEndpoints: Effect.succeed({
+    ses: "https://emulate.samva.localhost/ses",
+  }),
+  lambda: {
+    local: {
+      serviceEndpoints: Effect.succeed({
+        ses: "http://host.docker.internal:8811/ses",
+      }),
+    },
+  },
+});
+`,
+  );
+  await writeFile(
+    join(consumer, "tsconfig.json"),
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          module: "preserve",
+          moduleResolution: "bundler",
+          noEmit: true,
+          skipLibCheck: true,
+          strict: true,
+          target: "ESNext",
+        },
+        include: ["provider-api.ts"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(
     join(consumer, "acceptance.ts"),
     `import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -323,6 +360,17 @@ console.log("fresh-consumer Lambda bundle and local Worker binding passed");
 `,
   );
   await run(["bun", "install"], { cwd: consumer });
+  await run(
+    [
+      "bunx",
+      "--package",
+      "@typescript/native-preview",
+      "tsgo",
+      "-p",
+      "tsconfig.json",
+    ],
+    { cwd: consumer },
+  );
   await run(["bun", "acceptance.ts"], { cwd: consumer });
 };
 
@@ -607,7 +655,7 @@ try {
   console.log(`Created ${alchemyArtifact}`);
   console.log(`Version ${alchemyVersion}`);
   console.log(`Bundled ${bundledWorkspaces.length} workspace dependencies`);
-  console.log(`Consumer dependency: \"alchemy\": \"file:${alchemyArtifact}\"`);
+  console.log(`Consumer dependency: "alchemy": "file:${alchemyArtifact}"`);
 } finally {
   await rm(temporaryDir, { recursive: true, force: true });
 }
