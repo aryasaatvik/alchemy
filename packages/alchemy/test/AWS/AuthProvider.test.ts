@@ -93,4 +93,30 @@ describe("local AWS auth", () => {
       ),
     ),
   );
+
+  it.effect(
+    "prefers stack-owned service endpoints over the local fallback",
+    () =>
+      Effect.gen(function* () {
+        const endpoints = yield* Endpoint.ServiceEndpoint;
+        expect(endpoints.resolve("ses")).toBe("http://samva-emulate.test/ses");
+        expect(endpoints.resolve("sqs")).toBe("http://floci.test:4566");
+      }).pipe(
+        Effect.provide(AwsEndpoint.fromEnvironment),
+        Effect.provide(
+          AwsEndpoint.serviceEndpoints(
+            Effect.succeed({ ses: "http://samva-emulate.test/ses" }),
+          ),
+        ),
+        Effect.provideService(
+          AWSEnvironment,
+          Effect.succeed({
+            accountId: "123456789012",
+            region: "us-east-1",
+            endpoint: "http://floci.test:4566",
+            credentials: Effect.die("not used"),
+          }),
+        ),
+      ),
+  );
 });
