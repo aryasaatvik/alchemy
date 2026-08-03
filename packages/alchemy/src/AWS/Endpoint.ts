@@ -41,7 +41,7 @@ export const fromEnvironment: Layer.Layer<
 > = Layer.effect(
   Endpoint.ServiceEndpoint,
   Effect.gen(function* () {
-    const env = yield* AWSEnvironment;
+    const env = yield* AWSEnvironment.current;
     const overrides = yield* Effect.serviceOption(
       ServiceEndpointOverrides,
     ).pipe(Effect.map(Option.getOrElse(() => ({}))));
