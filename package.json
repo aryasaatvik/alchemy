@@ -48,6 +48,7 @@
     "opencode": "OPENCODE_EXPERIMENTAL_OXFMT=true opencode",
     "prepare": "husky && bun setup:git && effect-tsgo patch && bun build:cloudflare-tools",
     "publish:npm": "bun run build && bun run --filter alchemy publish:npm",
+    "pack:integration": "bun scripts/pack-alchemy-integration.ts",
     "setup": "effect-tsgo patch && bun run download:external",
     "setup:git": "git config include.path ../.gitconfig",
     "sync:submodules": "git submodule sync --recursive && git submodule update --init --recursive",
