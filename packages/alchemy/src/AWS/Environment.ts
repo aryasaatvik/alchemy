@@ -1,7 +1,9 @@
-import type {
-  CredentialsError,
-  ResolvedCredentials,
+import {
+  Credentials,
+  type CredentialsError,
+  type ResolvedCredentials,
 } from "@distilled.cloud/aws/Credentials";
+import { Region } from "@distilled.cloud/aws/Region";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -27,6 +29,55 @@ export const AWS_ACCOUNT_ID = Config.string("AWS_ACCOUNT_ID");
 export const AWS_ACCESS_KEY_ID = Config.string("AWS_ACCESS_KEY_ID");
 export const AWS_SECRET_ACCESS_KEY = Config.redacted("AWS_SECRET_ACCESS_KEY");
 export const AWS_SESSION_TOKEN = Config.redacted("AWS_SESSION_TOKEN");
+export const AWS_SERVICE_ENDPOINTS_ENV_VAR = "ALCHEMY_AWS_SERVICE_ENDPOINTS";
+
+/** Global AWS endpoint visible inside an application runtime. */
+export const AWS_ENDPOINT_URL = Config.string("AWS_ENDPOINT_URL").pipe(
+  Config.option,
+  Effect.map(Option.getOrUndefined),
+);
+
+export class InvalidAWSServiceEndpoints extends Data.TaggedError(
+  "AWS::Environment::InvalidServiceEndpoints",
+)<{ readonly message: string }> {}
+
+const decodeServiceEndpoints = (raw: string) =>
+  Effect.try({
+    try: () => {
+      const value: unknown = JSON.parse(raw);
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        Array.isArray(value) ||
+        Object.entries(value).some(
+          ([service, endpoint]) =>
+            service.length === 0 ||
+            typeof endpoint !== "string" ||
+            endpoint.length === 0,
+        )
+      ) {
+        throw new TypeError("expected a non-empty string endpoint record");
+      }
+      return value as Readonly<Record<string, string>>;
+    },
+    catch: () =>
+      new InvalidAWSServiceEndpoints({
+        message: `${AWS_SERVICE_ENDPOINTS_ENV_VAR} must contain a JSON object of non-empty service endpoints`,
+      }),
+  });
+
+/** Service-specific endpoint policy captured by the declaring AWS provider. */
+export const AWS_SERVICE_ENDPOINTS = Config.string(
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+).pipe(
+  Config.option,
+  Effect.flatMap(
+    Option.match({
+      onNone: () => Effect.succeed(undefined),
+      onSome: decodeServiceEndpoints,
+    }),
+  ),
+);
 
 export type AccountID = string;
 export type RegionID = string;
@@ -66,6 +117,36 @@ export class AWSEnvironment extends Context.Service<
   readonly kind = "Environment" as const;
 }
 
+/**
+ * Runtime-only AWS environment for generated Lambda entrypoints. It uses the
+ * already-provided process credentials and Region and reads endpoint policy
+ * only from the runtime Config provider; it never loads a profile, contacts
+ * metadata, or starts an emulator.
+ */
+export const Runtime = Layer.effect(
+  AWSEnvironment,
+  Effect.all({
+    accountId: Config.string("ALCHEMY_AWS_ACCOUNT_ID"),
+    credentials: Credentials,
+    endpoint: AWS_ENDPOINT_URL,
+    region: Region,
+    serviceEndpoints: AWS_SERVICE_ENDPOINTS,
+  }).pipe(
+    Effect.map(
+      ({ accountId, credentials, endpoint, region, serviceEndpoints }) =>
+        region.pipe(
+          Effect.map((region) => ({
+            accountId,
+            credentials,
+            endpoint,
+            region,
+            serviceEndpoints,
+          })),
+        ),
+    ),
+  ),
+);
+
 export const Default = Layer.succeed(
   AWSEnvironment,
   Effect.gen(function* () {
@@ -73,21 +154,19 @@ export const Default = Layer.succeed(
     // override. This lets a supervisor derive a worktree-local Floci account
     // without writing to the developer's shared Alchemy profile, while an
     // ordinary deploy keeps its existing profile-driven identity.
-    const endpoint = yield* Config.string("AWS_ENDPOINT_URL").pipe(
-      Config.option,
-    );
-    if (Option.isSome(endpoint)) {
+    const endpoint = yield* AWS_ENDPOINT_URL;
+    if (endpoint !== undefined) {
       const accountId = yield* AWS_ACCOUNT_ID;
       const region = yield* AWS_REGION;
       const local = yield* localAwsCredentials({
         method: "local",
-        endpoint: endpoint.value,
+        endpoint,
         accountId,
         region,
         autoStart: false,
       });
       yield* ensureLocalEmulator({
-        endpoint: endpoint.value,
+        endpoint,
         autoStart: false,
       });
       return local;

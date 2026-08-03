@@ -1,10 +1,17 @@
 import { Endpoint } from "@distilled.cloud/aws";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { AWSEnvironment } from "./Environment.ts";
 
 export const of = (endpoint: string) =>
   Layer.succeed(Endpoint.Endpoint, Effect.succeed(endpoint));
+
+/** Service endpoint map selected by the declaring AWS provider. */
+export class ConfiguredServiceEndpoints extends Context.Service<
+  ConfiguredServiceEndpoints,
+  Readonly<Record<string, string>>
+>()("AWS::ConfiguredServiceEndpoints") {}
 
 /**
  * Derive a service-aware endpoint policy from the surrounding
@@ -14,12 +21,13 @@ export const of = (endpoint: string) =>
  */
 const makeFromEnvironment = <E, R>(
   overrides: Effect.Effect<Readonly<Record<string, string>>, E, R>,
-) =>
-  Layer.effect(
+) => {
+  const configured = Layer.effect(ConfiguredServiceEndpoints, overrides);
+  return Layer.effect(
     Endpoint.ServiceEndpoint,
     Effect.gen(function* () {
       const env = yield* AWSEnvironment.current;
-      const serviceEndpoints = yield* overrides;
+      const serviceEndpoints = yield* ConfiguredServiceEndpoints;
       return {
         resolve: (service: string) =>
           serviceEndpoints[service] ??
@@ -27,7 +35,8 @@ const makeFromEnvironment = <E, R>(
           env.endpoint,
       } satisfies Endpoint.ServiceEndpointResolver;
     }),
-  );
+  ).pipe(Layer.provideMerge(configured));
+};
 
 export const fromEnvironment = makeFromEnvironment(Effect.succeed({}));
 

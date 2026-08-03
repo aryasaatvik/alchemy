@@ -60,7 +60,11 @@ import {
 import { sha256 } from "../../Util/sha256.ts";
 import { zipCode } from "../../Util/zip.ts";
 import { Assets } from "../Assets.ts";
-import { AWSEnvironment } from "../Environment.ts";
+import {
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  AWSEnvironment,
+} from "../Environment.ts";
+import { ConfiguredServiceEndpoints } from "../Endpoint.ts";
 import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import type { Providers } from "../Providers.ts";
@@ -1105,7 +1109,8 @@ import { Stack } from "alchemy/Stack";
 import { makeEntrypointLayer, reifyBoundConfigProvider } from "alchemy/Runtime";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { registerLambdaExtension } from "alchemy/AWS/Lambda/RuntimeExtension";
-import { AWSEnvironment } from "alchemy/AWS/Environment";
+import { Runtime as AwsRuntimeEnvironment } from "alchemy/AWS/Environment";
+import * as AwsEndpoint from "alchemy/AWS/Endpoint";
 import { CloudflareEnvironment } from "alchemy/Cloudflare/CloudflareEnvironment";
 import { Stage } from "alchemy/Stage";
 import * as Config from "effect/Config";
@@ -1148,20 +1153,10 @@ const stack = Layer.effect(
 );
 const stage = Layer.effect(Stage, Config.string("ALCHEMY_STAGE"));
 const awsRuntime = Layer.mergeAll(Credentials.fromEnv(), Region.fromEnv());
-const awsEnvironment = Layer.effect(
-  AWSEnvironment,
-  Effect.all({
-    accountId: Config.string("ALCHEMY_AWS_ACCOUNT_ID"),
-    credentials: Credentials.Credentials,
-    region: Region.Region,
-  }).pipe(
-    Effect.map(({ accountId, credentials, region }) =>
-      region.pipe(
-        Effect.map((region) => ({ accountId, credentials, region })),
-      ),
-    ),
-  ),
-).pipe(Layer.provide(awsRuntime));
+const awsEnvironment = AwsRuntimeEnvironment.pipe(Layer.provide(awsRuntime));
+const awsEndpoint = AwsEndpoint.fromEnvironment.pipe(
+  Layer.provide(awsEnvironment),
+);
 const cloudflareEnvironment = Layer.succeed(
   CloudflareEnvironment,
   Config.string("ALCHEMY_CLOUDFLARE_ACCOUNT_ID").pipe(
@@ -1178,6 +1173,7 @@ const entryLayer = layer.pipe(
   Layer.provideMerge(stage),
   Layer.provideMerge(awsRuntime),
   Layer.provideMerge(awsEnvironment),
+  Layer.provideMerge(awsEndpoint),
   Layer.provideMerge(cloudflareEnvironment),
   Layer.provideMerge(platform),
   Layer.provideMerge(
@@ -1291,6 +1287,16 @@ export type FunctionLifecycleInput<
 export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
   const stack = yield* Stack;
   const { accountId } = yield* AWSEnvironment.current;
+  const configuredServiceEndpoints = yield* Effect.serviceOption(
+    ConfiguredServiceEndpoints,
+  );
+  const serviceEndpoints = Option.isSome(configuredServiceEndpoints)
+    ? Object.fromEntries(
+        Object.entries(configuredServiceEndpoints.value).sort(([a], [b]) =>
+          a.localeCompare(b),
+        ),
+      )
+    : {};
   const cloudflareEnvironment = yield* Effect.serviceOption(
     CloudflareEnvironment,
   );
@@ -1303,6 +1309,11 @@ export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
 
   return {
     ALCHEMY_AWS_ACCOUNT_ID: accountId,
+    ...(Object.keys(serviceEndpoints).length === 0
+      ? {}
+      : {
+          [AWS_SERVICE_ENDPOINTS_ENV_VAR]: JSON.stringify(serviceEndpoints),
+        }),
     ...(cloudflareAccountId === undefined
       ? {}
       : { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId }),

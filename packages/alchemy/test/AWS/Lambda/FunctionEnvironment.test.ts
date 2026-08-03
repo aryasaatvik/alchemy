@@ -4,16 +4,65 @@ import {
   materializeLambdaEnvironment,
   mergeFunctionEnvironment,
   resolveFunctionEnvironment,
+  resolveFunctionRuntimeEnv,
   validateLambdaEnvironment,
 } from "@/AWS/Lambda/Function.ts";
 import { localEmulatorFunctionEnvironment } from "@/AWS/Lambda/FunctionProvider.ts";
+import * as AwsEndpoint from "@/AWS/Endpoint.ts";
+import { AWSEnvironment } from "@/AWS/Environment.ts";
 import { packEnvValue, unpackEnvValue } from "@/RuntimeContext.ts";
+import { Stack, type StackSpec } from "@/Stack.ts";
 import { fromEnv } from "@aws-sdk/credential-providers";
 import { describe, expect, it } from "alchemy-test";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
 describe("Lambda environment size", () => {
+  it.effect("serializes provider service endpoints into runtime identity", () =>
+    resolveFunctionRuntimeEnv.pipe(
+      Effect.tap((environment) =>
+        Effect.sync(() => {
+          expect(environment).toEqual({
+            ALCHEMY_AWS_ACCOUNT_ID: "100000000004",
+            ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+              servicequotas: "http://emulate.samva:4300/ses",
+              ses: "http://emulate.samva:4300/ses",
+              sesv2: "http://emulate.samva:4300/ses",
+            }),
+            ALCHEMY_STACK_NAME: "samva",
+            ALCHEMY_STAGE: "dev-saatvik",
+          });
+        }),
+      ),
+      Effect.provide(
+        AwsEndpoint.fromEnvironmentWithServiceEndpoints(
+          Effect.succeed({
+            servicequotas: "http://emulate.samva:4300/ses",
+            sesv2: "http://emulate.samva:4300/ses",
+            ses: "http://emulate.samva:4300/ses",
+          }),
+        ),
+      ),
+      Effect.provideService(
+        AWSEnvironment,
+        Effect.succeed({
+          accountId: "100000000004",
+          region: "ap-south-1",
+          credentials: Effect.die("not used"),
+        }),
+      ),
+      Effect.provideService(Stack, {
+        name: "samva",
+        stage: "dev-saatvik",
+        resources: {},
+        bindings: {},
+        actions: {},
+      } satisfies Omit<StackSpec, "output">),
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+    ),
+  );
+
   it("always includes Alchemy runtime identity", () => {
     expect(
       resolveFunctionEnvironment(
