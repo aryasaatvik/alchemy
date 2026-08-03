@@ -228,8 +228,22 @@ export class Providers extends Provider.ProviderCollection<Providers>()(
   "AWS",
 ) {}
 
-export const providers = () =>
-  Layer.effect(
+/** Process-local endpoint policy for the AWS provider collection. */
+export interface ProvidersOptions {
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    never,
+    never
+  >;
+}
+
+export const providers = (options: ProvidersOptions = {}) => {
+  const endpoint =
+    options.serviceEndpoints === undefined
+      ? Endpoint.fromEnvironment
+      : Endpoint.fromEnvironmentWithServiceEndpoints(options.serviceEndpoints);
+
+  return Layer.effect(
     Providers,
     Provider.collection([
       KeyPair,
@@ -1691,7 +1705,7 @@ export const providers = () =>
     ),
     Layer.provideMerge(Region.fromEnvironment),
     Layer.provideMerge(Credentials.fromEnvironment),
-    Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(endpoint),
     Layer.provideMerge(DefaultEnvironment),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),
@@ -1705,6 +1719,7 @@ export const providers = () =>
     Layer.provideMerge(Layer.succeed(Retry, awsRetryFactory)),
     Layer.orDie,
   );
+};
 
 // Node socket-level error codes that indicate a transient network failure.
 const TRANSIENT_NETWORK_CODES = new Set([

@@ -93,30 +93,40 @@ describe("local AWS auth", () => {
       ),
     ),
   );
+});
 
-  it.effect(
-    "prefers stack-owned service endpoints over the local fallback",
-    () =>
-      Effect.gen(function* () {
-        const endpoints = yield* Endpoint.ServiceEndpoint;
-        expect(endpoints.resolve("ses")).toBe("http://samva-emulate.test/ses");
-        expect(endpoints.resolve("sqs")).toBe("http://floci.test:4566");
-      }).pipe(
-        Effect.provide(AwsEndpoint.fromEnvironment),
-        Effect.provide(
-          AwsEndpoint.serviceEndpoints(
-            Effect.succeed({ ses: "http://samva-emulate.test/ses" }),
-          ),
-        ),
-        Effect.provideService(
-          AWSEnvironment,
+describe("stack endpoint policy", () => {
+  it.effect("routes the Samva SES operations before the Floci fallback", () =>
+    Effect.gen(function* () {
+      const endpoints = yield* Endpoint.ServiceEndpoint;
+
+      // SES v1 DescribeReceiptRuleSet, SES v2 GetConfigurationSet, and
+      // Service Quotas operations use these three SigV4 service names.
+      expect(endpoints.resolve("ses")).toBe("http://samva-emulate.test/ses");
+      expect(endpoints.resolve("sesv2")).toBe("http://samva-emulate.test/ses");
+      expect(endpoints.resolve("servicequotas")).toBe(
+        "http://samva-emulate.test/ses",
+      );
+      expect(endpoints.resolve("sqs")).toBe("http://floci.test:4566");
+    }).pipe(
+      Effect.provide(
+        AwsEndpoint.fromEnvironmentWithServiceEndpoints(
           Effect.succeed({
-            accountId: "123456789012",
-            region: "us-east-1",
-            endpoint: "http://floci.test:4566",
-            credentials: Effect.die("not used"),
+            ses: "http://samva-emulate.test/ses",
+            sesv2: "http://samva-emulate.test/ses",
+            servicequotas: "http://samva-emulate.test/ses",
           }),
         ),
       ),
+      Effect.provideService(
+        AWSEnvironment,
+        Effect.succeed({
+          accountId: "123456789012",
+          region: "us-east-1",
+          endpoint: "http://floci.test:4566",
+          credentials: Effect.die("not used"),
+        }),
+      ),
+    ),
   );
 });
