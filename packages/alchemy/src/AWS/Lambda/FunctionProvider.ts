@@ -58,9 +58,10 @@ export interface LocalEmulatorFunctionProviderOptions {
    * keys are preserved, and an empty record is a no-op.
    *
    * Provider-owned AWS normalization runs after this overlay: the host-only
-   * global endpoint is removed, credentials are reified, and an explicit
-   * `serviceEndpoints` option remains authoritative for its reserved record.
-   * This Effect is never evaluated by the live Function provider.
+   * global endpoint is removed, credentials are reified, region variables are
+   * left to the emulator's Lambda bootstrap, and an explicit `serviceEndpoints`
+   * option remains authoritative for its reserved record. This Effect is never
+   * evaluated by the live Function provider.
    */
   readonly environment?: Effect.Effect<
     Readonly<Record<string, string | Redacted.Redacted<string>>>,
@@ -116,10 +117,13 @@ const localCredentialKeys = [
   "AWS_SESSION_TOKEN",
 ] as const;
 
+const localRuntimeRegionKeys = ["AWS_REGION", "AWS_DEFAULT_REGION"] as const;
+
 const localProviderOwnedEnvironmentKeys = new Set<string>([
   "AWS_ENDPOINT_URL",
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
   ...localCredentialKeys,
+  ...localRuntimeRegionKeys,
 ]);
 
 const decodeLocalCredential = (
@@ -155,9 +159,10 @@ const decodeLocalCredential = (
 
 /**
  * Adapt Alchemy's packed application environment to Floci's runtime contract.
- * The emulator owns the container-reachable global endpoint, while the AWS SDK
- * reads its reserved credential variables directly from `process.env`. Other
- * bindings stay packed for the Alchemy runtime to reify normally.
+ * The emulator owns the container-reachable global endpoint and Lambda region,
+ * while the AWS SDK reads its reserved credential variables directly from
+ * `process.env`. Other bindings stay packed for the Alchemy runtime to reify
+ * normally.
  */
 export const localEmulatorFunctionEnvironment = Effect.fn(function* (
   environment: LambdaEnvironment,
@@ -216,6 +221,9 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
 
   delete runtimeEnvironment.AWS_ENDPOINT_URL;
   for (const key of localCredentialKeys) {
+    delete runtimeEnvironment[key];
+  }
+  for (const key of localRuntimeRegionKeys) {
     delete runtimeEnvironment[key];
   }
   if (accessKeyId !== undefined && secretAccessKey !== undefined) {

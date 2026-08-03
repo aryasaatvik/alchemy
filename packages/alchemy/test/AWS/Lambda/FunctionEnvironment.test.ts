@@ -13,6 +13,7 @@ import { AWSEnvironment } from "@/AWS/Environment.ts";
 import { packEnvValue, unpackEnvValue } from "@/RuntimeContext.ts";
 import { Stack, type StackSpec } from "@/Stack.ts";
 import { fromEnv } from "@aws-sdk/credential-providers";
+import * as Region from "@distilled.cloud/aws/Region";
 import { describe, expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
@@ -284,6 +285,43 @@ describe("Lambda environment size", () => {
       }),
   );
 
+  it.effect("defers local Lambda region bootstrap to the emulator", () =>
+    Effect.gen(function* () {
+      const transformed = yield* localEmulatorFunctionEnvironment({
+        AWS_REGION: packEnvValue("ap-south-1"),
+        AWS_DEFAULT_REGION: packEnvValue("ap-south-1"),
+        ORDINARY_BINDING: packEnvValue(Redacted.make("preserved")),
+      });
+
+      expect(transformed).not.toHaveProperty("AWS_REGION");
+      expect(transformed).not.toHaveProperty("AWS_DEFAULT_REGION");
+      expect(transformed.ORDINARY_BINDING).toBe(
+        packEnvValue(Redacted.make("preserved")),
+      );
+
+      // Floci supplies these Lambda bootstrap variables before appending the
+      // application environment. With Alchemy's packed copies absent,
+      // Distilled observes the literal ARN-derived region during init.
+      const runtimeEnvironment = {
+        AWS_REGION: "ap-south-1",
+        AWS_DEFAULT_REGION: "ap-south-1",
+        ...transformed,
+      };
+      const region = yield* Effect.gen(function* () {
+        return yield* yield* Region.Region;
+      }).pipe(
+        Effect.provide(Region.fromEnv()),
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({ env: runtimeEnvironment }),
+          ),
+        ),
+      );
+
+      expect(region).toBe("ap-south-1");
+    }),
+  );
+
   it.effect("rejects malformed local Lambda environment overlays", () =>
     Effect.gen(function* () {
       for (const environment of [
@@ -299,6 +337,8 @@ describe("Lambda environment size", () => {
         { AWS_ACCESS_KEY_ID: "smuggled" },
         { AWS_SECRET_ACCESS_KEY: "smuggled" },
         { AWS_SESSION_TOKEN: "smuggled" },
+        { AWS_REGION: "eu-west-1" },
+        { AWS_DEFAULT_REGION: "eu-west-1" },
         { ALCHEMY_AWS_SERVICE_ENDPOINTS: "{}" },
       ]) {
         const error = yield* Effect.flip(

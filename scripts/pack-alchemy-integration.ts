@@ -313,7 +313,7 @@ import {
   makeFunctionHttpHandler,
   resolveFunctionBundleConfig,
 } from "alchemy/AWS/Lambda";
-import { unpackEnvValue } from "alchemy/RuntimeContext";
+import { packEnvValue, unpackEnvValue } from "alchemy/RuntimeContext";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import {
@@ -337,7 +337,12 @@ await Effect.runPromise(acceptance.pipe(Effect.provide(NodeServices.layer)));
 
 const localEnvironment = await Effect.runPromise(
   localEmulatorFunctionEnvironment(
-    { REDIS_URL: "redis://127.0.0.1:56379" },
+    {
+      AWS_REGION: packEnvValue("ap-south-1"),
+      AWS_DEFAULT_REGION: packEnvValue("ap-south-1"),
+      ORDINARY_BINDING: packEnvValue(Redacted.make("preserved")),
+      REDIS_URL: "redis://127.0.0.1:56379",
+    },
     {
       endpoint: Effect.succeed("http://floci:4566"),
       environment: Effect.succeed({
@@ -361,6 +366,10 @@ if (
   localEnvironment.OTEL_EXPORTER_OTLP_ENDPOINT !==
     "http://host.docker.internal:4318" ||
   localEnvironment.AWS_ENDPOINT_URL !== "http://floci:4566" ||
+  "AWS_REGION" in localEnvironment ||
+  "AWS_DEFAULT_REGION" in localEnvironment ||
+  localEnvironment.ORDINARY_BINDING !==
+    packEnvValue(Redacted.make("preserved")) ||
   localEnvironment.ALCHEMY_AWS_SERVICE_ENDPOINTS !==
     JSON.stringify({ ses: "http://host.docker.internal:8811/ses" })
 ) {
