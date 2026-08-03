@@ -5,6 +5,7 @@
  * LocalStack-compatible emulator. The live bridge remains available as an
  * explicit provider for the separate Live Lambda development mode.
  */
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -12,6 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import { AlchemyContext } from "../../AlchemyContext.ts";
 import * as Bundle from "../../Bundle/Bundle.ts";
@@ -20,6 +22,7 @@ import * as LocalProvider from "../../Local/LocalProvider.ts";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as Provider from "../../Provider.ts";
 import type { ResourceBinding } from "../../Resource.ts";
+import { unpackEnvValue } from "../../RuntimeContext.ts";
 import { Stack } from "../../Stack.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import { AWSEnvironment } from "../Environment.ts";
@@ -53,20 +56,95 @@ export const FunctionProvider = () =>
 export const LiveFunctionProvider = () =>
   Provider.effect(Function, makeFunctionProvider());
 
+/** Raised before a local Lambda mutation when reserved AWS env is invalid. */
+export class LocalEmulatorFunctionEnvironmentError extends Data.TaggedError(
+  "LocalEmulatorFunctionEnvironmentError",
+)<{
+  readonly message: string;
+}> {}
+
+const localCredentialKeys = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+] as const;
+
+const decodeLocalCredential = (
+  key: (typeof localCredentialKeys)[number],
+  value: unknown,
+) =>
+  Effect.gen(function* () {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (typeof value !== "string") {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message: `${key} must resolve to a string`,
+      });
+    }
+    const decoded = yield* Effect.try({
+      try: () => unpackEnvValue<unknown>(value),
+      catch: () =>
+        new LocalEmulatorFunctionEnvironmentError({
+          message: `${key} contains an invalid packed environment value`,
+        }),
+    });
+    const credential = Redacted.isRedacted(decoded)
+      ? Redacted.value(decoded)
+      : decoded;
+    if (typeof credential !== "string" || credential.length === 0) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message: `${key} must resolve to a non-empty string`,
+      });
+    }
+    return credential;
+  });
+
 /**
- * Remove the supervisor's host-only AWS endpoint from an embedded emulator
- * Lambda. Floci injects its own container-reachable `AWS_ENDPOINT_URL` before
- * application variables; omitting the host value prevents the later app entry
- * from replacing that runtime-owned baseline. Service-specific endpoint
- * bindings stay intact and retain their own container-reachability contract.
+ * Adapt Alchemy's packed application environment to Floci's runtime contract.
+ * The emulator owns the container-reachable global endpoint, while the AWS SDK
+ * reads its reserved credential variables directly from `process.env`. Other
+ * bindings stay packed for the Alchemy runtime to reify normally.
  */
-export const localEmulatorFunctionEnvironment = (
+export const localEmulatorFunctionEnvironment = Effect.fn(function* (
   environment: LambdaEnvironment,
-): LambdaEnvironment => {
+) {
+  const accessKeyId = yield* decodeLocalCredential(
+    "AWS_ACCESS_KEY_ID",
+    environment.AWS_ACCESS_KEY_ID,
+  );
+  const secretAccessKey = yield* decodeLocalCredential(
+    "AWS_SECRET_ACCESS_KEY",
+    environment.AWS_SECRET_ACCESS_KEY,
+  );
+  const sessionToken = yield* decodeLocalCredential(
+    "AWS_SESSION_TOKEN",
+    environment.AWS_SESSION_TOKEN,
+  );
+  if (
+    (accessKeyId === undefined) !== (secretAccessKey === undefined) ||
+    (sessionToken !== undefined && accessKeyId === undefined)
+  ) {
+    return yield* new LocalEmulatorFunctionEnvironmentError({
+      message:
+        "Local emulator AWS credentials must contain both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; AWS_SESSION_TOKEN is optional",
+    });
+  }
+
   const runtimeEnvironment = { ...environment };
   delete runtimeEnvironment.AWS_ENDPOINT_URL;
+  for (const key of localCredentialKeys) {
+    delete runtimeEnvironment[key];
+  }
+  if (accessKeyId !== undefined && secretAccessKey !== undefined) {
+    runtimeEnvironment.AWS_ACCESS_KEY_ID = accessKeyId;
+    runtimeEnvironment.AWS_SECRET_ACCESS_KEY = secretAccessKey;
+    if (sessionToken !== undefined) {
+      runtimeEnvironment.AWS_SESSION_TOKEN = sessionToken;
+    }
+  }
   return runtimeEnvironment;
-};
+});
 
 /**
  * The normal Lambda lifecycle pointed at an account-scoped local AWS endpoint.

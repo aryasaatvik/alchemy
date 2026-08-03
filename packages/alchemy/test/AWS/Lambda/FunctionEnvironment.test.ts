@@ -8,6 +8,7 @@ import {
 } from "@/AWS/Lambda/Function.ts";
 import { localEmulatorFunctionEnvironment } from "@/AWS/Lambda/FunctionProvider.ts";
 import { packEnvValue, unpackEnvValue } from "@/RuntimeContext.ts";
+import { fromEnv } from "@aws-sdk/credential-providers";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -55,45 +56,177 @@ describe("Lambda environment size", () => {
     });
   });
 
-  it("keeps the emulator's container endpoint authoritative over the host endpoint", () => {
-    const hostEndpoint = packEnvValue(Redacted.make("http://127.0.0.1:4566"));
-    const serviceEndpoint = packEnvValue(
-      Redacted.make("http://host.docker.internal:4300/ses"),
-    );
-    const resolved = resolveFunctionEnvironment(
-      {
-        AWS_ENDPOINT_URL: hostEndpoint,
-        SES_ENDPOINT_URL: serviceEndpoint,
-      },
-      {
-        main: "handler.ts",
-        build: { output: { sourcemap: false } },
-        uploadSourceMap: false,
-      },
-      { ALCHEMY_STAGE: "test" },
-    );
+  it.effect(
+    "keeps emulator endpoints and configured credentials authoritative",
+    () =>
+      Effect.gen(function* () {
+        const hostEndpoint = packEnvValue(
+          Redacted.make("http://127.0.0.1:4566"),
+        );
+        const serviceEndpoint = packEnvValue(
+          Redacted.make("http://host.docker.internal:4300/ses"),
+        );
+        const resolved = resolveFunctionEnvironment(
+          {
+            AWS_ENDPOINT_URL: hostEndpoint,
+            AWS_ACCESS_KEY_ID: packEnvValue(Redacted.make("100000000004")),
+            AWS_SECRET_ACCESS_KEY: packEnvValue(
+              Redacted.make("samva-local-floci"),
+            ),
+            AWS_SESSION_TOKEN: packEnvValue(Redacted.make("session")),
+            SES_ENDPOINT_URL: serviceEndpoint,
+          },
+          {
+            main: "handler.ts",
+            build: { output: { sourcemap: false } },
+            uploadSourceMap: false,
+          },
+          { ALCHEMY_STAGE: "test" },
+        );
 
-    // The ordinary provider retains the configured value. Only the local
-    // emulator provider strips it from the app entries Floci appends after
-    // its container-reachable baseline.
-    expect(resolved.AWS_ENDPOINT_URL).toBe(hostEndpoint);
-    const appEnvironment = localEmulatorFunctionEnvironment(resolved);
-    expect(appEnvironment).not.toHaveProperty("AWS_ENDPOINT_URL");
-    expect(appEnvironment.SES_ENDPOINT_URL).toBe(serviceEndpoint);
+        // The ordinary provider retains the configured values. Only the local
+        // emulator provider removes the host endpoint and reifies the standard
+        // credential tuple before Floci appends application entries.
+        expect(resolved.AWS_ENDPOINT_URL).toBe(hostEndpoint);
+        const appEnvironment =
+          yield* localEmulatorFunctionEnvironment(resolved);
+        expect(appEnvironment).not.toHaveProperty("AWS_ENDPOINT_URL");
+        expect(appEnvironment.AWS_ACCESS_KEY_ID).toBe("100000000004");
+        expect(appEnvironment.AWS_SECRET_ACCESS_KEY).toBe("samva-local-floci");
+        expect(appEnvironment.AWS_SESSION_TOKEN).toBe("session");
+        expect(appEnvironment.SES_ENDPOINT_URL).toBe(serviceEndpoint);
 
-    const containerEnvironment = Object.fromEntries([
-      ["AWS_ENDPOINT_URL", "http://floci:4566"],
-      ...Object.entries(appEnvironment),
-    ]);
-    expect(containerEnvironment).toEqual({
-      AWS_ENDPOINT_URL: "http://floci:4566",
-      SES_ENDPOINT_URL: serviceEndpoint,
-      ALCHEMY_STAGE: "test",
-    });
-    expect(unpackEnvValue(containerEnvironment.AWS_ENDPOINT_URL)).toBe(
-      "http://floci:4566",
-    );
-  });
+        const containerEnvironment = Object.fromEntries([
+          ["AWS_ENDPOINT_URL", "http://floci:4566"],
+          ["AWS_ACCESS_KEY_ID", "test"],
+          ["AWS_SECRET_ACCESS_KEY", "test"],
+          ...Object.entries(appEnvironment),
+        ]);
+        expect(containerEnvironment).toEqual({
+          AWS_ENDPOINT_URL: "http://floci:4566",
+          AWS_ACCESS_KEY_ID: "100000000004",
+          AWS_SECRET_ACCESS_KEY: "samva-local-floci",
+          AWS_SESSION_TOKEN: "session",
+          SES_ENDPOINT_URL: serviceEndpoint,
+          ALCHEMY_STAGE: "test",
+        });
+        expect(unpackEnvValue(containerEnvironment.AWS_ENDPOINT_URL)).toBe(
+          "http://floci:4566",
+        );
+      }),
+  );
+
+  it.effect("reifies legacy and raw local credential tuples", () =>
+    Effect.gen(function* () {
+      const legacy = yield* localEmulatorFunctionEnvironment({
+        AWS_ACCESS_KEY_ID:
+          'alchemy:env:v1:{"_tag":"Redacted","value":"100000000004"}',
+        AWS_SECRET_ACCESS_KEY:
+          'alchemy:env:v1:{"_tag":"Redacted","value":"samva-local-floci"}',
+      });
+      expect(legacy).toEqual({
+        AWS_ACCESS_KEY_ID: "100000000004",
+        AWS_SECRET_ACCESS_KEY: "samva-local-floci",
+      });
+
+      const raw = yield* localEmulatorFunctionEnvironment({
+        AWS_ACCESS_KEY_ID: "100000000004",
+        AWS_SECRET_ACCESS_KEY: "samva-local-floci",
+        AWS_SESSION_TOKEN: "session",
+      });
+      expect(raw).toEqual({
+        AWS_ACCESS_KEY_ID: "100000000004",
+        AWS_SECRET_ACCESS_KEY: "samva-local-floci",
+        AWS_SESSION_TOKEN: "session",
+      });
+    }),
+  );
+
+  it.effect(
+    "rejects partial, malformed, and non-string credential tuples",
+    () =>
+      Effect.gen(function* () {
+        const invalidEnvironments = [
+          { AWS_ACCESS_KEY_ID: packEnvValue(Redacted.make("access-only")) },
+          {
+            AWS_SECRET_ACCESS_KEY: packEnvValue(Redacted.make("secret-only")),
+          },
+          { AWS_SESSION_TOKEN: packEnvValue(Redacted.make("token-only")) },
+          {
+            AWS_ACCESS_KEY_ID: packEnvValue(42),
+            AWS_SECRET_ACCESS_KEY: packEnvValue(
+              Redacted.make("must-not-appear"),
+            ),
+          },
+          {
+            AWS_ACCESS_KEY_ID: "~1j{",
+            AWS_SECRET_ACCESS_KEY: packEnvValue(
+              Redacted.make("must-not-appear"),
+            ),
+          },
+          {
+            AWS_ACCESS_KEY_ID: 42,
+            AWS_SECRET_ACCESS_KEY: packEnvValue(
+              Redacted.make("must-not-appear"),
+            ),
+          },
+        ];
+
+        for (const environment of invalidEnvironments) {
+          const error = yield* Effect.flip(
+            localEmulatorFunctionEnvironment(environment),
+          );
+          expect(error._tag).toBe("LocalEmulatorFunctionEnvironmentError");
+          expect(error.message).not.toContain("must-not-appear");
+        }
+      }),
+  );
+
+  it.effect("provides the configured account to the AWS SDK env provider", () =>
+    Effect.gen(function* () {
+      const transformed = yield* localEmulatorFunctionEnvironment({
+        AWS_ACCESS_KEY_ID: packEnvValue(Redacted.make("100000000004")),
+        AWS_SECRET_ACCESS_KEY: packEnvValue(Redacted.make("samva-local-floci")),
+        AWS_SESSION_TOKEN: packEnvValue(Redacted.make("session")),
+      });
+      const keys = [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+      ] as const;
+
+      const credentials = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = Object.fromEntries(
+            keys.map((key) => [key, process.env[key]]),
+          );
+          for (const key of keys) {
+            process.env[key] = transformed[key];
+          }
+          return previous;
+        }),
+        () => Effect.tryPromise(() => fromEnv()()),
+        (previous) =>
+          Effect.sync(() => {
+            for (const key of keys) {
+              const value = previous[key];
+              if (value === undefined) {
+                delete process.env[key];
+              } else {
+                process.env[key] = value;
+              }
+            }
+          }),
+      );
+
+      expect(credentials).toEqual({
+        accessKeyId: "100000000004",
+        secretAccessKey: "samva-local-floci",
+        sessionToken: "session",
+        $source: { CREDENTIALS_ENV_VARS: "g" },
+      });
+    }),
+  );
 
   it("accepts exactly 4 KiB and rejects the next byte", () => {
     // `{"AA":""}` contributes nine bytes around the value.

@@ -1276,7 +1276,9 @@ export interface FunctionProviderOptions {
    * Alchemy values have been resolved. Execution substrates may use this to
    * keep an injected runtime-owned value authoritative.
    */
-  transformEnvironment?: (environment: LambdaEnvironment) => LambdaEnvironment;
+  transformEnvironment?: (
+    environment: LambdaEnvironment,
+  ) => Effect.Effect<LambdaEnvironment, unknown>;
 }
 
 export type FunctionLifecycleInput<
@@ -1735,7 +1737,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         alchemyEnv,
       );
       const runtimeEnv = options?.transformEnvironment
-        ? options.transformEnvironment(resolvedRuntimeEnv)
+        ? yield* options.transformEnvironment(resolvedRuntimeEnv)
         : resolvedRuntimeEnv;
       yield* validateLambdaEnvironment(runtimeEnv);
 
