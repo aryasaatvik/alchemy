@@ -365,6 +365,7 @@
     "@distilled.cloud/core": "workspace:*",
     "@distilled.cloud/neon": "workspace:*",
     "@distilled.cloud/planetscale": "workspace:*",
+    "@effect/platform-node": "catalog:",
     "@effect/sql-d1": "catalog:",
     "@effect/vitest": "catalog:",
     "@libsql/client": "catalog:",
