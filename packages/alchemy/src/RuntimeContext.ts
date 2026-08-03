@@ -51,12 +51,27 @@ export interface BaseRuntimeContext {
 export const sanitizeKey = (key: string): string =>
   key.replaceAll(/[^a-zA-Z0-9]/g, "_");
 
-/** Versioned discriminator for values serialized by {@link packEnvValue}. */
-export const PACKED_ENV_VALUE_PREFIX = "alchemy:env:v1:";
+/** Compact versioned discriminator for values serialized by {@link packEnvValue}. */
+export const PACKED_ENV_VALUE_PREFIX = "~1";
 
-/** Whether an environment string uses Alchemy's explicit packed-value wire. */
+/** Previous packed-value discriminator, retained for deployed runtime compatibility. */
+const LEGACY_PACKED_ENV_VALUE_PREFIX = "alchemy:env:v1:";
+
+const PACKED_ENV_VALUE_TAGS = ["s", "j", "r", "R"] as const;
+type PackedEnvValueTag = (typeof PACKED_ENV_VALUE_TAGS)[number];
+
+const compactTag = (raw: string): PackedEnvValueTag | undefined => {
+  if (!raw.startsWith(PACKED_ENV_VALUE_PREFIX)) {
+    return undefined;
+  }
+  const tag = raw.at(PACKED_ENV_VALUE_PREFIX.length);
+  return PACKED_ENV_VALUE_TAGS.find((candidate) => candidate === tag);
+};
+
+/** Whether an environment string uses an explicit packed-value wire. */
 export const isPackedEnvValue = (raw: string): boolean =>
-  raw.startsWith(PACKED_ENV_VALUE_PREFIX);
+  raw.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX) ||
+  compactTag(raw) !== undefined;
 
 /**
  * The wire format `RuntimeContext.set`/`get` use to carry a `Redacted` value
@@ -81,24 +96,34 @@ export const isRedactedMarker = (value: unknown): value is RedactedMarker =>
   "value" in value;
 
 /**
- * Serialize a binding value for an env var behind an explicit versioned
- * discriminator. `Redacted` values are packed as a {@link RedactedMarker};
- * other JSON values retain their types without making ordinary env strings
- * such as `"123"`, `"false"`, or `"null"` ambiguous at runtime.
+ * Serialize a binding value for an env var behind a compact versioned wire.
+ * Ordinary strings remain verbatim. Strings beginning with a reserved prefix
+ * are escaped, JSON values retain their types, and `Redacted<string>` uses a
+ * raw-string payload so the common secret-binding path adds only three bytes.
  */
 export const packEnvValue = (value: unknown): string => {
-  const payload = JSON.stringify(
-    Redacted.isRedacted(value)
-      ? ({
-          _tag: "Redacted",
-          value: Redacted.value(value),
-        } satisfies RedactedMarker)
-      : value,
-  );
+  if (Redacted.isRedacted(value)) {
+    const redacted = Redacted.value(value);
+    if (typeof redacted === "string") {
+      return `${PACKED_ENV_VALUE_PREFIX}r${redacted}`;
+    }
+    const payload = JSON.stringify(redacted);
+    if (payload === undefined) {
+      throw new TypeError("Cannot pack undefined as an environment value");
+    }
+    return `${PACKED_ENV_VALUE_PREFIX}R${payload}`;
+  }
+  if (typeof value === "string") {
+    return value.startsWith(PACKED_ENV_VALUE_PREFIX) ||
+      value.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX)
+      ? `${PACKED_ENV_VALUE_PREFIX}s${value}`
+      : value;
+  }
+  const payload = JSON.stringify(value);
   if (payload === undefined) {
     throw new TypeError("Cannot pack undefined as an environment value");
   }
-  return `${PACKED_ENV_VALUE_PREFIX}${payload}`;
+  return `${PACKED_ENV_VALUE_PREFIX}j${payload}`;
 };
 
 /**
@@ -117,9 +142,10 @@ export const packEnvValueKeepRedacted = (
 
 /**
  * Parse an env-var string produced by {@link packEnvValue} back into its
- * value. Unprefixed values are ordinary environment strings and always pass
- * through verbatim, even when their contents are valid JSON. `undefined`
- * passes through.
+ * value. Unprefixed values and unknown compact tags are ordinary environment
+ * strings and pass through verbatim, even when their contents are valid JSON.
+ * The previous `alchemy:env:v1:` wire remains readable. `undefined` passes
+ * through.
  *
  * Runtime `get` accessors MUST feed this from the raw environment
  * (`process.env[key]` / the platform env object) — never through
@@ -134,14 +160,29 @@ export const unpackEnvValue = <T>(raw: string | undefined): T | undefined => {
   if (raw === undefined) {
     return undefined;
   }
-  if (!isPackedEnvValue(raw)) {
+  if (raw.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX)) {
+    const parsed: unknown = JSON.parse(
+      raw.slice(LEGACY_PACKED_ENV_VALUE_PREFIX.length),
+    );
+    return (
+      isRedactedMarker(parsed) ? Redacted.make(parsed.value) : parsed
+    ) as T;
+  }
+  const tag = compactTag(raw);
+  if (tag === undefined) {
     return raw as unknown as T;
   }
-  const parsed: unknown = JSON.parse(raw.slice(PACKED_ENV_VALUE_PREFIX.length));
-  if (isRedactedMarker(parsed)) {
-    return Redacted.make(parsed.value) as unknown as T;
+  const payload = raw.slice(PACKED_ENV_VALUE_PREFIX.length + 1);
+  switch (tag) {
+    case "s":
+      return payload as T;
+    case "j":
+      return JSON.parse(payload) as T;
+    case "r":
+      return Redacted.make(payload) as T;
+    case "R":
+      return Redacted.make(JSON.parse(payload)) as T;
   }
-  return parsed as T;
 };
 
 /**

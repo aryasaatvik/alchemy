@@ -22,6 +22,7 @@ describe("RuntimeContext environment values", () => {
       '"quoted"',
       '{"enabled":true}',
       '["json","array"]',
+      "~1xunknown-tag",
     ]) {
       expect(unpackEnvValue(raw)).toBe(raw);
     }
@@ -35,9 +36,19 @@ describe("RuntimeContext environment values", () => {
     expect(unpackEnvValue(legacySecret)).toBe(legacySecret);
   });
 
+  it("keeps ordinary strings raw and escapes reserved prefixes", () => {
+    expect(packEnvValue("100000000004")).toBe("100000000004");
+    expect(isPackedEnvValue(packEnvValue("100000000004"))).toBe(false);
+
+    for (const value of ["~1j42", 'alchemy:env:v1:"legacy"']) {
+      const packed = packEnvValue(value);
+      expect(isPackedEnvValue(packed)).toBe(true);
+      expect(unpackEnvValue(packed)).toBe(value);
+    }
+  });
+
   it("round-trips explicitly packed JSON values", () => {
     for (const value of [
-      "100000000004",
       42,
       true,
       false,
@@ -54,7 +65,26 @@ describe("RuntimeContext environment values", () => {
     );
   });
 
+  it("decodes the previous versioned wire", () => {
+    expect(unpackEnvValue('alchemy:env:v1:"bound"')).toBe("bound");
+    expect(unpackEnvValue("alchemy:env:v1:42")).toBe(42);
+
+    const secret = unpackEnvValue(
+      'alchemy:env:v1:{"_tag":"Redacted","value":"secret"}',
+    );
+    expect(Redacted.isRedacted(secret)).toBe(true);
+    expect(Redacted.value(secret as Redacted.Redacted<unknown>)).toBe("secret");
+  });
+
   it("round-trips packed secrets without exposing the outer secret channel", () => {
+    const stringSecret = packEnvValue(Redacted.make("secret"));
+    expect(stringSecret).toBe("~1rsecret");
+    expect(
+      Redacted.value(
+        unpackEnvValue(stringSecret) as Redacted.Redacted<unknown>,
+      ),
+    ).toBe("secret");
+
     const secret = Redacted.make({ token: "secret" });
     const packed = packEnvValue(secret);
     const unpacked = unpackEnvValue(packed);
