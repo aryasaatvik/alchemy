@@ -260,9 +260,15 @@ const verifyFreshConsumer = async (artifact: string): Promise<void> => {
   await writeFile(
     join(consumer, "acceptance.ts"),
     `import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Bundle from "alchemy/Bundle";
 import { resolveFunctionBundleConfig } from "alchemy/AWS/Lambda";
+import {
+  CloudflareEnvironment,
+  fromEnv,
+} from "alchemy/Cloudflare/CloudflareEnvironment";
+import { makeLocalWorkerStandardBindings } from "alchemy/Cloudflare/Workers";
 
 const acceptance = Effect.gen(function* () {
   const config = yield* resolveFunctionBundleConfig({
@@ -276,7 +282,44 @@ const acceptance = Effect.gen(function* () {
 });
 
 await Effect.runPromise(acceptance.pipe(Effect.provide(NodeServices.layer)));
-console.log("fresh-consumer Lambda bundle passed");
+
+const accountId = "0123456789abcdef0123456789abcdef";
+const localWorkerBinding = Effect.gen(function* () {
+  const environment = yield* CloudflareEnvironment;
+  const identity = yield* environment;
+  if (Effect.isEffect(identity) || identity.accountId !== accountId) {
+    return yield* Effect.die("Cloudflare environment did not resolve its identity");
+  }
+  const hooks = yield* makeLocalWorkerStandardBindings({
+    accountId: identity.accountId,
+    workerName: "acceptance-worker",
+    stackName: "acceptance-stack",
+    stage: "dev",
+    env: { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: undefined },
+    descriptorNames: new Set(),
+    selfUrl: undefined,
+  });
+  const bindings = yield* Effect.all(hooks);
+  const accountBindings = bindings.filter(
+    (binding) => binding.name === "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
+  );
+  if (
+    accountBindings.length !== 1 ||
+    !("text" in accountBindings[0]) ||
+    accountBindings[0].text !== accountId
+  ) {
+    return yield* Effect.die("Local Worker account binding is not concrete");
+  }
+}).pipe(
+  Effect.provide(fromEnv()),
+  Effect.provideService(
+    ConfigProvider.ConfigProvider,
+    ConfigProvider.fromUnknown({ CLOUDFLARE_ACCOUNT_ID: accountId }),
+  ),
+);
+
+await Effect.runPromise(localWorkerBinding);
+console.log("fresh-consumer Lambda bundle and local Worker binding passed");
 `,
   );
   await run(["bun", "install"], { cwd: consumer });

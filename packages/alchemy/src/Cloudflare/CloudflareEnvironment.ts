@@ -51,7 +51,7 @@ export class CloudflareEnvironment extends Context.Service<
 const CLOUDFLARE_ACCOUNT_ID = Config.string("CLOUDFLARE_ACCOUNT_ID");
 
 export const fromEnv = () =>
-  Layer.succeed(
+  Layer.effect(
     CloudflareEnvironment,
     CLOUDFLARE_ACCOUNT_ID.pipe(
       Effect.map((accountId) => runtimeIdentity(accountId)),
@@ -61,7 +61,7 @@ export const fromEnv = () =>
   );
 
 export const fromProfile = () =>
-  Layer.succeed(
+  Layer.effect(
     CloudflareEnvironment,
     Effect.gen(function* () {
       const profile = yield* AlchemyProfile;

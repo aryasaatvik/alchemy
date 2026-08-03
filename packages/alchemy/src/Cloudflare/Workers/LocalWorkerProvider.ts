@@ -125,6 +125,66 @@ export class WorkerValidationError extends Schema.TaggedErrorClass<WorkerValidat
   },
 ) {}
 
+const STANDARD_RUNTIME_BINDING_NAMES = new Set([
+  "ALCHEMY_PHASE",
+  "ALCHEMY_WORKER_NAME",
+  "ALCHEMY_STACK_NAME",
+  "ALCHEMY_STAGE",
+  "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
+]);
+
+export const makeLocalWorkerStandardBindings = Effect.fn(function* ({
+  accountId,
+  workerName,
+  stackName,
+  stage,
+  env,
+  descriptorNames,
+  selfUrl,
+}: {
+  readonly accountId: string;
+  readonly workerName: string;
+  readonly stackName: string;
+  readonly stage: string;
+  readonly env: Record<string, unknown> | undefined;
+  readonly descriptorNames: ReadonlySet<string>;
+  readonly selfUrl: string | undefined;
+}) {
+  if (typeof accountId !== "string" || accountId.trim().length === 0) {
+    return yield* new WorkerValidationError({
+      message: "Cloudflare account ID is missing from the local Worker runtime",
+      hint: "Set CLOUDFLARE_ACCOUNT_ID or reconfigure the active Alchemy profile",
+      value: accountId,
+    });
+  }
+
+  return [
+    Text.local("ALCHEMY_PHASE", "runtime"),
+    Text.local("ALCHEMY_WORKER_NAME", workerName),
+    Text.local("ALCHEMY_STACK_NAME", stackName),
+    Text.local("ALCHEMY_STAGE", stage),
+    Text.local("ALCHEMY_CLOUDFLARE_ACCOUNT_ID", accountId),
+    ...Object.entries(env ?? {})
+      .filter(
+        ([key, value]) =>
+          value !== undefined &&
+          !descriptorNames.has(key) &&
+          !STANDARD_RUNTIME_BINDING_NAMES.has(key),
+      )
+      .map(([key, value]) => {
+        if (isSelfUrl(value)) {
+          return Text.local(key, selfUrl!);
+        }
+        const unredacted = Redacted.isRedacted(value)
+          ? Redacted.value(value)
+          : value;
+        return typeof unredacted === "string"
+          ? Text.local(key, unredacted)
+          : Json.local(key, unredacted);
+      }),
+  ] satisfies BindingHook<BindingServices>[];
+});
+
 export const LocalWorkerProvider = () =>
   LocalProvider.make(
     Worker,
@@ -487,24 +547,15 @@ export const LocalWorkerProvider = () =>
           config.bindingDescriptors.map((descriptor) => descriptor.name),
         );
         const workerBindings: BindingHook<BindingServices>[] = [
-          Text.local("ALCHEMY_PHASE", "runtime"),
-          Text.local("ALCHEMY_WORKER_NAME", config.name),
-          Text.local("ALCHEMY_STACK_NAME", stack.name),
-          Text.local("ALCHEMY_STAGE", stack.stage),
-          Text.local("ALCHEMY_CLOUDFLARE_ACCOUNT_ID", accountId),
-          ...Object.entries(config.env ?? {})
-            .filter(([key]) => !descriptorNames.has(key))
-            .map(([key, value]) => {
-              if (isSelfUrl(value)) {
-                return Text.local(key, selfUrl!);
-              }
-              const unredacted = Redacted.isRedacted(value)
-                ? Redacted.value(value)
-                : value;
-              return typeof unredacted === "string"
-                ? Text.local(key, unredacted)
-                : Json.local(key, unredacted);
-            }),
+          ...(yield* makeLocalWorkerStandardBindings({
+            accountId,
+            workerName: config.name,
+            stackName: stack.name,
+            stage: stack.stage,
+            env: config.env,
+            descriptorNames,
+            selfUrl,
+          })),
           ...(config.hasAssets ? [Assets.local("ASSETS")] : []),
         ];
         for (const descriptor of config.bindingDescriptors) {
