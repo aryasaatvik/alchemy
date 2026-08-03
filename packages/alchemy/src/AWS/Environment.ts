@@ -58,9 +58,9 @@ export interface AWSEnvironmentShape {
 
 export class AWSEnvironment extends Context.Service<
   AWSEnvironment,
-  Effect.Effect<AWSEnvironmentShape>
+  AWSEnvironmentShape
 >()("AWS::Environment") {
-  static current = AWSEnvironment.use((env) => env);
+  static current = AWSEnvironment.use(Effect.succeed);
   readonly kind = "Environment" as const;
 }
 
