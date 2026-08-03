@@ -165,6 +165,75 @@ describe("Lambda environment size", () => {
       }),
   );
 
+  it.effect(
+    "uses placement-specific service endpoints only in the local Lambda environment",
+    () =>
+      Effect.gen(function* () {
+        const canonical = JSON.stringify({
+          ses: "https://worktree.emulate.samva.localhost/ses",
+          sesv2: "https://worktree.emulate.samva.localhost/ses",
+        });
+        const environment = {
+          ALCHEMY_AWS_SERVICE_ENDPOINTS: canonical,
+          ALCHEMY_STAGE: "test",
+        };
+        const transformed = yield* localEmulatorFunctionEnvironment(
+          environment,
+          {
+            serviceEndpoints: Effect.succeed({
+              sesv2: "http://host.docker.internal:4300/ses",
+              servicequotas: "http://host.docker.internal:4300/ses",
+              ses: "http://host.docker.internal:4300/ses",
+            }),
+          },
+        );
+
+        expect(environment.ALCHEMY_AWS_SERVICE_ENDPOINTS).toBe(canonical);
+        expect(transformed.ALCHEMY_AWS_SERVICE_ENDPOINTS).toBe(
+          JSON.stringify({
+            servicequotas: "http://host.docker.internal:4300/ses",
+            ses: "http://host.docker.internal:4300/ses",
+            sesv2: "http://host.docker.internal:4300/ses",
+          }),
+        );
+      }),
+  );
+
+  it.effect("removes an explicitly empty local Lambda service map", () =>
+    Effect.gen(function* () {
+      const transformed = yield* localEmulatorFunctionEnvironment(
+        {
+          ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+            ses: "https://worktree.emulate.samva.localhost/ses",
+          }),
+        },
+        { serviceEndpoints: Effect.succeed({}) },
+      );
+
+      expect(transformed).not.toHaveProperty("ALCHEMY_AWS_SERVICE_ENDPOINTS");
+    }),
+  );
+
+  it.effect("rejects malformed local Lambda service maps", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        localEmulatorFunctionEnvironment(
+          {
+            ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+              ses: "https://worktree.emulate.samva.localhost/ses",
+            }),
+          },
+          {
+            serviceEndpoints: Effect.succeed({ ses: "" }),
+          },
+        ),
+      );
+
+      expect(error._tag).toBe("LocalEmulatorFunctionEnvironmentError");
+      expect(error.message).not.toContain("worktree.emulate.samva.localhost");
+    }),
+  );
+
   it.effect("reifies legacy and raw local credential tuples", () =>
     Effect.gen(function* () {
       const legacy = yield* localEmulatorFunctionEnvironment({

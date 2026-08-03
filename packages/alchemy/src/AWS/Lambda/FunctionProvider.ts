@@ -10,7 +10,6 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Redacted from "effect/Redacted";
@@ -25,8 +24,11 @@ import type { ResourceBinding } from "../../Resource.ts";
 import { unpackEnvValue } from "../../RuntimeContext.ts";
 import { Stack } from "../../Stack.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
-import { AWSEnvironment } from "../Environment.ts";
-import { AWS_LOCAL_ENTRY_URL, localRuntimeServices } from "../LocalRuntime.ts";
+import {
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  AWSEnvironment,
+} from "../Environment.ts";
+import { AWS_LOCAL_ENTRY_URL } from "../LocalRuntime.ts";
 import {
   Function,
   makeFunctionProvider,
@@ -46,10 +48,29 @@ import {
   writeLocalBundleFiles,
 } from "./LocalBundle.ts";
 
-export const FunctionProvider = () =>
+export interface LocalEmulatorFunctionProviderOptions {
+  /**
+   * Service endpoints as reached from the local Lambda execution substrate.
+   * This is separate from the provider collection's control-plane endpoint
+   * map because a container may reach the same service through a different
+   * hostname than the Alchemy host process. When present, this map replaces
+   * the runtime service endpoint record; an empty map explicitly clears it.
+   */
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    never,
+    never
+  >;
+}
+
+export interface FunctionProviderModeOptions {
+  readonly local?: LocalEmulatorFunctionProviderOptions;
+}
+
+export const FunctionProvider = (options: FunctionProviderModeOptions = {}) =>
   ProviderLayer.dual(Function, {
     live: () => LiveFunctionProvider(),
-    local: () => LocalEmulatorFunctionProvider(),
+    local: () => LocalEmulatorFunctionProvider(options.local),
     modeTransition: "in-place",
   });
 
@@ -108,6 +129,7 @@ const decodeLocalCredential = (
  */
 export const localEmulatorFunctionEnvironment = Effect.fn(function* (
   environment: LambdaEnvironment,
+  options: LocalEmulatorFunctionProviderOptions = {},
 ) {
   const accessKeyId = yield* decodeLocalCredential(
     "AWS_ACCESS_KEY_ID",
@@ -143,6 +165,32 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
       runtimeEnvironment.AWS_SESSION_TOKEN = sessionToken;
     }
   }
+  if (options.serviceEndpoints !== undefined) {
+    const serviceEndpoints = yield* options.serviceEndpoints;
+    const entries = Object.entries(serviceEndpoints);
+    if (
+      entries.some(
+        ([service, endpoint]) =>
+          service.length === 0 ||
+          typeof endpoint !== "string" ||
+          endpoint.length === 0,
+      )
+    ) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message:
+          "Local emulator Lambda service endpoints must be a record of non-empty service names and endpoint strings",
+      });
+    }
+    if (entries.length === 0) {
+      delete runtimeEnvironment[AWS_SERVICE_ENDPOINTS_ENV_VAR];
+    } else {
+      runtimeEnvironment[AWS_SERVICE_ENDPOINTS_ENV_VAR] = JSON.stringify(
+        Object.fromEntries(
+          entries.sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      );
+    }
+  }
   return runtimeEnvironment;
 });
 
@@ -151,11 +199,14 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
  * `AWSEnvironment` provides the endpoint and credentials; keeping this as the
  * ordinary provider exercises the same bundle/create/update path as deploys.
  */
-export const LocalEmulatorFunctionProvider = () =>
+export const LocalEmulatorFunctionProvider = (
+  options: LocalEmulatorFunctionProviderOptions = {},
+) =>
   Provider.effect(
     Function,
     makeFunctionProvider({
-      transformEnvironment: localEmulatorFunctionEnvironment,
+      transformEnvironment: (environment) =>
+        localEmulatorFunctionEnvironment(environment, options),
     }),
   );
 

@@ -235,6 +235,8 @@ export interface ProvidersOptions {
     never,
     never
   >;
+  /** Mode-specific configuration for Lambda Function providers. */
+  readonly lambda?: Lambda.FunctionProviderModeOptions;
 }
 
 export const providers = (options: ProvidersOptions = {}) => {
@@ -1277,7 +1279,7 @@ export const providers = (options: ProvidersOptions = {}) => {
           LakeFormation.ResourceProvider(),
           Lambda.AliasProvider(),
           Lambda.EventSourceMappingProvider(),
-          Lambda.FunctionProvider(),
+          Lambda.FunctionProvider(options.lambda),
           Lambda.LayerVersionProvider(),
           Lambda.VersionProvider(),
           Lambda.MicrovmImageProvider(),
