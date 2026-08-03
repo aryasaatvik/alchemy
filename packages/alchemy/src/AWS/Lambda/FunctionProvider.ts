@@ -21,7 +21,7 @@ import * as LocalProvider from "../../Local/LocalProvider.ts";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as Provider from "../../Provider.ts";
 import type { ResourceBinding } from "../../Resource.ts";
-import { unpackEnvValue } from "../../RuntimeContext.ts";
+import { packEnvValue, unpackEnvValue } from "../../RuntimeContext.ts";
 import { Stack } from "../../Stack.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import {
@@ -50,8 +50,10 @@ import {
 
 export interface LocalEmulatorFunctionProviderOptions {
   /**
-   * Raw environment values as reached from the local Lambda execution
-   * substrate. The overlay is evaluated after binding, Function, and Alchemy
+   * Environment values as reached from the local Lambda execution substrate.
+   * Raw strings remain raw. Redacted strings are packed through Alchemy's
+   * runtime environment wire so typed bindings reify as Redacted values in
+   * the Lambda. The overlay is evaluated after binding, Function, and Alchemy
    * environment resolution. Supplied keys replace resolved values, omitted
    * keys are preserved, and an empty record is a no-op.
    *
@@ -61,7 +63,7 @@ export interface LocalEmulatorFunctionProviderOptions {
    * This Effect is never evaluated by the live Function provider.
    */
   readonly environment?: Effect.Effect<
-    Readonly<Record<string, string>>,
+    Readonly<Record<string, string | Redacted.Redacted<string>>>,
     never,
     never
   >;
@@ -170,17 +172,23 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
       entries.some(
         ([key, value]) =>
           key.length === 0 ||
-          typeof value !== "string" ||
+          !(
+            typeof value === "string" ||
+            (Redacted.isRedacted(value) &&
+              typeof Redacted.value(value) === "string")
+          ) ||
           localProviderOwnedEnvironmentKeys.has(key),
       )
     ) {
       return yield* new LocalEmulatorFunctionEnvironmentError({
         message:
-          "Local emulator Lambda environment must contain non-reserved, non-empty keys with string values; use endpoint, serviceEndpoints, or the Function environment for provider-owned AWS values",
+          "Local emulator Lambda environment must contain non-reserved, non-empty keys with string or Redacted<string> values; use endpoint, serviceEndpoints, or the Function environment for provider-owned AWS values",
       });
     }
     for (const [key, value] of entries) {
-      runtimeEnvironment[key] = value;
+      runtimeEnvironment[key] = Redacted.isRedacted(value)
+        ? packEnvValue(value)
+        : value;
     }
   }
 

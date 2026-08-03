@@ -10,6 +10,7 @@ import { expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import { v4 as uuidv4 } from "uuid";
 it.live(
@@ -55,7 +56,10 @@ it.live("does not evaluate local Lambda options in live provider mode", () => {
   let evaluated = false;
   const localEnvironment = Effect.sync(() => {
     evaluated = true;
-    return { REDIS_URL: "redis://redis:6379" };
+    return {
+      DATABASE_URL: Redacted.make("postgres://postgres:5432/samva"),
+      REDIS_URL: "redis://redis:6379",
+    };
   });
   const localEndpoint = Effect.sync(() => {
     evaluated = true;

@@ -261,6 +261,7 @@ const verifyFreshConsumer = async (artifact: string): Promise<void> => {
     join(consumer, "provider-api.ts"),
     `import * as AWS from "alchemy/AWS";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 export const providers = AWS.providers({
   serviceEndpoints: Effect.succeed({
@@ -270,7 +271,9 @@ export const providers = AWS.providers({
     local: {
       endpoint: Effect.succeed("http://floci:4566"),
       environment: Effect.succeed({
-        REDIS_URL: "redis://redis:6379",
+        DATABASE_URL: Redacted.make("postgres://postgres:5432/samva"),
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:4318",
+        REDIS_URL: Redacted.make("redis://redis:6379"),
       }),
       serviceEndpoints: Effect.succeed({
         ses: "http://host.docker.internal:8811/ses",
@@ -303,12 +306,14 @@ export const providers = AWS.providers({
     `import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import * as Bundle from "alchemy/Bundle";
 import {
   localEmulatorFunctionEnvironment,
   makeFunctionHttpHandler,
   resolveFunctionBundleConfig,
 } from "alchemy/AWS/Lambda";
+import { unpackEnvValue } from "alchemy/RuntimeContext";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import {
@@ -335,15 +340,26 @@ const localEnvironment = await Effect.runPromise(
     { REDIS_URL: "redis://127.0.0.1:56379" },
     {
       endpoint: Effect.succeed("http://floci:4566"),
-      environment: Effect.succeed({ REDIS_URL: "redis://redis:6379" }),
+      environment: Effect.succeed({
+        DATABASE_URL: Redacted.make("postgres://postgres:5432/samva"),
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:4318",
+        REDIS_URL: Redacted.make("redis://redis:6379"),
+      }),
       serviceEndpoints: Effect.succeed({
         ses: "http://host.docker.internal:8811/ses",
       }),
     },
   ),
 );
+const databaseUrl = unpackEnvValue<unknown>(localEnvironment.DATABASE_URL);
+const redisUrl = unpackEnvValue<unknown>(localEnvironment.REDIS_URL);
 if (
-  localEnvironment.REDIS_URL !== "redis://redis:6379" ||
+  !Redacted.isRedacted(databaseUrl) ||
+  Redacted.value(databaseUrl) !== "postgres://postgres:5432/samva" ||
+  !Redacted.isRedacted(redisUrl) ||
+  Redacted.value(redisUrl) !== "redis://redis:6379" ||
+  localEnvironment.OTEL_EXPORTER_OTLP_ENDPOINT !==
+    "http://host.docker.internal:4318" ||
   localEnvironment.AWS_ENDPOINT_URL !== "http://floci:4566" ||
   localEnvironment.ALCHEMY_AWS_SERVICE_ENDPOINTS !==
     JSON.stringify({ ses: "http://host.docker.internal:8811/ses" })

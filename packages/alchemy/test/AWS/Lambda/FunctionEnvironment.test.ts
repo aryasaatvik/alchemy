@@ -241,12 +241,61 @@ describe("Lambda environment size", () => {
       }),
   );
 
+  it.effect(
+    "packs redacted placement-specific values for the Lambda runtime binding wire",
+    () =>
+      Effect.gen(function* () {
+        const transformed = yield* localEmulatorFunctionEnvironment(
+          { ALCHEMY_STAGE: "test" },
+          {
+            environment: Effect.succeed({
+              DATABASE_URL: Redacted.make("postgres://postgres:5432/samva"),
+              OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:4318",
+              REDIS_URL: Redacted.make("redis://redis:6379"),
+            }),
+          },
+        );
+
+        expect(transformed).toEqual({
+          ALCHEMY_STAGE: "test",
+          DATABASE_URL: packEnvValue(
+            Redacted.make("postgres://postgres:5432/samva"),
+          ),
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:4318",
+          REDIS_URL: packEnvValue(Redacted.make("redis://redis:6379")),
+        });
+        expect(Object.keys(transformed)).toEqual([
+          "ALCHEMY_STAGE",
+          "DATABASE_URL",
+          "OTEL_EXPORTER_OTLP_ENDPOINT",
+          "REDIS_URL",
+        ]);
+
+        const databaseUrl = unpackEnvValue<unknown>(transformed.DATABASE_URL);
+        const redisUrl = unpackEnvValue<unknown>(transformed.REDIS_URL);
+        expect(Redacted.isRedacted(databaseUrl)).toBe(true);
+        expect(Redacted.isRedacted(redisUrl)).toBe(true);
+        if (!Redacted.isRedacted(databaseUrl) || !Redacted.isRedacted(redisUrl))
+          return;
+        expect(Redacted.value(databaseUrl)).toBe(
+          "postgres://postgres:5432/samva",
+        );
+        expect(Redacted.value(redisUrl)).toBe("redis://redis:6379");
+      }),
+  );
+
   it.effect("rejects malformed local Lambda environment overlays", () =>
     Effect.gen(function* () {
       for (const environment of [
         { "": "value" },
         { INVALID: 42 } as unknown as Readonly<Record<string, string>>,
+        {
+          INVALID: Redacted.make(42),
+        } as unknown as Readonly<
+          Record<string, string | Redacted.Redacted<string>>
+        >,
         { AWS_ENDPOINT_URL: "http://smuggled:4566" },
+        { AWS_ENDPOINT_URL: Redacted.make("http://smuggled:4566") },
         { AWS_ACCESS_KEY_ID: "smuggled" },
         { AWS_SECRET_ACCESS_KEY: "smuggled" },
         { AWS_SESSION_TOKEN: "smuggled" },
@@ -259,6 +308,7 @@ describe("Lambda environment size", () => {
           ),
         );
         expect(error._tag).toBe("LocalEmulatorFunctionEnvironmentError");
+        expect(error.message).not.toContain("smuggled");
       }
     }),
   );
