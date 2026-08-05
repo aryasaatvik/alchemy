@@ -669,6 +669,84 @@ export const overrideStablesResourceProvider = () =>
     delete: Effect.fn(function* () {}),
   });
 
+// VersionedTarget + AliasTarget — model the `AWS.Lambda.Version` /
+// `AWS.Lambda.Alias` pair behind #993.
+//
+// `VersionedTarget` publishes a NEW `version` on every reconcile and declares
+// only `name`/`arn` stable, so an in-place update leaves the version number
+// unknown at plan time. `AliasTarget` holds the WHOLE version instance in its
+// props (exactly like `AliasProps.version`) and reads that non-stable
+// attribute inside `reconcile` — so the alias is only correct if the engine
+// re-evaluates its props against the version's fresh post-reconcile attrs.
+
+export type VersionedTargetProps = {
+  code: string;
+};
+
+export interface VersionedTarget extends Resource<
+  "Test.VersionedTarget",
+  VersionedTargetProps,
+  {
+    name: string;
+    arn: string;
+    /** Deliberately NOT stable — bumped by every reconcile. */
+    version: string;
+  }
+> {}
+
+export const VersionedTarget = Resource<VersionedTarget>(
+  "Test.VersionedTarget",
+);
+
+export const versionedTargetProvider = () =>
+  Provider.succeed(VersionedTarget, {
+    list: () => Effect.succeed([]),
+    stables: ["name", "arn"],
+    // No `diff` hook: the engine fallback (`havePropsChanged`) decides, so a
+    // `code` change plans an in-place update.
+    reconcile: Effect.fn(function* ({ id, output }) {
+      return {
+        name: id,
+        arn: `arn:test:versioned:${id}`,
+        version: String(Number(output?.version ?? "0") + 1),
+      };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
+export type AliasTargetProps = {
+  /** The WHOLE upstream instance, mirroring `AliasProps.version`. */
+  target: VersionedTarget;
+  aliasName: string;
+};
+
+export interface AliasTarget extends Resource<
+  "Test.AliasTarget",
+  AliasTargetProps,
+  {
+    aliasName: string;
+    /** The upstream's non-stable `version` as seen by `reconcile`. */
+    observedVersion: string;
+  }
+> {}
+
+export const AliasTarget = Resource<AliasTarget>("Test.AliasTarget");
+
+export const aliasTargetProvider = () =>
+  Provider.succeed(AliasTarget, {
+    list: () => Effect.succeed([]),
+    // No `diff` hook — like `AWS.Lambda.Alias`, which only returns a
+    // definitive verdict on identity changes and otherwise abstains.
+    reconcile: Effect.fn(function* ({ news }) {
+      const target = news.target as unknown as VersionedTarget["Attributes"];
+      return {
+        aliasName: news.aliasName,
+        observedVersion: target.version,
+      };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
 export type PhasedTargetProps = {
   desired: string;
   replaceKey?: string;
@@ -1288,6 +1366,8 @@ export const TestLayers = () =>
     staticStablesResourceProvider(),
     kindStablesResourceProvider(),
     overrideStablesResourceProvider(),
+    versionedTargetProvider(),
+    aliasTargetProvider(),
     phasedTargetProvider(),
     noPrecreateBindingTargetProvider(),
     durationResourceProvider(),

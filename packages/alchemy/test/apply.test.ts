@@ -1,17 +1,20 @@
 import { adopt, Unowned } from "@/AdoptPolicy";
-import type { DestroyError } from "@/Apply";
+import { apply, type DestroyError } from "@/Apply";
 import { Cli } from "@/Cli/Cli";
 import * as Namespace from "@/Namespace.ts";
 import * as Output from "@/Output";
+import type { NoopUpdate } from "@/Plan";
 import * as Provider from "@/Provider";
 import * as RemovalPolicy from "@/RemovalPolicy.ts";
 import { Stack } from "@/Stack";
 import {
   type CreatingResourceState,
+  type CreatedResourceState,
   type ReplacedResourceState,
   type ReplacingResourceState,
   type ResourceState,
   State,
+  type UpdatedResourceState,
 } from "@/State";
 import * as Test from "@/Test/Alchemy";
 import { assert, describe, expect } from "alchemy-test";
@@ -25,6 +28,7 @@ import {
   AliasedWidget,
   aliasedWidgetDeletes,
   aliasedWidgetProvider,
+  AliasTarget,
   ArtifactProbe,
   BindingTarget,
   CollisionRegistry,
@@ -44,6 +48,7 @@ import {
   TestResource,
   TestResourceHooks,
   type TestResourceProps,
+  VersionedTarget,
 } from "./test.resources.ts";
 
 const { test } = Test.make({ providers: TestLayers() });
@@ -636,6 +641,173 @@ describe("linear update propagation", () => {
         // sequence as long as no stale value leaked through.
         expect(sawByB.length).toBeGreaterThan(0);
         expect(sawByB.every((v) => v === "v2")).toBe(true);
+      }),
+  );
+
+  test.provider(
+    "planned noop rechecks inputs after an acyclic upstream changes during apply",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string, includeConsumer: boolean) =>
+          Effect.gen(function* () {
+            const source = yield* PhasedTarget("Source", {
+              desired,
+            });
+            const alias = yield* TestResource("Alias", {
+              string: source.value,
+            });
+            const consumer = includeConsumer
+              ? yield* TestResource("Consumer", {
+                  string: alias.string,
+                })
+              : undefined;
+            return { source, alias, consumer };
+          });
+
+        yield* stack.deploy(program("old-url", false));
+
+        const plan = yield* stack.plan(program("new-url", true));
+        expect(plan.cycleMembers.size).toBe(0);
+        expect(plan.resources.Source.action).toBe("update");
+        expect(plan.resources.Alias.action).toBe("update");
+        expect(plan.resources.Consumer.action).toBe("create");
+
+        // Reproduce the local-sidecar race from the preserved Samva plan:
+        // the upstream changes after planning, while the downstream still
+        // carries a noop decision made against its persisted URL.
+        plan.resources.Alias = {
+          ...plan.resources.Alias,
+          action: "noop",
+          state: yield* getState<CreatedResourceState | UpdatedResourceState>(
+            "Alias",
+          ),
+        } as NoopUpdate;
+
+        const consumerCreates: string[] = [];
+        const output = yield* apply(plan).pipe(
+          Effect.provide(
+            Layer.succeed(TestResourceHooks, {
+              create: (id, props) =>
+                Effect.sync(() => {
+                  if (id === "Consumer") {
+                    consumerCreates.push(props.string!);
+                  }
+                }),
+            }),
+          ),
+        );
+
+        expect(output.alias.string).toBe("new-url");
+        expect(output.consumer!.string).toBe("new-url");
+        expect(consumerCreates).toEqual(["new-url"]);
+      }),
+  );
+});
+
+// Regression (#993's other half): a resource whose props hold a WHOLE
+// upstream instance and whose `reconcile` reads one of that upstream's
+// NON-stable attributes.
+//
+// When the upstream updates in place, `resolveResource` exposes only its
+// stable attributes and `materializeStableRefs` projects the reference down
+// to a plain stables-only object for the diff. A downstream whose persisted
+// props are that same projection therefore compares equal and plans `noop` —
+// see "a whole-resource ref to an updating upstream does not drag the
+// downstream into an update" in plan.test.ts, which pins that verdict.
+//
+// The plan verdict is not the bug; never reconciling afterwards is. Apply
+// must re-evaluate the noop node's RAW props (which keep the reference
+// evaluable) against the upstream's fresh post-reconcile attrs and upgrade
+// the noop to an update when they drift. Production symptom: an
+// `AWS.Lambda.Alias` pinned to version 2 while versions 3–9 published.
+describe("planned noops re-evaluate whole-resource refs", () => {
+  test.provider(
+    "a noop whose upstream updates in place reconciles against the fresh non-stable attr",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (code: string) =>
+          Effect.gen(function* () {
+            const version = yield* VersionedTarget("Version", { code });
+            const alias = yield* AliasTarget("Alias", {
+              target: version,
+              aliasName: "live",
+            });
+            return { version, alias };
+          });
+
+        const first = yield* stack.deploy(program("v1"));
+        expect(first.version.version).toBe("1");
+        expect(first.alias.observedVersion).toBe("1");
+
+        // Put the alias's persisted props into the stables-only shape the
+        // diff-facing view produces for an updating upstream — the state row
+        // that made the production alias noop forever.
+        const state = yield* yield* State;
+        const stk = yield* Stack;
+        const aliasState = yield* getState<UpdatedResourceState>("Alias");
+        yield* state.set({
+          stack: stk.name,
+          stage: stk.stage,
+          fqn: "Alias",
+          value: {
+            ...aliasState,
+            props: {
+              target: {
+                name: first.version.name,
+                arn: first.version.arn,
+              },
+              aliasName: "live",
+            },
+          } as UpdatedResourceState,
+        });
+
+        const plan = yield* stack.plan(program("v2"));
+        expect(plan.resources.Version.action).toBe("update");
+        // Stables-only vs stables-only — the diff cannot see the coming
+        // version bump, so the plan (correctly, given what it knows) noops.
+        expect(plan.resources.Alias.action).toBe("noop");
+
+        const second = yield* stack.deploy(program("v2"));
+        expect(second.version.version).toBe("2");
+        // Before the fix the alias never reconciled and stayed on "1".
+        expect(second.alias.observedVersion).toBe("2");
+
+        const afterUpdate = yield* getState<UpdatedResourceState>("Alias");
+        expect(afterUpdate.status).toBe("updated");
+        expect(afterUpdate.attr.observedVersion).toBe("2");
+        // The refresh commits the EVALUATED props, so the stables-only row
+        // heals itself instead of pinning the noop forever.
+        expect((afterUpdate.props as any).target.version).toBe("2");
+      }),
+  );
+
+  test.provider(
+    "a noop whose upstream truly did not change stays a noop",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (aliasName: string) =>
+          Effect.gen(function* () {
+            const version = yield* VersionedTarget("Version", { code: "v1" });
+            const alias = yield* AliasTarget("Alias", {
+              target: version,
+              aliasName,
+            });
+            return { version, alias };
+          });
+
+        yield* stack.deploy(program("live"));
+        const before = yield* getState<UpdatedResourceState>("Alias");
+
+        const plan = yield* stack.plan(program("live"));
+        expect(plan.resources.Version.action).toBe("noop");
+        expect(plan.resources.Alias.action).toBe("noop");
+
+        const output = yield* stack.deploy(program("live"));
+        expect(output.version.version).toBe("1");
+        expect(output.alias.observedVersion).toBe("1");
+        const after = yield* getState<UpdatedResourceState>("Alias");
+        expect(after.status).toBe(before.status);
+        expect(after.attr).toEqual(before.attr);
       }),
   );
 });

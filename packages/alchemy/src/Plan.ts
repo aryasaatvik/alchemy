@@ -153,6 +153,18 @@ export interface NoopUpdate<
   R extends ResourceLike = ResourceLike,
 > extends BaseNode<R> {
   action: "noop";
+  /**
+   * The RAW (unevaluated) desired inputs, exactly as `create`/`update`/
+   * `replace` nodes carry them, so apply-time convergence can re-evaluate a
+   * planned noop against fresh upstream outputs.
+   *
+   * This must NOT be the diff-facing view (`materializeStableRefs(news)`) —
+   * that projection flattens an in-place-updating upstream to its stable
+   * attributes only, which is precisely the information loss that made the
+   * noop verdict wrong in the first place. Re-evaluating pre-flattened data
+   * can never observe drift.
+   */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1316,6 +1328,7 @@ export const make = <A>(
             } else {
               return Node<NoopUpdate>({
                 action: "noop",
+                props: applyProps,
                 state: oldState,
               });
             }
