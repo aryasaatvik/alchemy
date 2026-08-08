@@ -769,14 +769,7 @@ export const makeImageSource = Effect.gen(function* () {
               envFrom,
             );
 
-      const realMain = yield* resolveMainPath(
-        (source as BundledImageSource).main,
-      );
-      const contextDir = yield* getStableContextDir(
-        realMain,
-        dotAlchemy,
-        `${id}-image`,
-      );
+      const contextDir = yield* getStableContextDir(dotAlchemy, `${id}-image`);
       yield* docker.materialize({
         context: contextDir,
         dockerfile: finalDockerfile,
@@ -847,11 +840,7 @@ export const makeImageSource = Effect.gen(function* () {
       if (yield* describeImage(repositoryName, codeHash)) {
         return { imageUri, repositoryName, repositoryUri, codeHash };
       }
-      const contextDir = yield* getStableContextDir(
-        dotAlchemy,
-        dotAlchemy,
-        `${id}-image`,
-      );
+      const contextDir = yield* getStableContextDir(dotAlchemy, `${id}-image`);
       yield* docker.materialize({
         context: contextDir,
         dockerfile: externalDf.content,

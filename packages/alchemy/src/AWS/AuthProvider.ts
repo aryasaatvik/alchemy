@@ -1,6 +1,8 @@
-import * as Floci from "@alchemy.run/floci";
 import * as DistilledAuth from "@distilled.cloud/aws/Auth";
-import { Credentials } from "@distilled.cloud/aws/Credentials";
+import {
+  Credentials,
+  type ResolvedCredentials,
+} from "@distilled.cloud/aws/Credentials";
 import * as STS from "@distilled.cloud/aws/sts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -27,23 +29,20 @@ import {
 } from "../Auth/Env.ts";
 import * as Clank from "../Util/Clank.ts";
 import * as Endpoint from "./Endpoint.ts";
+import {
+  DEFAULT_LOCAL_ENDPOINT,
+  ensureLocalEmulator,
+} from "./LocalEmulator.ts";
 import * as Region from "./Region.ts";
 
 export const AWS_AUTH_PROVIDER_NAME = "AWS";
-
-/** Default endpoint of a local AWS emulator (floci / LocalStack). */
-export const DEFAULT_LOCAL_ENDPOINT = `http://localhost:${Floci.DEFAULT_FLOCI_PORT}`;
 
 export type AwsAuthConfig =
   | { method: "sso"; ssoProfile: string }
   | { method: "stored" }
   | { method: "env" }
   | {
-      /**
-       * Local AWS emulator (floci, LocalStack, or any endpoint-compatible
-       * emulator). Resolves dummy credentials and points every AWS call at
-       * the configured endpoint — no AWS account required.
-       */
+      /** A LocalStack-compatible AWS emulator such as Floci. */
       method: "local";
       /** @default "http://localhost:4566" */
       endpoint?: string;
@@ -51,12 +50,9 @@ export type AwsAuthConfig =
       region?: string;
       /** @default "000000000000" */
       accountId?: string;
-      /**
-       * Ensure the floci container is running (via `@alchemy.run/floci`'s
-       * `ensureFloci`) when nothing is listening on the endpoint. Defaults to
-       * true for the default endpoint only.
-       * @default endpoint === "http://localhost:4566"
-       */
+      /** Per-SigV4-service endpoint overrides, e.g. `{ ses: "http://localhost:4300/ses" }`. */
+      serviceEndpoints?: Readonly<Record<string, string>>;
+      /** @default true for the default endpoint */
       autoStart?: boolean;
     };
 
@@ -83,7 +79,7 @@ const options: Array<{
   {
     value: "local",
     label: "Local emulator",
-    hint: "floci / LocalStack on localhost:4566 — no AWS account",
+    hint: "Floci / LocalStack — no AWS account",
   },
 ];
 
@@ -97,19 +93,19 @@ export interface AwsStoredCredentials {
 
 export interface AwsResolvedCredentials {
   accountId: string;
-  credentials: Effect.Effect<{
-    accessKeyId: Redacted.Redacted<string>;
-    secretAccessKey: Redacted.Redacted<string>;
-    sessionToken: Redacted.Redacted<string> | undefined;
-    region: string;
-  }>;
-  region: string;
   /**
-   * Custom AWS endpoint (local emulator). Flows into
-   * `AWSEnvironment.endpoint`, which `Endpoint.fromEnvironment` applies to
-   * every AWS SDK call.
+   * `ResolvedCredentials` carries the region it authenticated against —
+   * `@distilled.cloud/aws` reads `Region` as an OPTIONAL override and falls
+   * back to this when nothing provides one. Alchemy always provides `Region`
+   * from {@link AWSEnvironment}, so this is the fallback, not the source of
+   * truth for where an operation is dispatched.
    */
+  credentials: Effect.Effect<ResolvedCredentials>;
+  region: string;
+  /** Global local-endpoint fallback after operation and service overrides. */
   endpoint?: string;
+  /** Applied by SigV4 service name before the global {@link endpoint}. */
+  serviceEndpoints?: Readonly<Record<string, string>>;
   source: {
     type: AwsAuthConfig["method"];
     details?: string;
@@ -130,6 +126,74 @@ export const applyEnvRegionOverride = <C extends { region: string }>(
       envRegion ? { ...creds, region: envRegion } : creds,
     ),
   );
+
+const LOCAL_ACCOUNT_ID = "000000000000";
+const LOCAL_SECRET_ACCESS_KEY = "alchemy-local-emulator";
+
+/**
+ * Resolve the local identity without an STS request. A configured environment
+ * credential tuple is preserved verbatim so the emulator and Alchemy use the
+ * same signing identity. When the tuple is absent, the selected account is the
+ * fallback access key.
+ */
+export const localAwsCredentials = (
+  config: Extract<AwsAuthConfig, { method: "local" }>,
+) =>
+  Effect.gen(function* () {
+    const accountId = config.accountId ?? LOCAL_ACCOUNT_ID;
+    if (!/^\d{12}$/.test(accountId)) {
+      return yield* Effect.fail(
+        new AuthError({
+          message: `local AWS accountId must be exactly 12 digits, got ${JSON.stringify(accountId)}`,
+        }),
+      );
+    }
+
+    const [configuredAccessKeyId, configuredSecretAccessKey, sessionToken] =
+      yield* Effect.all([
+        getEnvRedacted("AWS_ACCESS_KEY_ID"),
+        getEnvRedacted("AWS_SECRET_ACCESS_KEY"),
+        getEnvRedacted("AWS_SESSION_TOKEN"),
+      ]);
+    const hasAccessKey = configuredAccessKeyId !== undefined;
+    const hasSecretKey = configuredSecretAccessKey !== undefined;
+    if (
+      hasAccessKey !== hasSecretKey ||
+      (sessionToken !== undefined && !hasAccessKey)
+    ) {
+      return yield* Effect.fail(
+        new AuthError({
+          message:
+            "Local AWS credentials must set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY together; AWS_SESSION_TOKEN requires both.",
+        }),
+      );
+    }
+
+    const endpoint = config.endpoint ?? DEFAULT_LOCAL_ENDPOINT;
+    const region = config.region ?? "us-east-1";
+    const credentials: ResolvedCredentials =
+      configuredAccessKeyId && configuredSecretAccessKey
+        ? {
+            accessKeyId: configuredAccessKeyId,
+            secretAccessKey: configuredSecretAccessKey,
+            sessionToken,
+            region,
+          }
+        : {
+            accessKeyId: Redacted.make(accountId),
+            secretAccessKey: Redacted.make(LOCAL_SECRET_ACCESS_KEY),
+            sessionToken: undefined,
+            region,
+          };
+    return {
+      accountId,
+      credentials: Effect.succeed(credentials),
+      region,
+      endpoint,
+      serviceEndpoints: config.serviceEndpoints,
+      source: { type: "local" as const, details: endpoint },
+    } satisfies AwsResolvedCredentials;
+  });
 
 /**
  * Layer that registers the AWS {@link AuthProvider} into the
@@ -174,8 +238,6 @@ export const AwsAuth = AuthProviderLayer<
             // deadlock: it derives the region from AWSEnvironment, which is the
             // very service still being constructed by this STS call.
             Region.of(region),
-            // A custom endpoint (local emulator) must apply to this STS call
-            // too — the default resolver would call real AWS.
             endpoint ? Endpoint.of(endpoint) : Layer.empty,
           ),
         ),
@@ -283,11 +345,6 @@ export const AwsAuth = AuthProviderLayer<
         if (ctx.ci) {
           return { method: "env" as const };
         }
-        if (ctx.reason) {
-          // e.g. the credential-demand seam (`Auth/Demand.ts`) explaining
-          // which dev-plan resources require real AWS credentials.
-          yield* Clank.info(ctx.reason);
-        }
         return yield* configureInteractive(profileName);
       }).pipe(
         Effect.mapError(
@@ -326,9 +383,6 @@ export const AwsAuth = AuthProviderLayer<
                   }),
                 );
               }
-              // LocalStack-standard endpoint override: with
-              // AWS_ENDPOINT_URL set, every AWS call (including the STS
-              // account lookup below) targets the emulator.
               const endpoint = yield* getEnv("AWS_ENDPOINT_URL");
               const accountId = yield* getEnvRequired("AWS_ACCOUNT_ID").pipe(
                 Effect.catch(() =>
@@ -358,53 +412,22 @@ export const AwsAuth = AuthProviderLayer<
           Match.when(
             { method: "local" },
             Effect.fn(function* (config) {
-              const endpoint = config.endpoint ?? DEFAULT_LOCAL_ENDPOINT;
-              const autoStart =
-                config.autoStart ?? endpoint === DEFAULT_LOCAL_ENDPOINT;
-              if (autoStart) {
-                const port = yield* Effect.try({
-                  try: () =>
-                    Number.parseInt(new URL(endpoint).port, 10) ||
-                    Floci.DEFAULT_FLOCI_PORT,
-                  catch: () =>
+              const resolved = yield* localAwsCredentials(config);
+              yield* ensureLocalEmulator({
+                endpoint: resolved.endpoint!,
+                autoStart:
+                  config.autoStart ??
+                  resolved.endpoint === DEFAULT_LOCAL_ENDPOINT,
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
                     new AuthError({
-                      message: `invalid local emulator endpoint: ${endpoint}`,
+                      message: cause.message,
+                      cause,
                     }),
-                });
-                // Reuses anything already serving on the endpoint (dev-mode
-                // JVM, hand-run container, previous session's container);
-                // otherwise starts the managed floci container and waits for
-                // health.
-                yield* Floci.ensureFloci({ port }).pipe(
-                  Effect.mapError(
-                    (e) => new AuthError({ message: e.message, cause: e }),
-                  ),
-                );
-              } else {
-                const serving = yield* Floci.isServing(endpoint);
-                if (!serving) {
-                  return yield* Effect.fail(
-                    new AuthError({
-                      message: `no local AWS emulator is listening at ${endpoint} — start one, or omit \`endpoint\` to auto-start floci on ${DEFAULT_LOCAL_ENDPOINT}`,
-                    }),
-                  );
-                }
-              }
-              const region = config.region ?? "us-east-1";
-              return {
-                // Fixed dummy account — emulators accept any non-empty
-                // credentials, and calling STS here would be pure overhead.
-                accountId: config.accountId ?? "000000000000",
-                credentials: Effect.succeed({
-                  accessKeyId: Redacted.make("test"),
-                  secretAccessKey: Redacted.make("test"),
-                  sessionToken: undefined,
-                  region,
-                }),
-                region,
-                endpoint,
-                source: { type: "local" as const, details: endpoint },
-              } satisfies AwsResolvedCredentials;
+                ),
+              );
+              return resolved;
             }),
           ),
           Match.when({ method: "stored" }, () =>

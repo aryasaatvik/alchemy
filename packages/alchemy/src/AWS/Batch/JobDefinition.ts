@@ -1036,9 +1036,7 @@ await Effect.runPromise(program).then(
         files: { path: string; content: Uint8Array<ArrayBufferLike> }[];
         props: JobDefinitionProps;
       }) {
-        const realMain = yield* resolveMainPath(props.main!);
         const contextDir = yield* getStableContextDir(
-          realMain,
           dotAlchemy,
           `${id}-image`,
         );

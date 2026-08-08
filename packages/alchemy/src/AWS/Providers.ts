@@ -17,12 +17,11 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
+import { AlchemyContext } from "../AlchemyContext.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import * as Command from "../Command/index.ts";
 import { DockerLive } from "../Docker/Docker.ts";
 import { KeyPair, KeyPairProvider } from "../KeyPair.ts";
-import * as ProviderLayer from "../Local/ProviderLayer.ts";
-import { flociDual } from "./Local/FlociServices.ts";
 import * as Provider from "../Provider.ts";
 import { Random, RandomProvider } from "../Random.ts";
 import * as AccessAnalyzer from "./AccessAnalyzer/index.ts";
@@ -230,8 +229,26 @@ export class Providers extends Provider.ProviderCollection<Providers>()(
   "AWS",
 ) {}
 
-export const providers = () =>
-  Layer.effect(
+/** Process-local endpoint policy for the AWS provider collection. */
+export interface ProvidersOptions {
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    never,
+    never
+  >;
+  /** Mode-specific configuration for Lambda Function providers. */
+  readonly lambda?: Lambda.FunctionProviderModeOptions;
+}
+
+export const providers = (
+  options: ProvidersOptions = {},
+): Layer.Layer<Providers, never, AlchemyContext> => {
+  const endpoint =
+    options.serviceEndpoints === undefined
+      ? Endpoint.fromEnvironment
+      : Endpoint.fromEnvironmentWithServiceEndpoints(options.serviceEndpoints);
+
+  return Layer.effect(
     Providers,
     Provider.collection([
       KeyPair,
@@ -818,7 +835,6 @@ export const providers = () =>
       Route53.HostedZone,
       Route53.QueryLoggingConfig,
       Route53.Record,
-      Route53.Records,
       Route53.VpcAssociationAuthorization,
       Route53.ZoneVpcAssociation,
       Route53Profiles.Profile,
@@ -944,7 +960,6 @@ export const providers = () =>
       WAFv2.WebACL,
       WAFv2.WebACLAssociation,
       Website.AssetDeployment,
-      Website.Server,
       XRay.Group,
       XRay.ResourcePolicy,
       XRay.SamplingRule,
@@ -1138,16 +1153,13 @@ export const providers = () =>
           DevOpsGuru.NotificationChannelProvider(),
           DevOpsGuru.ResourceCollectionProvider(),
           DevOpsGuru.ServiceIntegrationProvider(),
-          flociDual(DynamoDB.Table, () => DynamoDB.TableProvider()),
+          DynamoDB.TableProvider(),
           EC2.DhcpOptionsProvider(),
           EC2.EgressOnlyInternetGatewayProvider(),
           EC2.EIPProvider(),
           EC2.FlowLogProvider(),
           EC2.InstanceProvider(),
-          // Dual EC2 networking glue: local (floci) ECS services/tasks run
-          // inside an emulated VPC — a live VPC can't host local containers
-          // and local target groups can't reference a live vpcId.
-          flociDual(EC2.InternetGateway, () => EC2.InternetGatewayProvider()),
+          EC2.InternetGatewayProvider(),
           EC2.KeyPairProvider(),
           EC2.NatGatewayProvider(),
           EC2.NetworkAclAssociationProvider(),
@@ -1156,39 +1168,26 @@ export const providers = () =>
           EC2.NetworkInterfaceProvider(),
           EC2.NetworkInterfaceAttachmentProvider(),
           EC2.PrefixListProvider(),
-          flociDual(EC2.Route, () => EC2.RouteProvider()),
-          flociDual(EC2.RouteTableAssociation, () =>
-            EC2.RouteTableAssociationProvider(),
-          ),
-          flociDual(EC2.RouteTable, () => EC2.RouteTableProvider()),
-          flociDual(EC2.SecurityGroup, () => EC2.SecurityGroupProvider()),
-          flociDual(EC2.SecurityGroupRule, () =>
-            EC2.SecurityGroupRuleProvider(),
-          ),
+          EC2.RouteProvider(),
+          EC2.RouteTableAssociationProvider(),
+          EC2.RouteTableProvider(),
+          EC2.SecurityGroupProvider(),
+          EC2.SecurityGroupRuleProvider(),
           EC2.SnapshotProvider(),
-          flociDual(EC2.Subnet, () => EC2.SubnetProvider()),
+          EC2.SubnetProvider(),
           EC2.VolumeProvider(),
           EC2.VolumeAttachmentProvider(),
           EC2.VpcEndpointProvider(),
           EC2.VpcPeeringConnectionProvider(),
-          flociDual(EC2.Vpc, () => EC2.VpcProvider()),
+          EC2.VpcProvider(),
           ECR.ImageProvider(),
           ECR.RegistryPolicyProvider(),
           ECR.RepositoryProvider(),
           ECS.CapacityProviderProvider(),
-          flociDual(ECS.Cluster, () => ECS.ClusterProvider()),
-          // Dual: live ECS in deploy, floci-emulated (RPC-sidecar-hosted,
-          // hot-reloading real containers) in dev — see FlociServiceProvider
-          // / FlociTaskProvider.
-          ProviderLayer.dual(ECS.Service, {
-            live: () => ECS.ServiceProvider(),
-            local: () => ECS.FlociServiceProvider(),
-          }),
-          flociDual(ECS.TaskDefinition, () => ECS.TaskDefinitionProvider()),
-          ProviderLayer.dual(ECS.Task, {
-            live: () => ECS.TaskProvider(),
-            local: () => ECS.FlociTaskProvider(),
-          }),
+          ECS.ClusterProvider(),
+          ECS.ServiceProvider(),
+          ECS.TaskDefinitionProvider(),
+          ECS.TaskProvider(),
           EFS.AccessPointProvider(),
           EFS.FileSystemProvider(),
           EFS.MountTargetProvider(),
@@ -1199,27 +1198,19 @@ export const providers = () =>
           EKS.NodegroupProvider(),
           EKS.PodIdentityAssociationProvider(),
           ElastiCache.ServerlessCacheProvider(),
-          // Dual ELBv2: floci emulates ALBs with locally-resolvable DNS
-          // (`*.elb.localhost.floci.io` → 127.0.0.1, host-routed on the
-          // gateway port) so local ECS services are reachable behind a
-          // local load balancer in dev.
-          flociDual(ELBv2.Listener, () => ELBv2.ListenerProvider()),
+          ELBv2.ListenerProvider(),
           ELBv2.ListenerCertificateProvider(),
-          flociDual(ELBv2.ListenerRule, () => ELBv2.ListenerRuleProvider()),
-          flociDual(ELBv2.LoadBalancer, () => ELBv2.LoadBalancerProvider()),
-          flociDual(ELBv2.TargetGroup, () => ELBv2.TargetGroupProvider()),
+          ELBv2.ListenerRuleProvider(),
+          ELBv2.LoadBalancerProvider(),
+          ELBv2.TargetGroupProvider(),
           ELBv2.TargetGroupAttachmentProvider(),
           ELBv2.TrustStoreProvider(),
           EventBridge.ApiDestinationProvider(),
           EventBridge.ArchiveProvider(),
           EventBridge.ConnectionProvider(),
-          flociDual(EventBridge.EventBus, () => EventBridge.EventBusProvider()),
-          // Dual like EventBus/Rule: a live PutPermission against a
-          // floci-emulated bus would fail with ResourceNotFoundException.
-          flociDual(EventBridge.Permission, () =>
-            EventBridge.PermissionProvider(),
-          ),
-          flociDual(EventBridge.Rule, () => EventBridge.RuleProvider()),
+          EventBridge.EventBusProvider(),
+          EventBridge.PermissionProvider(),
+          EventBridge.RuleProvider(),
           FIS.ExperimentTemplateProvider(),
           FIS.TargetAccountConfigurationProvider(),
           Firehose.DeliveryStreamProvider(),
@@ -1243,7 +1234,7 @@ export const providers = () =>
           IAM.LoginProfileProvider(),
           IAM.OpenIDConnectProviderProvider(),
           IAM.PolicyProvider(),
-          flociDual(IAM.Role, () => IAM.RoleProvider()),
+          IAM.RoleProvider(),
           IAM.SAMLProviderProvider(),
           IAM.ServerCertificateProvider(),
           IAM.ServiceLinkedRoleProvider(),
@@ -1282,25 +1273,13 @@ export const providers = () =>
           LakeFormation.PermissionsProvider(),
           LakeFormation.ResourceProvider(),
           Lambda.AliasProvider(),
-          // Requires the alchemy floci fork ≥ 1.6.0-alchemy.2: the
-          // reconciler's ownership scan calls lambda ListTags on
-          // `event-source-mapping:` ARNs, which stock floci 1.6.0 rejects.
-          flociDual(Lambda.EventSourceMapping, () =>
-            Lambda.EventSourceMappingProvider(),
-          ),
-          // Dual: live Lambda in deploy, floci-emulated (RPC-sidecar-hosted,
-          // hot-reloading) Lambda in dev — see FlociFunctionProvider.
-          ProviderLayer.dual(Lambda.Function, {
-            live: () => Lambda.FunctionProvider(),
-            local: () => Lambda.FlociFunctionProvider(),
-          }),
+          Lambda.EventSourceMappingProvider(),
+          Lambda.FunctionProvider(options.lambda),
           Lambda.LayerVersionProvider(),
           Lambda.VersionProvider(),
           Lambda.MicrovmImageProvider(),
           Lambda.NetworkConnectorProvider(),
-          // Dual: glue onto the (dual) Lambda Function — a live addPermission
-          // against a floci function ARN fails with ResourceNotFoundException.
-          flociDual(Lambda.Permission, () => Lambda.PermissionProvider()),
+          Lambda.PermissionProvider(),
           Logs.DestinationProvider(),
           Logs.LogGroupProvider(),
           Logs.LogStreamProvider(),
@@ -1396,21 +1375,13 @@ export const providers = () =>
           Route53.HostedZoneProvider(),
           Route53.QueryLoggingConfigProvider(),
           Route53.RecordProvider(),
-          Route53.RecordsProvider(),
           Route53.VpcAssociationAuthorizationProvider(),
           Route53.ZoneVpcAssociationProvider(),
-          flociDual(S3.Bucket, () => S3.BucketProvider()),
-          // Dual: schedules created by e.g. `AWS.ECS.every` reference local
-          // cluster/task/role ARNs in dev — a live PutSchedule with a floci
-          // role ARN fails validation.
-          flociDual(Scheduler.ScheduleGroup, () =>
-            Scheduler.ScheduleGroupProvider(),
-          ),
-          flociDual(Scheduler.Schedule, () => Scheduler.ScheduleProvider()),
+          S3.BucketProvider(),
+          Scheduler.ScheduleGroupProvider(),
+          Scheduler.ScheduleProvider(),
           SecretsManager.RotationScheduleProvider(),
-          flociDual(SecretsManager.Secret, () =>
-            SecretsManager.SecretProvider(),
-          ),
+          SecretsManager.SecretProvider(),
           SES.AccountSettingsProvider(),
           SES.ActiveReceiptRuleSetProvider(),
           SES.ConfigurationSetEventDestinationProvider(),
@@ -1429,13 +1400,11 @@ export const providers = () =>
           SES.TenantProvider(),
           SES.TenantResourceAssociationProvider(),
           SNS.PlatformApplicationProvider(),
-          // Dual: glue onto the (dual) SNS Topic — a live subscribe with a
-          // floci topic ARN fails with InvalidParameterException: TopicArn.
-          flociDual(SNS.Subscription, () => SNS.SubscriptionProvider()),
-          flociDual(SNS.Topic, () => SNS.TopicProvider()),
+          SNS.SubscriptionProvider(),
+          SNS.TopicProvider(),
           SocialMessaging.LinkedWhatsAppBusinessAccountProvider(),
-          flociDual(SQS.Queue, () => SQS.QueueProvider()),
-          flociDual(SSM.Parameter, () => SSM.ParameterProvider()),
+          SQS.QueueProvider(),
+          SSM.ParameterProvider(),
           StepFunctions.ActivityProvider(),
           StepFunctions.StateMachineProvider(),
           WAFv2.IPSetProvider(),
@@ -1445,7 +1414,6 @@ export const providers = () =>
           WAFv2.WebACLAssociationProvider(),
           WAFv2.WebACLProvider(),
           Website.AssetDeploymentProvider(),
-          Website.ServerProvider(),
           XRay.GroupProvider(),
           XRay.ResourcePolicyProvider(),
           XRay.SamplingRuleProvider(),
@@ -1742,7 +1710,7 @@ export const providers = () =>
     Layer.provideMerge(EC2.GetAmiHttp),
     Layer.provideMerge(Region.fromEnvironment),
     Layer.provideMerge(Credentials.fromEnvironment),
-    Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(endpoint),
     Layer.provideMerge(DefaultEnvironment),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),
@@ -1756,6 +1724,7 @@ export const providers = () =>
     Layer.provideMerge(Layer.succeed(Retry, awsRetryFactory)),
     Layer.orDie,
   );
+};
 
 // Node socket-level error codes that indicate a transient network failure.
 const TRANSIENT_NETWORK_CODES = new Set([

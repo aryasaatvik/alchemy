@@ -95,8 +95,6 @@ export const AssetsLive = Layer.effect(
                   ),
                 );
               }
-              // Local emulator (floci/LocalStack): bootstrap transparently —
-              // the bucket is free, instant, and disposable with the emulator.
               return yield* createAssetsBucket;
             }),
           onSome: (bucketName) => Effect.succeed(bucketName),
@@ -221,46 +219,6 @@ const getBucketTags = (bucketName: string) =>
     ),
   );
 
-/**
- * Create the tagged assets bucket for the current account+region and wait for
- * it to be addressable. Idempotent — used by `alchemy aws bootstrap` and by
- * the transparent local-emulator bootstrap in {@link AssetsLive}.
- */
-export const createAssetsBucket = Effect.gen(function* () {
-  const { accountId, region } = yield* AWSEnvironment.current;
-  const bucketName = createAssetsBucketName(accountId, region);
-  yield* s3
-    .createBucket({
-      Bucket: bucketName,
-      BucketNamespace: "account-regional",
-      CreateBucketConfiguration: {
-        Tags: [{ Key: ASSETS_BUCKET_TAG, Value: "true" }],
-        ...(region === "us-east-1"
-          ? {}
-          : {
-              LocationConstraint: region as s3.BucketLocationConstraint,
-            }),
-      },
-    })
-    .pipe(
-      Effect.catchTag("BucketAlreadyOwnedByYou", () => Effect.void),
-      Effect.retry({
-        while: (e): boolean =>
-          e._tag === "OperationAborted" || e._tag === "ServiceUnavailable",
-        schedule: Schedule.exponential(100),
-      }),
-    );
-
-  yield* s3.headBucket({ Bucket: bucketName }).pipe(
-    Effect.retry({
-      schedule: Schedule.max([Schedule.exponential(100), Schedule.recurs(10)]),
-    }),
-  );
-
-  yield* Effect.logInfo(`Created assets bucket: ${bucketName}`);
-  return bucketName;
-});
-
 export const ensureAssetsBucketTags = Effect.fn(function* (bucketName: string) {
   const existingTags = yield* getBucketTags(bucketName);
   const tagSet = [
@@ -277,4 +235,41 @@ export const ensureAssetsBucketTags = Effect.fn(function* (bucketName: string) {
       })),
     },
   });
+});
+
+/**
+ * Create the tagged assets bucket for the current account and region. This is
+ * shared by explicit bootstrap and local-emulator startup.
+ */
+export const createAssetsBucket = Effect.gen(function* () {
+  const { accountId, region } = yield* AWSEnvironment.current;
+  const bucketName = createAssetsBucketName(accountId, region);
+  yield* s3
+    .createBucket({
+      Bucket: bucketName,
+      BucketNamespace: "account-regional",
+      CreateBucketConfiguration: {
+        Tags: [{ Key: ASSETS_BUCKET_TAG, Value: "true" }],
+        ...(region === "us-east-1"
+          ? {}
+          : { LocationConstraint: region as s3.BucketLocationConstraint }),
+      },
+    })
+    .pipe(
+      Effect.catchTag("BucketAlreadyOwnedByYou", () => Effect.void),
+      Effect.retry({
+        while: (error) =>
+          error._tag === "OperationAborted" ||
+          error._tag === "ServiceUnavailable",
+        schedule: Schedule.exponential(100),
+      }),
+    );
+
+  yield* s3.headBucket({ Bucket: bucketName }).pipe(
+    Effect.retry({
+      schedule: Schedule.max([Schedule.exponential(100), Schedule.recurs(10)]),
+    }),
+  );
+  yield* Effect.logInfo(`Created assets bucket: ${bucketName}`);
+  return bucketName;
 });

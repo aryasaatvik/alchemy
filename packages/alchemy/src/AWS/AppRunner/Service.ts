@@ -1094,9 +1094,7 @@ await Effect.runPromise(program).catch((err) => {
         props: ServiceProps;
         port: number;
       }) {
-        const realMain = yield* resolveMainPath(props.main!);
         const contextDir = yield* getStableContextDir(
-          realMain,
           dotAlchemy,
           `${id}-image`,
         );
