@@ -1,4 +1,5 @@
 /** @effect-diagnostics layerMergeAllWithDependencies:off */
+import { Endpoint as AwsEndpoint } from "@distilled.cloud/aws";
 import {
   isRetryable,
   isThrottlingError,
@@ -102,7 +103,10 @@ import * as EMRContainers from "./EMRContainers/index.ts";
 import * as EMRServerless from "./EMRServerless/index.ts";
 import * as Endpoint from "./Endpoint.ts";
 import * as EntityResolution from "./EntityResolution/index.ts";
-import { Default as DefaultEnvironment } from "./Environment.ts";
+import {
+  AWSEnvironment,
+  Default as DefaultEnvironment,
+} from "./Environment.ts";
 import * as EventBridge from "./EventBridge/index.ts";
 import * as FIS from "./FIS/index.ts";
 import * as FMS from "./FMS/index.ts";
@@ -242,7 +246,16 @@ export interface ProvidersOptions {
 
 export const providers = (
   options: ProvidersOptions = {},
-): Layer.Layer<Providers, never, AlchemyContext> => {
+): Layer.Layer<
+  | Providers
+  | Credentials.Credentials
+  | Region.Region
+  | AWSEnvironment
+  | AwsEndpoint.ServiceEndpoint
+  | Endpoint.ConfiguredServiceEndpoints,
+  never,
+  AlchemyContext
+> => {
   const endpoint =
     options.serviceEndpoints === undefined
       ? Endpoint.fromEnvironment
