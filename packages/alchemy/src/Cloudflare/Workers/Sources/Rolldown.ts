@@ -6,6 +6,7 @@ import * as Stream from "effect/Stream";
 import path from "pathe";
 import type * as rolldown from "rolldown";
 import * as Artifacts from "../../../Artifacts.ts";
+import { AlchemyContext } from "../../../AlchemyContext.ts";
 import * as Bundle from "../../../Bundle/Bundle.ts";
 import { findCwdForBundle, resolveMainPath } from "../../../Bundle/TempRoot.ts";
 import {
@@ -94,6 +95,7 @@ const rebindEsmExternalRequirePlugin = (
   });
 
 export const WorkerBundle = Effect.gen(function* () {
+  const { dotAlchemy } = yield* AlchemyContext;
   const context = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const virtualEntryPlugin = yield* Bundle.virtualEntryPlugin;
 
@@ -112,12 +114,13 @@ export const WorkerBundle = Effect.gen(function* () {
     const inputOptions: rolldown.InputOptions = {
       input: realMain,
       preserveEntrySignatures: options.extraOptions?.preserveEntrySignatures,
-      // Forever-devtool native modules that vite/chokidar reference behind
+      // `cloudflare:workers` is supplied by workerd. The other entries are
+      // forever-devtool native modules that vite/chokidar reference behind
       // runtime guards. Rolldown resolves before tree-shaking, so the dead
       // `require('../pkg')` (lightningcss < 1.32) and `require('fsevents')`
       // (darwin-only) trip [UNRESOLVED_IMPORT] before DCE can prune them.
       // See rolldown/tsdown#212.
-      external: ["lightningcss", "fsevents"],
+      external: ["cloudflare:workers", "lightningcss", "fsevents"],
       cwd: yield* findCwdForBundle(realMain).pipe(
         Effect.mapError(
           (cause) =>
@@ -165,7 +168,7 @@ export const WorkerBundle = Effect.gen(function* () {
       // modules so evaluation follows ESM semantics regardless of how the
       // graph was chunked. See DrizzleSchemaChunks.test.ts.
       strictExecutionOrder: true,
-      dir: `.alchemy/bundles/${options.id}`,
+      dir: path.join(dotAlchemy, "bundles", options.id),
       ...options.extraOptions?.output,
     };
     return { inputOptions, outputOptions, extraOptions: options.extraOptions };

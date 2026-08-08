@@ -21,7 +21,6 @@ const ADDRESS_RE = /<ALCHEMY_RPC_ADDRESS>(.+?)<\/ALCHEMY_RPC_ADDRESS>/;
 const sampleEnv = () =>
   JSON.stringify({
     profile: null,
-    envFile: null,
     alchemyContext: {
       dotAlchemy: "/tmp/.alchemy",
       updateStateStore: false,

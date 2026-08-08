@@ -6,6 +6,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type { PlatformError } from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
@@ -17,6 +18,8 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { fileURLToPath } from "node:url";
+import { loadEvaluationEnvironment } from "../Util/ConfigProvider.ts";
+import { killProcessGroup } from "../Util/killProcessGroup.ts";
 import { transformTypesFlags } from "../Util/Node.ts";
 import { httpServer } from "../Util/PlatformServices.ts";
 import { SPAWNER_URL_ENV_KEY } from "./RpcProviderProxy.ts";
@@ -29,6 +32,7 @@ export class RpcSpawner extends Context.Service<
   RpcSpawner,
   {
     readonly url: string;
+    readonly environment: Readonly<Record<string, string>>;
   }
 >()("alchemy/Local/RpcSpawner") {}
 
@@ -37,6 +41,13 @@ export interface RpcSpawnPayload extends Pick<
   "alchemyContext" | "stack"
 > {
   serverEntryUrl: string;
+  /** Non-secret provider context required to bootstrap the local sidecar. */
+  environment?: Record<string, string>;
+}
+
+export interface RpcSpawnerOptions {
+  readonly profile: string | undefined;
+  readonly envFile: string | undefined;
 }
 
 /**
@@ -58,9 +69,12 @@ export const LOGS_PATH = "/logs";
 export const make = Effect.fn(function* ({
   profile,
   envFile,
-}: Pick<RpcServerEnvironment, "profile" | "envFile">) {
+}: RpcSpawnerOptions) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const scope = yield* Effect.scope;
+  const evaluationEnvironment = yield* loadEvaluationEnvironment(
+    Option.fromNullishOr(envFile),
+  );
   const cache = yield* Cache.make({
     lookup: (payload: RpcSpawnPayload) =>
       spawn(payload).pipe(Scope.provide(scope)),
@@ -94,12 +108,12 @@ export const make = Effect.fn(function* ({
     serverEntryUrl,
     alchemyContext,
     stack,
+    environment: payloadEnvironment = {},
   }: RpcSpawnPayload) {
     const bin = typeof globalThis.Bun !== "undefined" ? "bun" : "node";
     const main = fileURLToPath(serverEntryUrl);
-    const environment: RpcServerEnvironment = {
+    const serverEnvironment: RpcServerEnvironment = {
       profile,
-      envFile,
       alchemyContext,
       stack,
     };
@@ -123,9 +137,11 @@ export const make = Effect.fn(function* ({
         stderr: "pipe",
         detached: false,
         env: {
-          [RPC_SERVER_ENVIRONMENT_KEY]: JSON.stringify(environment),
+          ...evaluationEnvironment,
+          ...payloadEnvironment,
+          [RPC_SERVER_ENVIRONMENT_KEY]: JSON.stringify(serverEnvironment),
         },
-        extendEnv: true,
+        extendEnv: false,
       },
     );
     const handle = yield* spawner.spawn(command);
@@ -217,12 +233,11 @@ export const make = Effect.fn(function* ({
 
   return RpcSpawner.of({
     url: HttpServer.formatAddress(server.address),
+    environment: evaluationEnvironment,
   });
 });
 
-export const layerServer = (
-  environment: Pick<RpcServerEnvironment, "profile" | "envFile">,
-) =>
+export const layerServer = (environment: RpcSpawnerOptions) =>
   Layer.effect(RpcSpawner, make(environment)).pipe(Layer.provide(httpServer()));
 
 const RPC_ADDRESS_REGEX =

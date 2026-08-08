@@ -15,7 +15,6 @@ import * as Layer from "effect/Layer";
 
 const sampleEnv: RpcServerEnvironment = {
   profile: undefined,
-  envFile: undefined,
   alchemyContext: {
     dotAlchemy: "/tmp/.alchemy",
     dev: true,

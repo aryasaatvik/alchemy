@@ -2,19 +2,16 @@ import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { AlchemyContext } from "../AlchemyContext.ts";
 import { AuthProviders } from "../Auth/AuthProvider.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileLive, withProfileOverride } from "../Auth/Profile.ts";
 import { Stack } from "../Stack.ts";
 import { Stage } from "../Stage.ts";
-import { loadConfigProvider } from "../Util/ConfigProvider.ts";
 
 export interface RpcServerEnvironment {
   alchemyContext: AlchemyContext["Service"];
   profile: string | undefined;
-  envFile: string | undefined;
   stack: {
     name: string;
     stage: string;
@@ -29,9 +26,7 @@ export const layer = (environment: RpcServerEnvironment) =>
     CredentialsStoreLive,
     Layer.succeed(AuthProviders, {}),
     ConfigProvider.layer(
-      loadConfigProvider(Option.fromNullishOr(environment.envFile)).pipe(
-        Effect.map((base) => withProfileOverride(base, environment.profile)),
-      ),
+      withProfileOverride(ConfigProvider.fromEnv(), environment.profile),
     ),
     Layer.succeed(AlchemyContext, environment.alchemyContext),
     Layer.succeed(Stack, {

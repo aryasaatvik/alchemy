@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
 import { existsSync } from "node:fs";
+import { AlchemyContext } from "../AlchemyContext.ts";
 import { decodeFqn, encodeFqn } from "../FQN.ts";
 import { recordStateStoreInit } from "../Telemetry/Metrics.ts";
 import { STATE_STORE_VERSION } from "./HttpStateApi.ts";
@@ -22,14 +23,12 @@ import { encodeState, reviveState } from "./StateEncoding.ts";
  * a window lists no state, plans "no changes", and silently leaks every
  * cloud resource of the stack.
  */
-const initialCwd = process.cwd();
-
 export const localState = () =>
   Layer.effect(
     State,
     Effect.gen(function* () {
       const context = yield* Effect.context<
-        FileSystem.FileSystem | Path.Path
+        AlchemyContext | FileSystem.FileSystem | Path.Path
       >();
 
       const make = makeLocalState().pipe(
@@ -45,7 +44,7 @@ export const makeLocalState = () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const dotAlchemy = path.join(initialCwd, ".alchemy");
+    const { dotAlchemy } = yield* AlchemyContext;
     const stateDir = path.join(dotAlchemy, "state");
 
     const fail = (err: PlatformError) =>

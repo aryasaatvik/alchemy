@@ -16,12 +16,14 @@ export class TestEcho extends Context.Service<
   TestEcho,
   {
     echo: (msg: string) => Effect.Effect<string>;
+    readEnvironment: (key: string) => Effect.Effect<string | undefined>;
     boom: () => Effect.Effect<never, { _tag: "Boom"; msg: string }>;
   }
 >()("Test.Echo") {}
 
 const TestEchoLive = Layer.succeed(TestEcho, {
   echo: (msg) => Effect.succeed(`echo:${msg}`),
+  readEnvironment: (key) => Effect.sync(() => process.env[key]),
   boom: () => Effect.fail({ _tag: "Boom" as const, msg: "kaboom" }),
 });
 

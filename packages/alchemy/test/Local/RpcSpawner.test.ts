@@ -10,7 +10,9 @@ import { describe, expect, it } from "alchemy-test";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpBody from "effect/unstable/http/HttpBody";
@@ -62,6 +64,12 @@ describe(`Local.RpcSpawner (runtime=${typeof globalThis.Bun !== "undefined" ? "b
     Layer.merge(PlatformServices, FetchHttpClient.layer),
   );
 
+  const servicesWithEnvFile = (envFile: string) =>
+    Layer.provideMerge(
+      layerServer({ profile: undefined, envFile }),
+      Layer.merge(PlatformServices, FetchHttpClient.layer),
+    );
+
   it.live(
     "POST returns a ws url whose RPC end-to-end call hits the fixture",
     () =>
@@ -101,6 +109,38 @@ describe(`Local.RpcSpawner (runtime=${typeof globalThis.Bun !== "undefined" ? "b
         const b = yield* post(url, samplePayload(FIXTURE_TS_URL, "stack-b"));
         expect(a).not.toBe(b);
       }).pipe(Effect.provide(services)),
+    { timeout: 60_000 },
+  );
+
+  it.live(
+    "propagates one dotenv snapshot to sidecars before payload overrides",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({
+          prefix: "alchemy-rpc-environment-",
+        });
+        const envFile = path.join(directory, "managed.env");
+        yield* fs.writeFileString(
+          envFile,
+          "SNAPSHOT_VALUE=dotenv\nOVERRIDDEN_VALUE=dotenv\n",
+        );
+
+        return yield* Effect.gen(function* () {
+          const url = yield* RpcSpawner.useSync((spawner) => spawner.url);
+          const payload = {
+            ...samplePayload(FIXTURE_TS_URL),
+            environment: { OVERRIDDEN_VALUE: "payload" },
+          };
+          const wsUrl = yield* post(url, payload);
+          const observed = yield* readEnvironmentWebSocket(wsUrl, [
+            "SNAPSHOT_VALUE",
+            "OVERRIDDEN_VALUE",
+          ]);
+          expect(observed).toEqual(["dotenv", "payload"]);
+        }).pipe(Effect.provide(servicesWithEnvFile(envFile)));
+      }).pipe(Effect.provide(PlatformServices)),
     { timeout: 60_000 },
   );
 
@@ -210,5 +250,25 @@ const echoWebSocket = (
         echo: (m: string) => Effect.Effect<string>;
       };
       return await Effect.runPromise(handlers.echo(msg));
+    });
+  }).pipe(Effect.scoped);
+
+const readEnvironmentWebSocket = (
+  rpcUrl: string,
+  keys: ReadonlyArray<string>,
+): Effect.Effect<ReadonlyArray<string | undefined>, Error> =>
+  Effect.gen(function* () {
+    yield* openWebSocket(new URL("/parent", rpcUrl));
+    return yield* Effect.promise(async () => {
+      const stub = newWebSocketRpcSession(
+        rpcUrl,
+      ) as unknown as RpcStub<RpcProxyApi>;
+      const provider = await stub.getProvider("Test.Echo");
+      const handlers = unwrapRpcHandlers(provider as any) as {
+        readEnvironment: (key: string) => Effect.Effect<string | undefined>;
+      };
+      return await Effect.runPromise(
+        Effect.forEach(keys, handlers.readEnvironment),
+      );
     });
   }).pipe(Effect.scoped);

@@ -10,7 +10,7 @@ import * as Command from "effect/unstable/cli/Command";
 import * as Flag from "effect/unstable/cli/Flag";
 
 import { AdoptPolicy } from "../../AdoptPolicy.ts";
-import { AlchemyContext } from "../../AlchemyContext.ts";
+import { AlchemyContext, makeAlchemyContext } from "../../AlchemyContext.ts";
 import { apply } from "../../Apply.ts";
 import { ArtifactStore, createArtifactStore } from "../../Artifacts.ts";
 import { AuthProviders } from "../../Auth/AuthProvider.ts";
@@ -18,11 +18,16 @@ import { withProfileOverride } from "../../Auth/Profile.ts";
 import * as CLI from "../../Cli/Cli.ts";
 import * as Plan from "../../Plan.ts";
 import { Stage } from "../../Stage.ts";
-import { loadConfigProvider } from "../../Util/ConfigProvider.ts";
+import {
+  loadConfigProvider,
+  loadEvaluationEnvironment,
+  withEvaluationEnvironment,
+} from "../../Util/ConfigProvider.ts";
 import { fileLogger } from "../../Util/FileLogger.ts";
 
 import {
   dryRun as dryRunFlag,
+  dataDir,
   envFile,
   force,
   importStack,
@@ -37,6 +42,7 @@ export const ExecStackOptions = Schema.Struct({
   main: Schema.String,
   stage: Schema.String,
   envFile: Schema.OptionFromOptional(Schema.String),
+  dataDir: Schema.OptionFromOptional(Schema.String),
   profile: Schema.optional(Schema.String),
   dryRun: Schema.optional(Schema.Boolean),
   force: Schema.optional(Schema.Boolean),
@@ -67,10 +73,11 @@ const adopt = Flag.boolean("adopt").pipe(
   Flag.withDefault(false),
 );
 
-const runStack = Effect.fn(function* ({
+const execStackWithEnvironment = Effect.fn(function* ({
   main,
   stage,
   envFile,
+  dataDir,
   profile,
   dryRun = false,
   force = false,
@@ -81,20 +88,21 @@ const runStack = Effect.fn(function* ({
 }: ExecStackOptions) {
   const stackEffect = yield* importStack(main);
 
-  const services = Layer.mergeAll(
-    Layer.effect(
-      AlchemyContext,
-      AlchemyContext.pipe(
-        Effect.map((ctx) => ({
-          ...ctx,
-          dev,
-          adopt,
-          // `--yes` also auto-accepts (and performs) an out-of-date state
-          // store upgrade, instead of prompting.
-          updateStateStore: yes,
-        })),
-      ),
+  const alchemyContext = Layer.effect(
+    AlchemyContext,
+    makeAlchemyContext({ dataDir: Option.getOrUndefined(dataDir) }).pipe(
+      Effect.map((ctx) => ({
+        ...ctx,
+        dev,
+        adopt,
+        // `--yes` also auto-accepts (and performs) an out-of-date state
+        // store upgrade, instead of prompting.
+        updateStateStore: yes,
+      })),
     ),
+  );
+  const services = Layer.mergeAll(
+    alchemyContext,
     // `--adopt` opts the entire deploy in to adoption-on-conflict.
     // Resource providers that wire `AdoptPolicy` (Worker domains,
     // Cloudflare.SecretsStore, etc.) will reconcile against
@@ -112,7 +120,9 @@ const runStack = Effect.fn(function* ({
     ConfigProvider.layer(
       withProfileOverride(yield* loadConfigProvider(envFile), profile),
     ),
-    Logger.layer([fileLogger("out")], { mergeWithExisting: true }),
+    Logger.layer([fileLogger("out")], { mergeWithExisting: true }).pipe(
+      Layer.provide(alchemyContext),
+    ),
     Layer.succeed(Stage, stage),
   );
 
@@ -176,7 +186,7 @@ const runStack = Effect.fn(function* ({
 // In dev, failures OUTSIDE the apply guard above must not exit the process
 // either: the user saves mid-edit states where importing the stack module
 // itself throws (missing export, module-evaluation crash), or planning fails
-// against the half-edited program. Those failures escape `runStack` before
+// against the half-edited program. Those failures escape the evaluation before
 // the apply-level guard exists, and exiting here kills the `--watch` session
 // (oven-sh/bun#10983), so dev would stop reloading on subsequent saves. Log
 // the cause and park forever; the watcher restarts the run on the next file
@@ -195,8 +205,13 @@ export const devKeepAlive = <A, E, R>(
     ),
   );
 
-export const execStack = (options: ExecStackOptions) =>
-  options.dev ? devKeepAlive(runStack(options)) : runStack(options);
+export const execStack = Effect.fn(function* (options: ExecStackOptions) {
+  const environment = yield* loadEvaluationEnvironment(options.envFile);
+  const run = execStackWithEnvironment(options).pipe(
+    withEvaluationEnvironment(environment),
+  );
+  return yield* (options.dev ? devKeepAlive(run) : run);
+});
 
 export const deployCommand = Command.make(
   "deploy",
@@ -205,6 +220,7 @@ export const deployCommand = Command.make(
     force,
     main: script,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -219,6 +235,7 @@ export const destroyCommand = Command.make(
     dryRun: dryRunFlag,
     main: script,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -239,6 +256,7 @@ export const planCommand = Command.make(
   {
     main: script,
     envFile,
+    dataDir,
     stage,
     profile,
   },

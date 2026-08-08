@@ -27,6 +27,7 @@ const { test: inProcessTest } = Test.make({
 
 const fixtureDir = pathe.resolve(import.meta.dirname, "fixture");
 const fixtureScript = pathe.join(fixtureDir, "long-running.cjs");
+const cleanupScript = pathe.join(fixtureDir, "cleanup.cjs");
 const urlServerScript = pathe.join(fixtureDir, "url-server.cjs");
 const dieScript = pathe.join(fixtureDir, "die.cjs");
 
@@ -34,10 +35,14 @@ const dieScript = pathe.join(fixtureDir, "die.cjs");
 // fixture path must not contain spaces. The in-repo path doesn't, but a CI
 // clone under e.g. `C:\Program Files\...` would. Fail loudly with a clear
 // message instead of letting the test hang on a misparsed argv.
-if (fixtureScript.includes(" ") || urlServerScript.includes(" ")) {
+if (
+  fixtureScript.includes(" ") ||
+  cleanupScript.includes(" ") ||
+  urlServerScript.includes(" ")
+) {
   throw new Error(
     `DevServer test fixture path contains a space, which the provider's ` +
-      `argv split cannot represent: ${fixtureScript} / ${urlServerScript}`,
+      `argv split cannot represent: ${fixtureScript} / ${cleanupScript} / ${urlServerScript}`,
   );
 }
 
@@ -231,6 +236,176 @@ test.provider(
 
       yield* stack.destroy();
       yield* waitForDeath(second.pid);
+    }),
+  { timeout: 30_000 },
+);
+
+test.provider.skipIf(process.platform === "win32")(
+  "runs SIGTERM finalizers before restart and destroy",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const pidFile = pathe.join(tmp, "pid.json");
+      const firstShutdownFile = pathe.join(tmp, "shutdown-v1.json");
+      const secondShutdownFile = pathe.join(tmp, "shutdown-v2.json");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: {
+            PID_FILE: pidFile,
+            MARKER: "v1",
+            SHUTDOWN_FILE: firstShutdownFile,
+          },
+        }),
+      );
+      const first = yield* waitForPidFile(pidFile, "v1");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: {
+            PID_FILE: pidFile,
+            MARKER: "v2",
+            SHUTDOWN_FILE: secondShutdownFile,
+          },
+        }),
+      );
+      const firstShutdown = yield* waitForPidFile(firstShutdownFile, "v1");
+      const second = yield* waitForPidFile(pidFile, "v2");
+
+      expect(firstShutdown.pid).toBe(first.pid);
+      expect(second.pid).not.toBe(first.pid);
+      yield* waitForDeath(first.pid);
+
+      yield* stack.destroy();
+      const secondShutdown = yield* waitForPidFile(secondShutdownFile, "v2");
+      expect(secondShutdown.pid).toBe(second.pid);
+      yield* waitForDeath(second.pid);
+    }),
+  { timeout: 30_000 },
+);
+
+test.provider.skipIf(process.platform === "win32")(
+  "runs durable cleanup on restart and destroy",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const pidFile = pathe.join(tmp, "pid.json");
+      const firstCleanupFile = pathe.join(tmp, "cleanup-v1.json");
+      const secondCleanupFile = pathe.join(tmp, "cleanup-v2.json");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "v1" },
+          cleanup: {
+            command: `node ${cleanupScript}`,
+            env: { CLEANUP_FILE: firstCleanupFile, MARKER: "cleanup-v1" },
+            timeout: "5 seconds",
+          },
+        }),
+      );
+      const first = yield* waitForPidFile(pidFile, "v1");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "v2" },
+          cleanup: {
+            command: `node ${cleanupScript}`,
+            env: { CLEANUP_FILE: secondCleanupFile, MARKER: "cleanup-v2" },
+            timeout: "5 seconds",
+          },
+        }),
+      );
+      yield* waitForPidFile(firstCleanupFile, "cleanup-v1");
+      const second = yield* waitForPidFile(pidFile, "v2");
+      expect(second.pid).not.toBe(first.pid);
+      yield* waitForDeath(first.pid);
+
+      yield* stack.destroy();
+      yield* waitForPidFile(secondCleanupFile, "cleanup-v2");
+      yield* waitForDeath(second.pid);
+    }),
+  { timeout: 30_000 },
+);
+
+test.provider.skipIf(process.platform === "win32")(
+  "repairs cleanup after the dev process is force-killed",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const pidFile = pathe.join(tmp, "pid.json");
+      const cleanupFile = pathe.join(tmp, "cleanup-recovery.json");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "interrupted" },
+          cleanup: {
+            command: `node ${cleanupScript}`,
+            env: {
+              CLEANUP_FILE: cleanupFile,
+              MARKER: "cleanup-recovery",
+            },
+            timeout: "5 seconds",
+          },
+        }),
+      );
+      const child = yield* waitForPidFile(pidFile, "interrupted");
+      yield* Effect.sync(() => process.kill(child.pid, "SIGKILL"));
+      yield* waitForDeath(child.pid);
+      yield* Effect.sleep("100 millis");
+
+      // The child cannot run a signal handler and its registry entry is
+      // invalidated by its exit watcher. Delete must reconstruct cleanup from
+      // persisted props; the next test proves the empty-registry path directly.
+      yield* stack.destroy();
+      yield* waitForPidFile(cleanupFile, "cleanup-recovery");
+    }),
+  { timeout: 30_000 },
+);
+
+inProcessTest.provider(
+  "repairs persisted cleanup when no dev process is registered",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const cleanupFile = pathe.join(tmp, "cleanup-recovered-provider.json");
+      const provider = yield* Provider.findProvider(Command.Dev);
+      const olds: Command.DevProps = {
+        command: "process-was-lost-with-its-sidecar",
+        cleanup: {
+          command: `node ${cleanupScript}`,
+          env: {
+            CLEANUP_FILE: cleanupFile,
+            MARKER: "cleanup-recovered-provider",
+          },
+          timeout: "5 seconds",
+        },
+      };
+
+      // This provider instance never reconciled the resource, matching a
+      // destroy/recovery process created after the previous sidecar died.
+      yield* provider.delete({
+        id: "RecoveredDev",
+        fqn: "RecoveredDev",
+        instanceId: "recovered-instance",
+        olds,
+        output: { url: undefined },
+        bindings: [],
+        session: {
+          note: () => Effect.void,
+          emit: () => Effect.void,
+        } as never,
+      });
+
+      yield* waitForPidFile(cleanupFile, "cleanup-recovered-provider");
     }),
   { timeout: 30_000 },
 );

@@ -1144,6 +1144,24 @@ if (el) {
         );
 
         expect(deployed.appA.url).not.toBe(deployed.appB.url);
+        const [childA, childB] = yield* Effect.all(
+          [
+            fetchJsonReady<{ host: string; port: number; cwd: string }>(
+              `${deployed.appA.url!}/__vite-child-origin`,
+            ),
+            fetchJsonReady<{ host: string; port: number; cwd: string }>(
+              `${deployed.appB.url!}/__vite-child-origin`,
+            ),
+          ],
+          { concurrency: "unbounded" },
+        );
+        expect(childA.host).toBe("127.0.0.1");
+        expect(childB.host).toBe("127.0.0.1");
+        expect(childA.port).toBeGreaterThan(0);
+        expect(childB.port).toBeGreaterThan(0);
+        expect(childA.port).not.toBe(childB.port);
+        expect(childA.cwd).toBe(rootA);
+        expect(childB.cwd).toBe(rootB);
         yield* Effect.all(
           [
             expectUrlContains(

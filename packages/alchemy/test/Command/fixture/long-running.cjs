@@ -5,6 +5,7 @@ const fs = require("node:fs");
 
 const file = process.env.PID_FILE;
 const marker = process.env.MARKER ?? "default";
+const shutdownFile = process.env.SHUTDOWN_FILE;
 
 if (!file) {
   console.error("long-running.cjs: PID_FILE env var is required");
@@ -12,6 +13,16 @@ if (!file) {
 }
 
 fs.writeFileSync(file, JSON.stringify({ pid: process.pid, marker }));
+
+if (shutdownFile) {
+  process.once("SIGTERM", () => {
+    fs.writeFileSync(
+      shutdownFile,
+      JSON.stringify({ pid: process.pid, marker }),
+    );
+    process.exit(0);
+  });
+}
 
 // Print a localhost URL so the Dev provider's URL-readiness scan resolves
 // immediately (like a real dev server) instead of waiting out its 5-second

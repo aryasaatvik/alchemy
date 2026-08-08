@@ -16,6 +16,9 @@ import type { WorkerAssetsConfig, WorkerSourceDescriptor } from "./Worker.ts";
  */
 export const DEFAULT_DEV_PORT = 1337;
 
+/** Canonical loopback family shared by Vite's port check, listener, and URL. */
+export const VITE_CHILD_HOST = "127.0.0.1";
+
 /** Plain-data configuration transferred from the provider to a Vite child. */
 export interface ViteChildConfig {
   rootDir: string;

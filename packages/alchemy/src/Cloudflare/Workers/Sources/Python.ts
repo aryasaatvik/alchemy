@@ -5,6 +5,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import fg from "fast-glob";
 import path from "pathe";
 import * as Artifacts from "../../../Artifacts.ts";
+import { AlchemyContext } from "../../../AlchemyContext.ts";
 import * as Bundle from "../../../Bundle/Bundle.ts";
 import { exec } from "../../../Util/exec.ts";
 import { sha256 } from "../../../Util/sha256.ts";
@@ -139,7 +140,7 @@ const runUv = Effect.fn(function* (
  *   user vendored it themselves, e.g. with `pywrangler sync` or any other
  *   tool that produces Wrangler's vendored layout), it is used as-is.
  * - Otherwise, if `pyproject.toml` exists, its `[project.dependencies]`
- *   are vendored with uv into a staging directory under `.alchemy/`:
+ *   are vendored with uv under the evaluation data root:
  *   resolve against the Pyodide wheel index for the runtime's Python
  *   version (`uv pip compile` → `pylock.toml`), install the prebuilt
  *   wheels into an emscripten cross-venv (`uv venv` + `uv pip install
@@ -152,6 +153,7 @@ const resolvePythonModulesDir = Effect.fn(function* (
   options: PythonWorkerBundleOptions & { root: string },
 ) {
   const fs = yield* FileSystem.FileSystem;
+  const { dotAlchemy } = yield* AlchemyContext;
 
   const userManaged = path.join(options.root, "python_modules");
   if (yield* orDefault(fs.exists(userManaged), false)) {
@@ -172,7 +174,7 @@ const resolvePythonModulesDir = Effect.fn(function* (
     `${pythonVersion}\0${target.index}\0${pyprojectContent}`,
   );
 
-  const staging = path.resolve(".alchemy", "python", options.id);
+  const staging = path.join(dotAlchemy, "python", options.id);
   const vendorDir = path.join(staging, "python_modules");
   const tokenFile = path.join(staging, ".synced");
 

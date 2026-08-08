@@ -16,6 +16,7 @@ import type { PlatformError } from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+import type { AlchemyContext } from "../../AlchemyContext.ts";
 import type { Artifacts } from "../../Artifacts.ts";
 import type * as Bundle from "../../Bundle/Bundle.ts";
 import type { WorkflowExport } from "../Workflows/Workflow.ts";
@@ -164,7 +165,8 @@ export type SourceServices =
   | Path.Path
   | ChildProcessSpawner
   | Scope.Scope
-  | Artifacts;
+  | Artifacts
+  | AlchemyContext;
 
 /** Requirements available to `dev()` (no per-run Artifacts cache in the local host). */
 export type SourceDevServices =

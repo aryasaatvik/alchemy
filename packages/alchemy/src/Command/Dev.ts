@@ -10,10 +10,23 @@ import {
   UnexpectedExit,
   makeCommandError,
   type CommandProps,
+  type CommandRunProps,
 } from "./Command.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
 
-export interface DevProps extends CommandProps {}
+export interface DevProps extends CommandProps {
+  /**
+   * An idempotent finite command that releases external state owned by the
+   * dev process. Alchemy runs it when the process is restarted, deleted, or
+   * stopped because the local-provider sidecar shuts down. It is also run during delete
+   * when no process is registered, so a later destroy can repair residue
+   * left by an interrupted or force-killed development session.
+   *
+   * Because recovery may repeat cleanup after an uncertain interruption,
+   * the command MUST succeed when the state is already absent.
+   */
+  cleanup?: CommandRunProps;
+}
 
 export interface Dev extends Resource<
   "Command.Dev",
@@ -109,14 +122,27 @@ export const DevProviderLocal = () =>
       import.meta.url,
     ),
     Effect.gen(function* () {
-      const { spawn } = yield* CommandExecutor;
+      const { run, spawn } = yield* CommandExecutor;
 
       return {
         // The dev process is spawned into the instance scope the helper
         // provides: it keeps running after `start` returns (readiness) and
-        // is killed when the helper closes the scope on restart/delete.
-        start: Effect.fn(function* ({ news: props, invalidate }) {
-          const child = yield* spawn(props);
+        // receives SIGTERM when the helper closes the scope on restart/delete,
+        // with bounded SIGKILL escalation if it does not exit gracefully.
+        start: Effect.fn(function* ({ news: props, invalidate, session }) {
+          // Register before spawning so Effect's LIFO scope finalization stops
+          // the child first, then runs the durable external-state cleanup.
+          // This does not depend on the child receiving or handling SIGTERM.
+          if (props.cleanup !== undefined) {
+            const cleanup = props.cleanup;
+            yield* Effect.addFinalizer(() =>
+              run(cleanup, session).pipe(Effect.orDie, Effect.asVoid),
+            );
+          }
+          const child = yield* spawn(props, {
+            killSignal: "SIGTERM",
+            forceKillAfter: "1 second",
+          });
           const redactor = makeCommandRedactor(props.env);
 
           let buffer = "";
@@ -188,6 +214,14 @@ export const DevProviderLocal = () =>
           );
 
           return { url };
+        }),
+        // A force-killed sidecar has no opportunity to run instance-scope
+        // finalizers. Delete is reconstructed from persisted `olds`, so run
+        // the idempotent cleanup again even when no instance is registered.
+        stop: Effect.fn(function* ({ olds: props, session }) {
+          if (props.cleanup !== undefined) {
+            yield* run(props.cleanup, session).pipe(Effect.asVoid);
+          }
         }),
       } satisfies LocalProvider.LocalProviderSpec<Dev>;
     }),
