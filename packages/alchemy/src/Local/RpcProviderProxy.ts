@@ -20,6 +20,7 @@ export class RpcProviderProxy extends Context.Service<
     readonly get: <R extends ResourceLike>(
       serverEntryUrl: string,
       providerName: R["Type"],
+      environment?: Record<string, string>,
     ) => Effect.Effect<ProviderService<R>, never, AlchemyContext | Stack>;
   }
 >()("alchemy/Local/RpcProviderProxy") {}
@@ -30,13 +31,18 @@ const make = Effect.fn(function* (spawnerUrl: string) {
   const client = yield* HttpClient.HttpClient;
 
   const getSession = Effect.fn(
-    function* (serverEntryUrl: string) {
+    function* (key: string) {
+      const { serverEntryUrl, environment } = JSON.parse(key) as {
+        serverEntryUrl: string;
+        environment: Record<string, string>;
+      };
       const alchemyContext = yield* AlchemyContext;
       const stack = yield* Stack;
       const payload: RpcSpawnPayload = {
         serverEntryUrl,
         alchemyContext,
         stack: { name: stack.name, stage: stack.stage },
+        environment,
       };
       const response = yield* client.post(spawnerUrl, {
         body: yield* HttpBody.json(payload),
@@ -44,15 +50,12 @@ const make = Effect.fn(function* (spawnerUrl: string) {
       const websocketUrl = yield* response.text;
       return newWebSocketRpcSession<RpcProxyApi>(websocketUrl);
     },
-    (effect, serverEntryUrl) =>
+    (effect) =>
       Effect.catch(effect, (error) =>
         Effect.die(
-          new Error(
-            `Failed to create provider RPC session for "${serverEntryUrl}"`,
-            {
-              cause: error,
-            },
-          ),
+          new Error("Failed to create provider RPC session", {
+            cause: error,
+          }),
         ),
       ),
   );
@@ -64,8 +67,19 @@ const make = Effect.fn(function* (spawnerUrl: string) {
   });
 
   return RpcProviderProxy.of({
-    get: Effect.fn(function* (mainUrl, providerName) {
-      const session = yield* Cache.get(cache, mainUrl);
+    get: Effect.fn(function* (mainUrl, providerName, environment = {}) {
+      const orderedEnvironment = Object.fromEntries(
+        Object.entries(environment).sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+      );
+      const session = yield* Cache.get(
+        cache,
+        JSON.stringify({
+          serverEntryUrl: mainUrl,
+          environment: orderedEnvironment,
+        }),
+      );
       const provider = yield* Effect.promise(
         () =>
           session.getProvider(providerName) as ReturnType<

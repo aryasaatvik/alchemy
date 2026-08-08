@@ -2,8 +2,10 @@
 /** @effect-diagnostics missingEffectError:off */
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import { asEffect } from ".//Util/types.ts";
 import { isAction, type ActionLike } from "./Action.ts";
 import {
@@ -180,6 +182,13 @@ export interface NoopUpdate<
   R extends ResourceLike = ResourceLike,
 > extends ApplyNodeBase<R> {
   action: "noop";
+  /**
+   * Desired inputs retained so apply-time convergence can re-evaluate noops.
+   * This is the EVALUABLE resolution (unresolved upstream refs intact), never
+   * the materialized diff-facing view — otherwise the re-evaluation compares
+   * pre-flattened data against itself and can never observe upstream drift.
+   */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -288,6 +297,38 @@ export type Plan<Output = any> = {
 export interface MakePlanOptions {
   force?: boolean;
 }
+
+/**
+ * True iff `input` holds a whole-resource reference to an upstream that is
+ * being UPDATED IN PLACE.
+ *
+ * `resolveResource` only wraps a reference in a `ResourceExpr` carrying
+ * `stables` when the upstream's diff resolved to `update` (see `withStables`);
+ * a created / replaced / no-op upstream never produces that shape. So the
+ * wrapper's presence anywhere in a node's EVALUABLE props is proof that at
+ * least one upstream's non-stable attributes are about to change underneath
+ * this consumer.
+ *
+ * The diff-facing projection (`materializeStableRefs`) flattens those wrappers
+ * into plain stables-only objects, so `havePropsChanged` compares two identical
+ * stables-only shapes and reports "no change" — even though `reconcile` will
+ * observe entirely different values at apply. Feeding this flag into the
+ * engine's FALLBACK verdict keeps the plan honest (the approval gate fires and
+ * the update branch does the work) without overriding a provider `diff` that
+ * returned a definitive verdict of its own.
+ */
+export const hasUpdatingWholeRef = (input: unknown): boolean => {
+  // Expr checks come first: Output proxies are callable, so a plain
+  // `typeof input === "object"` guard would let them slip through.
+  if (Output.isResourceExpr(input)) return input.stables !== undefined;
+  // Any other expr is genuinely unresolved and already forces an update via
+  // `havePropsChanged`'s `hasOutputs` guard.
+  if (Output.isExpr(input)) return false;
+  if (!input || typeof input !== "object") return false;
+  if (Duration.isDuration(input) || Redacted.isRedacted(input)) return false;
+  if (Array.isArray(input)) return input.some(hasUpdatingWholeRef);
+  return Object.values(input).some(hasUpdatingWholeRef);
+};
 
 export const make = <A>(
   stack: StackSpec<A>,
@@ -1258,11 +1299,10 @@ export const make = <A>(
 
             // Local ⇄ live switch: the persisted row was reconciled by a
             // different provider mode than the one resolved for this run.
-            // The two runtimes host distinct physical instances, so this is
-            // always a replacement — the new instance is created with the
-            // new mode's provider, and Apply deletes the old generation
-            // with the provider of the mode that created it (see
-            // `deleteOldGenerations` / `collectGarbage`).
+            // Most dual providers own distinct physical instances and
+            // replace. Explicit in-place providers preserve the generation
+            // and let Apply deactivate the outgoing runtime before the
+            // incoming provider reconciles the existing output.
             const modeSwitched = hasModeSwitched(mode, oldState);
 
             const Node = <T extends Apply>(
@@ -1375,12 +1415,15 @@ export const make = <A>(
             // On a mode switch the provider diff is skipped entirely:
             // comparing props across runtimes is meaningless (and the new
             // mode's provider has never seen the old mode's state). The
-            // action is a replacement by definition.
+            // dual provider's transition policy decides whether the engine
+            // updates the existing generation or replaces it.
             const diff = modeSwitched
-              ? ({
-                  action: "replace",
-                  deleteFirst: false,
-                } satisfies ReplaceDiff)
+              ? provider.modeTransition === "in-place"
+                ? ({ action: "update" } satisfies UpdateDiff)
+                : ({
+                    action: "replace",
+                    deleteFirst: false,
+                  } satisfies ReplaceDiff)
               : yield* asEffect(
                   provider
                     ?.diff?.({
@@ -1401,7 +1444,15 @@ export const make = <A>(
                       ({
                         action:
                           havePropsChanged(oldProps, news) ||
-                          bindingDiffs.some((b) => b.action !== "noop")
+                          bindingDiffs.some((b) => b.action !== "noop") ||
+                          // The diff-facing `news` flattened every
+                          // whole-resource ref to an updating upstream into
+                          // its stables, hiding the non-stable attributes
+                          // that `reconcile` WILL see at apply. Plan the
+                          // honest verdict instead of leaning on apply-time
+                          // noop refresh (#993: an `AWS.Lambda.Alias` nooped
+                          // forever while versions published underneath it).
+                          hasUpdatingWholeRef(applyProps)
                             ? "update"
                             : "noop",
                       } as UpdateDiff | NoopDiff),
@@ -1582,8 +1633,16 @@ export const make = <A>(
                 deleteFirst: diff?.deleteFirst ?? false,
               });
             } else {
+              // Carry the EVALUABLE resolution (like every other node kind),
+              // not the materialized diff-facing view. Apply re-evaluates a
+              // planned noop's props against fresh upstream outputs and
+              // upgrades to an update on drift; a pre-flattened stables-only
+              // object can never show that drift (an `AWS.Lambda.Alias`
+              // holding a whole `Version` nooped forever while the version
+              // number advanced underneath it).
               return Node<NoopUpdate>({
                 action: "noop",
+                props: applyProps,
                 state: oldState,
               });
             }

@@ -124,6 +124,18 @@ export interface ProviderService<
    */
   mode?: ProviderMode;
   /**
+   * How the engine moves an existing resource between provider modes.
+   *
+   * `"replace"` is the default: each mode owns a distinct physical
+   * generation. `"in-place"` preserves the state row, instance id, and
+   * physical resource, deactivates the outgoing provider, then reconciles
+   * the incoming provider against the existing output.
+   *
+   * Set by {@link ProviderLayer.dual}; both variants of a dual provider must
+   * share the same policy.
+   */
+  modeTransition?: "replace" | "in-place";
+  /**
    * Lazily-built mode variants, present only for `ProviderLayer.dual`
    * registrations. Each effect builds (once, memoized, into the stack's
    * layer scope) the provider service for that mode — including any
@@ -245,6 +257,18 @@ export interface ProviderService<
    * Properties that are always stable across any update.
    */
   stables?: Extract<keyof Res["Attributes"], string>[];
+  /**
+   * Output properties that uniquely identify the physical resource.
+   *
+   * Replacement recovery can converge onto the same physical object as the
+   * previous generation (for example, when a provider finds the result of an
+   * interrupted create). When every declared identity property matches, the
+   * engine drops the duplicate state generation without deleting the object.
+   *
+   * Unlike {@link stables}, these keys describe provider-side identity, not
+   * which outputs can remain stable for dependency planning.
+   */
+  identity?: Extract<keyof Res["Attributes"], string>[];
   diff?(input: {
     id: string;
     /**
@@ -310,6 +334,21 @@ export interface ProviderService<
     session: ScopedPlanStatusSession;
     bindings: BindingData<Res>;
   }): Effect.Effect<Res["Attributes"], any, ReconcileReq>;
+  /**
+   * Releases mode-specific runtime state without deleting the physical
+   * resource. Called on the outgoing provider during an in-place mode
+   * transition before the incoming provider reconciles the same resource.
+   * Must be idempotent because an interrupted transition may retry it.
+   */
+  deactivate?(input: {
+    id: string;
+    fqn: string;
+    instanceId: string;
+    olds: Props<Res>;
+    output: Res["Attributes"];
+    session: ScopedPlanStatusSession;
+    bindings: BindingData<Res>;
+  }): Effect.Effect<void, any, DeleteReq>;
   delete(input: {
     id: string;
     /**

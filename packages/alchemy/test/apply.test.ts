@@ -1,18 +1,21 @@
 import { adopt, Unowned } from "@/AdoptPolicy";
-import type { DestroyError } from "@/Apply";
+import { apply, type DestroyError } from "@/Apply";
 import { Cli } from "@/Cli/Cli";
 import * as Namespace from "@/Namespace.ts";
 import * as Output from "@/Output";
+import type { NoopUpdate } from "@/Plan";
 import * as Provider from "@/Provider";
 import * as RemovalPolicy from "@/RemovalPolicy.ts";
 import { renamedFrom } from "@/Rename.ts";
 import { Stack } from "@/Stack";
 import {
   type CreatingResourceState,
+  type CreatedResourceState,
   type ReplacedResourceState,
   type ReplacingResourceState,
   type ResourceState,
   State,
+  type UpdatedResourceState,
 } from "@/State";
 import * as Test from "@/Test/Alchemy";
 import { assert, describe, expect } from "alchemy-test";
@@ -42,11 +45,14 @@ import {
   modalCalls,
   type ModalResourceProps,
   PhasedTarget,
+  PublishedVersion,
   StaticStablesResource,
   TestLayers,
   TestResource,
   TestResourceHooks,
   type TestResourceProps,
+  VersionAlias,
+  versionAliasReconciles,
 } from "./test.resources.ts";
 
 const { test } = Test.make({ providers: TestLayers() });
@@ -66,6 +72,19 @@ const actionOfPlan = (plan: any, logicalId: string) =>
     (node: any) => node.resource.LogicalId === logicalId,
   )?.action;
 
+const setState = Effect.fn(function* (
+  resourceId: string,
+  value: ResourceState,
+) {
+  const state = yield* yield* State;
+  const stk = yield* Stack;
+  yield* state.set({
+    stack: stk.name,
+    stage: stk.stage,
+    fqn: resourceId,
+    value,
+  });
+});
 const listState = Effect.fn(function* () {
   const state = yield* yield* State;
   const stk = yield* Stack;
@@ -645,6 +664,194 @@ describe("linear update propagation", () => {
         // sequence as long as no stale value leaked through.
         expect(sawByB.length).toBeGreaterThan(0);
         expect(sawByB.every((v) => v === "v2")).toBe(true);
+      }),
+  );
+
+  test.provider(
+    "planned noop rechecks inputs after an acyclic upstream changes during apply",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string, includeConsumer: boolean) =>
+          Effect.gen(function* () {
+            const source = yield* PhasedTarget("Source", {
+              desired,
+            });
+            const alias = yield* TestResource("Alias", {
+              string: source.value,
+            });
+            const consumer = includeConsumer
+              ? yield* TestResource("Consumer", {
+                  string: alias.string,
+                })
+              : undefined;
+            return { source, alias, consumer };
+          });
+
+        yield* stack.deploy(program("old-url", false));
+
+        const plan = yield* stack.plan(program("new-url", true));
+        expect(plan.cycleMembers.size).toBe(0);
+        expect(plan.resources.Source.action).toBe("update");
+        expect(plan.resources.Alias.action).toBe("update");
+        expect(plan.resources.Consumer.action).toBe("create");
+
+        // Reproduce the local-sidecar race from the preserved Samva plan:
+        // the upstream changes after planning, while the downstream still
+        // carries a noop decision made against its persisted URL.
+        plan.resources.Alias = {
+          ...plan.resources.Alias,
+          action: "noop",
+          state: yield* getState<CreatedResourceState | UpdatedResourceState>(
+            "Alias",
+          ),
+        } as NoopUpdate;
+
+        const consumerCreates: string[] = [];
+        const output = yield* apply(plan).pipe(
+          Effect.provide(
+            Layer.succeed(TestResourceHooks, {
+              create: (id, props) =>
+                Effect.sync(() => {
+                  if (id === "Consumer") {
+                    consumerCreates.push(props.string!);
+                  }
+                }),
+            }),
+          ),
+        );
+
+        expect(output.alias.string).toBe("new-url");
+        expect(output.consumer!.string).toBe("new-url");
+        expect(consumerCreates).toEqual(["new-url"]);
+      }),
+  );
+
+  // Regression: the noop→update upgrade committed `providerMode: node.mode`
+  // verbatim. A mode-agnostic provider (one implementation for dev and
+  // deploy) resolves `node.mode === undefined`, so that ERASED any stamp the
+  // row already carried — and every delete path (replacement old
+  // generations, GC chain draining, orphans, `destroy`, `sync`/`tail`/`logs`)
+  // resolves the provider variant from the STAMPED mode.
+  test.provider(
+    "the noop→update upgrade preserves an existing providerMode stamp",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string) =>
+          Effect.gen(function* () {
+            const source = yield* PhasedTarget("Source", { desired });
+            const alias = yield* TestResource("Alias", {
+              string: source.value,
+            });
+            return { source, alias };
+          });
+
+        yield* stack.deploy(program("old-url"));
+
+        // `Test.TestResource` is mode-agnostic, so `node.mode` is undefined
+        // for it — exactly the case where a naive stamp erases the row's.
+        const persisted = yield* getState<
+          CreatedResourceState | UpdatedResourceState
+        >("Alias");
+        yield* setState("Alias", {
+          ...persisted,
+          providerMode: "local",
+        } as ResourceState);
+
+        const plan = yield* stack.plan(program("new-url"));
+        plan.resources.Alias = {
+          ...plan.resources.Alias,
+          action: "noop",
+          state: yield* getState<CreatedResourceState | UpdatedResourceState>(
+            "Alias",
+          ),
+        } as NoopUpdate;
+
+        yield* apply(plan);
+
+        const after = yield* getState<UpdatedResourceState>("Alias");
+        // The upgrade ran (proof the noop branch's commit is the one under
+        // test) and the stamp survived it.
+        expect(after.status).toBe("updated");
+        expect(after.props.string).toBe("new-url");
+        expect(after.providerMode).toBe("local");
+      }),
+  );
+
+  // Regression: the `AWS.Lambda.Alias` that nooped forever while versions 3-9
+  // published underneath it. A NoopUpdate node used to carry `news` — the
+  // MATERIALIZED stables-only diff view — instead of `applyProps`, so the
+  // apply-time noop refresh re-evaluated already-flattened data and could
+  // never observe upstream drift.
+  test.provider(
+    "planned noop re-evaluates a whole-resource ref and reconciles on the fresh non-stable attr",
+    (stack) =>
+      Effect.gen(function* () {
+        const observed = () =>
+          versionAliasReconciles
+            .filter((r) => r.id === "Live")
+            .map((r) => r.version);
+
+        const program = (code: string) =>
+          Effect.gen(function* () {
+            const version = yield* PublishedVersion("Version", { code });
+            const alias = yield* VersionAlias("Live", {
+              target: version,
+              aliasName: "live",
+            });
+            return { version, alias };
+          });
+
+        const first = yield* stack.deploy(program("1"));
+        expect(first.alias.targetVersion).toBe("1");
+        expect(observed()).toEqual(["1"]);
+
+        // What a healthy commit persists: the EVALUATED props, so the
+        // upstream snapshot carries its non-stable `version`.
+        const healthy = yield* getState<
+          CreatedResourceState | UpdatedResourceState
+        >("Live");
+        expect((healthy.props as any).target).toMatchObject({
+          functionName: "Version",
+          version: "1",
+        });
+
+        // Reproduce the poisoned row observed in samva production: a commit
+        // persisted the stables-only projection of the upstream ref, so olds
+        // and news are both stables-only and compare equal forever.
+        yield* setState("Live", {
+          ...healthy,
+          props: {
+            ...(healthy.props as any),
+            target: {
+              functionName: (healthy.props as any).target.functionName,
+              functionArn: (healthy.props as any).target.functionArn,
+            },
+          },
+        } as ResourceState);
+
+        // The upstream republishes. The alias's diff-facing view is unchanged
+        // (both sides stables-only) and its provider `diff` abstains, but the
+        // engine's fallback sees a whole-resource ref to an in-place-updating
+        // upstream (`hasUpdatingWholeRef` in Plan.ts) and plans the honest
+        // verdict up front — the approval gate fires and the update branch
+        // does the work, instead of the plan lying and the apply-time noop
+        // refresh quietly discovering the drift afterwards.
+        const plan = yield* stack.plan(program("2"));
+        expect(plan.resources.Version.action).toBe("update");
+        expect(plan.resources.Live.action).toBe("update");
+
+        const second = yield* stack.deploy(program("2"));
+
+        // Reconcile ran and saw the freshly published version, not the
+        // stale "1".
+        expect(observed()).toEqual(["1", "2"]);
+        expect(second.alias.targetVersion).toBe("2");
+
+        // ...and the refresh recommitted evaluated props, un-poisoning state.
+        const healed = yield* getState<
+          CreatedResourceState | UpdatedResourceState
+        >("Live");
+        expect((healed.props as any).target).toMatchObject({ version: "2" });
       }),
   );
 });
@@ -1345,6 +1552,26 @@ describe("prop-flow convergence", () => {
           replaceKey: "v2",
           use: "value",
         }).pipe(stack.deploy);
+
+        expect(output.A.value).toEqual("new-a");
+        expect(output.B.string).toEqual("new-a");
+      }),
+  );
+
+  test.provider(
+    "planned noops should converge to an upstream replacement's final value",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (desired: string, replaceKey: string) =>
+          Effect.gen(function* () {
+            const A = yield* PhasedTarget("A", { desired, replaceKey });
+            const B = yield* TestResource("B", { string: A.value });
+            return { A, B };
+          });
+
+        yield* program("old-a", "v1").pipe(stack.deploy);
+
+        const output = yield* program("new-a", "v2").pipe(stack.deploy);
 
         expect(output.A.value).toEqual("new-a");
         expect(output.B.string).toEqual("new-a");

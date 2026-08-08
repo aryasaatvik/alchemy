@@ -29,7 +29,7 @@ import {
   Cli,
 } from "./Cli/Cli.ts";
 import type { ApplyStatus } from "./Cli/Event.ts";
-import { havePropsChanged, stripUnresolved } from "./Diff.ts";
+import { dedupeBindings, havePropsChanged, stripUnresolved } from "./Diff.ts";
 import type { Input } from "./Input.ts";
 import { generateInstanceId, InstanceId } from "./InstanceId.ts";
 import * as Output from "./Output.ts";
@@ -620,23 +620,119 @@ const executeNode = (
         yield* signalReady;
       });
 
+    const allUpstreamFqns = () => {
+      const propDeps = Object.keys(Output.resolveUpstream(node.props));
+      const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
+      return [...new Set([...propDeps, ...bindingDeps])];
+    };
+
     // ── noop ──
 
     if (node.action === "noop") {
-      // No work to do on the cloud resource — the persisted attr is already
-      // stable. Two pieces of row METADATA can still have drifted from the
-      // declaration, and this is the only pass that will ever see them:
+      // Plan-time noops may become stale while their upstreams reconcile. A
+      // local provider is the common case: its sidecar can restart after the
+      // plan reads persisted attrs, causing the upstream to publish a new URL
+      // during apply. Wait for those upstreams and re-evaluate before exposing
+      // this node as ready; otherwise a downstream can act on the stale attr
+      // and Phase 3 convergence arrives too late to prevent the side effect.
       //
-      // 1. `resourceType` — the row was persisted under a legacy type name
-      //    (the type was since renamed and carries the old name as an
-      //    alias); migrate it so the state stops depending on the alias.
-      // 2. `removalPolicy` — `RemovalPolicy.retain()` / `.destroy()` is a
-      //    decoration on the declaration, not a prop, so changing it never
-      //    produces a diff. Without this commit the new policy would never
-      //    reach state, and the orphan delete (which reads the policy from
-      //    the persisted row, see `Plan.ts`'s delete node) would act on the
-      //    stale one — destroying a resource the user had marked `retain`.
-      //    See https://github.com/alchemy-run/alchemy/issues/1248.
+      // Cycle members still publish their previous attr first so peers can
+      // break the SCC deadlock. Phase 3 remains responsible for the fixed
+      // point in that path.
+      if (inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
+
+      yield* report("pending");
+      yield* waitForDeps(allUpstreamFqns());
+
+      const outputs = getOutputs();
+      const news = (yield* Output.evaluate(node.props, outputs)) as Record<
+        string,
+        any
+      >;
+      const bindingOutputs = excludeDeletedBindings(
+        yield* Output.evaluate(node.bindings, outputs),
+      );
+      // Both comparisons must be SYMMETRIC across the commit boundary:
+      // persisted rows went through `stripUnresolved` (Effect/class leaves
+      // dropped), while a freshly evaluated payload still carries them. A raw
+      // `JSON.stringify` compare therefore reports a phantom change for every
+      // resource whose bindings hold an Effect leaf — the standard circular
+      // `env: { PEER: WorkerClass }` pattern — re-reconciling (re-uploading)
+      // it on every deploy, forever. `havePropsChanged` strips both sides
+      // (see Diff.ts); `dedupeBindings` normalizes order/duplicates the same
+      // way Plan does before it compares.
+      const inputsChanged =
+        havePropsChanged(node.state.props, news) ||
+        havePropsChanged(
+          dedupeBindings(node.state.bindings ?? []),
+          dedupeBindings(bindingOutputs),
+        );
+
+      if (inputsChanged) {
+        yield* report("updating");
+        const attr = yield* node.provider
+          .reconcile({
+            id: logicalId,
+            fqn,
+            news,
+            instanceId: node.state.instanceId,
+            bindings: bindingOutputs,
+            session: scopedSession,
+            olds: node.state.props,
+            output: node.state.attr,
+          })
+          .pipe(
+            instrumentLifecycle(
+              "update",
+              fqn,
+              node.resource.Type,
+              logicalId,
+              node.state.instanceId,
+            ),
+          );
+
+        yield* commit<UpdatedResourceState>({
+          status: "updated",
+          fqn,
+          logicalId,
+          instanceId: node.state.instanceId,
+          resourceType: node.resource.Type,
+          props: news,
+          attr,
+          bindings: bindingOutputs,
+          providerVersion: node.provider.version ?? 0,
+          downstream: node.downstream,
+          removalPolicy: node.resource.RemovalPolicy,
+          // A mode-agnostic provider resolves `node.mode === undefined`;
+          // writing that verbatim would ERASE a stamp the row already
+          // carries, and every delete path (replacement old generations, GC,
+          // orphans, `destroy`, `sync`/`tail`/`logs`) resolves the provider
+          // variant from the STAMPED mode. Preserve what was there.
+          providerMode: node.mode ?? node.state.providerMode,
+        });
+
+        tracker[fqn] = {
+          output: attr,
+          props: news,
+          bindings: bindingOutputs,
+          instanceId: node.state.instanceId,
+        };
+        yield* signalReady;
+        yield* signalReadyStable;
+        yield* markTerminal("updated");
+        return;
+      }
+
+      // The persisted attr is still stable. Declaration metadata can still
+      // drift independently of props, so keep the canonical resource type and
+      // current removal policy in state even when no reconcile is required.
       const policyChanged =
         node.state.removalPolicy !== node.resource.RemovalPolicy;
       if (node.state.resourceType !== node.resource.Type || policyChanged) {
@@ -646,29 +742,22 @@ const executeNode = (
           removalPolicy: node.resource.RemovalPolicy,
         });
       }
-      // A policy flip is otherwise invisible (the row is a noop), and it is
-      // exactly the change a user wants confirmation of. Legacy rows with no
-      // persisted policy normalize silently — there is nothing to report.
       if (policyChanged && node.state.removalPolicy !== undefined) {
         yield* scopedSession.note(
           `removal policy ${node.state.removalPolicy} → ${node.resource.RemovalPolicy}`,
         );
       }
+      if (!inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
       yield* signalReadyStable;
-      yield* storeAndSignal({
-        output: node.state.attr,
-        props: node.state.props,
-        bindings: node.state.bindings ?? [],
-        instanceId: node.state.instanceId,
-      });
       return;
     }
-
-    const allUpstreamFqns = () => {
-      const propDeps = Object.keys(Output.resolveUpstream(node.props));
-      const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
-      return [...new Set([...propDeps, ...bindingDeps])];
-    };
 
     // ── instance ID ──
 
@@ -958,6 +1047,43 @@ const executeNode = (
               node.state.status === "replaced"
             ? node.state.props
             : node.state.old.props;
+
+        const previousState =
+          node.state.status === "updating" ? node.state.old : node.state;
+        const previousMode = previousState.providerMode;
+        if (
+          node.provider.modeTransition === "in-place" &&
+          node.mode !== undefined &&
+          previousMode !== undefined &&
+          previousMode !== node.mode &&
+          previousProps !== undefined
+        ) {
+          const outgoingProvider = yield* findProviderByType(
+            node.resource.Type,
+            previousMode,
+          );
+          if (outgoingProvider.deactivate) {
+            yield* outgoingProvider
+              .deactivate({
+                id: logicalId,
+                fqn,
+                instanceId,
+                olds: previousProps,
+                output: previousState.attr,
+                session: scopedSession,
+                bindings: previousState.bindings ?? [],
+              })
+              .pipe(
+                instrumentLifecycle(
+                  "deactivate",
+                  fqn,
+                  node.resource.Type,
+                  logicalId,
+                  instanceId,
+                ),
+              );
+          }
+        }
 
         // Providers receive the resolved binding payload for this exact pass, while
         // `previousProps` tells them what state the live resource is being updated from.
@@ -1559,7 +1685,6 @@ const converge = Effect.fn(function* (
     let anyUpdated = false;
 
     for (const [fqn, node] of Object.entries(plan.resources)) {
-      if (node.action === "noop") continue;
       if (!tracker[fqn]) continue;
 
       const outputs = Object.fromEntries(
@@ -1579,8 +1704,15 @@ const converge = Effect.fn(function* (
       const oldBindings = tracker[fqn].bindings;
 
       const propsChanged = havePropsChanged(oldProps, newProps);
-      const bindingsChanged =
-        JSON.stringify(oldBindings) !== JSON.stringify(newBindings);
+      // Symmetric across the commit boundary, like the noop-refresh compare
+      // in `applyResource`: a planned noop seeds the tracker with its
+      // PERSISTED (stripped) binding rows, so a raw `JSON.stringify` compare
+      // against a freshly evaluated payload reports a phantom change for any
+      // binding holding an Effect/class leaf and re-reconciles it forever.
+      const bindingsChanged = havePropsChanged(
+        dedupeBindings(oldBindings ?? []),
+        dedupeBindings(newBindings),
+      );
 
       if (!propsChanged && !bindingsChanged) continue;
 
@@ -1648,7 +1780,10 @@ const converge = Effect.fn(function* (
           downstream: node.downstream,
           namespace,
           removalPolicy: node.resource.RemovalPolicy,
-          providerMode: node.mode,
+          // Preserve an existing stamp when this run's provider is
+          // mode-agnostic (`node.mode === undefined`) — see the noop-refresh
+          // commit in `applyResource`.
+          providerMode: node.mode ?? node.state?.providerMode,
         } as UpdatedResourceState,
       });
 
@@ -1656,7 +1791,7 @@ const converge = Effect.fn(function* (
         id: logicalId,
         type: node.resource.Type,
         status: "updated",
-        providerMode: node.mode,
+        providerMode: node.mode ?? node.state?.providerMode,
       });
     }
 
@@ -2035,9 +2170,19 @@ const collectGarbage = Effect.fn(function* (
             const retainOldGeneration =
               !isDeleteNode(node) && node.removalPolicy === "retain";
 
+            const reusesCurrentPhysicalResource =
+              !isDeleteNode(node) &&
+              providerMode === node.providerMode &&
+              hasSamePhysicalIdentity(provider.identity, node.attr, attr);
+
             if (retainOldGeneration) {
               yield* scopedSession.note(
                 "Retaining replaced resource (removal policy: retain)...",
+              );
+            } else if (reusesCurrentPhysicalResource) {
+              yield* scopedSession.note(
+                "Replacement resolved to the same physical resource; " +
+                  "dropping the duplicate state generation without deleting it.",
               );
             }
 
@@ -2131,7 +2276,11 @@ const collectGarbage = Effect.fn(function* (
               });
             }
 
-            if (attr !== undefined && !retainOldGeneration) {
+            if (
+              attr !== undefined &&
+              !retainOldGeneration &&
+              !reusesCurrentPhysicalResource
+            ) {
               yield* provider
                 .delete({
                   id: logicalId,
@@ -2269,6 +2418,23 @@ const collectGarbage = Effect.fn(function* (
     );
   }
 });
+
+/** @internal */
+export const hasSamePhysicalIdentity = (
+  identity: readonly PropertyKey[] | undefined,
+  current: Record<PropertyKey, unknown> | undefined,
+  previous: Record<PropertyKey, unknown> | undefined,
+): boolean =>
+  identity !== undefined &&
+  identity.length > 0 &&
+  current !== undefined &&
+  previous !== undefined &&
+  identity.every(
+    (key) =>
+      current[key] !== undefined &&
+      previous[key] !== undefined &&
+      Object.is(current[key], previous[key]),
+  );
 
 const excludeDeletedBindings = (
   bindings: ReadonlyArray<ResourceBinding & { action?: string }>,

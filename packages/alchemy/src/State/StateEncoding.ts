@@ -52,7 +52,7 @@ const decodeDuration = (encoded: unknown): Duration.Duration | undefined => {
     case "Infinity":
       return Duration.infinity;
     case "NegativeInfinity":
-      return Duration.zero; // Effect treats negatives as zero clamp
+      return Duration.negativeInfinity;
     default:
       return undefined;
   }

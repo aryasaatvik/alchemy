@@ -2317,32 +2317,44 @@ describe("whole-resource refs resolve to the upstream's stable attributes", () =
     }),
   );
 
+  // A whole-resource ref to an IN-PLACE-UPDATING upstream must plan `update`
+  // on the dependent, because `reconcile` will observe the upstream's fresh
+  // NON-stable attributes at apply — which the stables-only diff view cannot
+  // show. `hasUpdatingWholeRef` ORs that fact into the engine's fallback
+  // verdict so the plan is honest up front (the approval gate fires and the
+  // update branch does the work) instead of relying on apply-time noop
+  // refresh to discover the drift after the plan was already approved.
+  const seedB = (props: TestResourceProps): ResourceState =>
+    ({
+      instanceId,
+      providerVersion: 0,
+      logicalId: "B",
+      fqn: "B",
+      namespace: undefined,
+      resourceType: "Test.TestResource",
+      status: "created",
+      props,
+      attr: {
+        string: "B",
+        stableString: "B",
+        stableArray: ["B"],
+      },
+      downstream: [],
+      bindings: [],
+    }) as ResourceState;
+
   test(
-    "a whole-resource ref to an updating upstream does not drag the downstream into an update",
+    "a whole-resource ref to an updating upstream plans an update (poisoned stables-only persisted props)",
     Effect.gen(function* () {
       yield* seedUpdatingUpstream();
+      // The poisoned shape observed in production: a prior commit persisted
+      // the materialized stables-only projection of the upstream ref, so
+      // `olds` and the materialized `news` compare equal forever and the
+      // fallback would have said `noop`.
       yield* seed({
-        B: {
-          instanceId,
-          providerVersion: 0,
-          logicalId: "B",
-          fqn: "B",
-          namespace: undefined,
-          resourceType: "Test.TestResource",
-          status: "created",
-          // B's prior props captured the upstream's stable attributes —
-          // exactly what a materialized whole-resource ref resolves to.
-          props: {
-            object: { stableString: "A", stableArray: ["A"] } as any,
-          },
-          attr: {
-            string: "B",
-            stableString: "B",
-            stableArray: ["B"],
-          },
-          downstream: [],
-          bindings: [],
-        },
+        B: seedB({
+          object: { stableString: "A", stableArray: ["A"] } as any,
+        }),
       });
 
       let A: TestResource;
@@ -2352,8 +2364,61 @@ describe("whole-resource refs resolve to the upstream's stable attributes", () =
       }).pipe(makePlan);
 
       expect(plan.resources.A!.action).toBe("update");
-      // Only stable attributes flow in and they are unchanged, so the
-      // downstream no-ops instead of being dragged into a needless update.
+      expect(plan.resources.B!.action).toBe("update");
+    }),
+  );
+
+  test(
+    "a whole-resource ref to an updating upstream plans an update (healthy full-attr persisted props)",
+    Effect.gen(function* () {
+      yield* seedUpdatingUpstream();
+      // A healthy commit persists the EVALUATED props, so the upstream
+      // snapshot carries its non-stable `string` too.
+      yield* seed({
+        B: seedB({
+          object: {
+            string: "old-value",
+            stableString: "A",
+            stableArray: ["A"],
+          } as any,
+        }),
+      });
+
+      let A: TestResource;
+      const plan = yield* Effect.gen(function* () {
+        A = yield* TestResource("A", { string: "new-value" });
+        yield* TestResource("B", { object: A as any });
+      }).pipe(makePlan);
+
+      expect(plan.resources.A!.action).toBe("update");
+      expect(plan.resources.B!.action).toBe("update");
+    }),
+  );
+
+  test(
+    "a whole-resource ref to a NO-OPPING upstream stays a noop (no blanket dirtying)",
+    Effect.gen(function* () {
+      yield* seedUpdatingUpstream();
+      yield* seed({
+        B: seedB({
+          object: {
+            string: "old-value",
+            stableString: "A",
+            stableArray: ["A"],
+          } as any,
+        }),
+      });
+
+      let A: TestResource;
+      const plan = yield* Effect.gen(function* () {
+        // Same props as seeded: A no-ops, so `resolveResource` hands the
+        // downstream A's FULL persisted attrs (a plain object, never a
+        // `ResourceExpr` carrying stables) — nothing to be honest about.
+        A = yield* TestResource("A", { string: "old-value" });
+        yield* TestResource("B", { object: A as any });
+      }).pipe(makePlan);
+
+      expect(plan.resources.A!.action).toBe("noop");
       expect(plan.resources.B!.action).toBe("noop");
     }),
   );

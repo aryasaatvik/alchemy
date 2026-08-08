@@ -49,10 +49,11 @@ const { test } = Test.make({
  * `toJSON`-carrying objects — e.g. Effects — are replaced by their JSON
  * form, `undefined` keys vanish).
  */
-const jsonRoundTripState = () => {
+const jsonRoundTripState = (
+  store: Record<string, Record<string, Record<string, any>>> = {},
+) => {
   const roundTrip = <T>(v: T): T =>
     JSON.parse(JSON.stringify(encodeState(v)), reviveState);
-  const store: Record<string, Record<string, Record<string, any>>> = {};
   return Layer.effect(
     State,
     Effect.sync(() =>
@@ -77,7 +78,7 @@ const makeHarness = (name: string, kind: StoreKind) => {
   const store: Record<string, Record<string, Record<string, any>>> = {};
   const stateLayer =
     kind === "json"
-      ? jsonRoundTripState()
+      ? jsonRoundTripState(store)
       : Layer.effect(
           State,
           Effect.sync(() => InMemoryService(store)),
@@ -113,7 +114,7 @@ const makeHarness = (name: string, kind: StoreKind) => {
       Effect.provide(Layer.succeed(Stage, "test")),
       provideFreshArtifactStore,
     ) as unknown as Effect.Effect<any, any, never>;
-  return { deploy, plan };
+  return { deploy, plan, store };
 };
 
 const expectAllNoop = (plan: any) => {
@@ -223,6 +224,59 @@ for (const kind of ["in-memory", "json"] as StoreKind[]) {
     }
   });
 }
+
+// A plan-time all-noop is only half the story: apply RE-EVALUATES a planned
+// noop's inputs against fresh upstream outputs and upgrades to an update on
+// drift. That comparison must be symmetric with the commit boundary too —
+// persisted binding rows went through `stripUnresolved` (Effect/class leaves
+// dropped) while the freshly evaluated payload still carries them, so a raw
+// `JSON.stringify` compare reports drift that isn't there and re-reconciles
+// (for a Cloudflare Worker: re-uploads) every bound resource on EVERY deploy,
+// forever. Only the Effect-leaf shapes can expose this.
+describe("a second apply of an unchanged stack performs no reconcile", () => {
+  const effectLeafShapes = [
+    "Effect-valued data",
+    "class-valued (Effectable) data",
+  ] as const;
+
+  for (const kind of ["in-memory", "json"] as StoreKind[]) {
+    for (const shape of effectLeafShapes) {
+      test(
+        `${shape} (${kind} state)`,
+        Effect.gen(function* () {
+          const name = `noop-refresh-${kind}-${shape.replaceAll(/[^a-zA-Z0-9]/g, "-")}`;
+          const { deploy, store } = makeHarness(name, kind);
+          const program = shapes[shape]!;
+
+          const reconciles: string[] = [];
+          const hooks = Layer.succeed(TestResourceHooks, {
+            create: (id: string) =>
+              Effect.sync(() => {
+                reconciles.push(`create:${id}`);
+              }),
+            update: (id: string) =>
+              Effect.sync(() => {
+                reconciles.push(`update:${id}`);
+              }),
+          });
+
+          yield* deploy(program()).pipe(Effect.provide(hooks));
+          expect(reconciles).toEqual(["create:Host"]);
+
+          reconciles.length = 0;
+          yield* deploy(program()).pipe(Effect.provide(hooks));
+
+          // Nothing changed, so the noop refresh (and Phase 3 convergence)
+          // must both leave the resource alone.
+          expect(reconciles).toEqual([]);
+          // ...and the persisted row keeps its original terminal status —
+          // an upgraded noop would have rewritten it to "updated".
+          expect(store[name]?.test?.Host?.status).toBe("created");
+        }),
+      );
+    }
+  }
+});
 
 describe("binding rows are deterministically ordered", () => {
   // Bindings are registered by concurrently-built layers doing real IO before
