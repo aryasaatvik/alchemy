@@ -54,6 +54,8 @@ export interface LocalProviderInput<R extends ResourceLike> {
   fqn: string;
   instanceId: string;
   news: R["Props"];
+  olds: R["Props"] | undefined;
+  output: R["Attributes"] | undefined;
   bindings: ResourceBinding<R["Binding"]>[];
 }
 
@@ -80,10 +82,21 @@ export interface StartContext<
   invalidate: Effect.Effect<void>;
 }
 
-export interface StopContext {
+export interface StopContext<R extends ResourceLike = ResourceLike> {
   id: string;
+  fqn: string;
   instanceId: string;
+  olds: R["Props"];
+  output: R["Attributes"];
+  bindings: ResourceBinding<R["Binding"]>[];
+  session: ScopedPlanStatusSession;
+  force?: boolean;
 }
+
+export type DeactivateContext<R extends ResourceLike = ResourceLike> = Omit<
+  StopContext<R>,
+  "force"
+>;
 
 export interface StablesContext<
   R extends ResourceLike,
@@ -140,6 +153,13 @@ export interface LocalProviderSpec<
     ctx: StartContext<R, Config>,
   ) => Effect.Effect<R["Attributes"], any, Scope.Scope | StartR>;
   /**
+   * Release local-runtime state when ownership moves to another provider mode
+   * without deleting the physical resource. Called after the instance scope
+   * closes and also when no instance is registered after a process restart.
+   * Must be idempotent.
+   */
+  deactivate?: (ctx: DeactivateContext<R>) => Effect.Effect<void, any, any>;
+  /**
    * Extra cleanup on delete, after the instance scope has closed — for
    * state that intentionally spans restarts and therefore cannot live in
    * the instance scope (proxy servers kept for URL stability, restart
@@ -147,7 +167,7 @@ export interface LocalProviderSpec<
    * shared state. Must be idempotent; also called when nothing is running
    * (e.g. cleaning up a local row during a live deploy).
    */
-  stop?: (ctx: StopContext) => Effect.Effect<void, any>;
+  stop?: (ctx: StopContext<R>) => Effect.Effect<void, any, any>;
   /**
    * Attributes that remain stable across the update the generated `diff`
    * is about to report (see `Diff.stables`). Called only when the diff is
@@ -268,10 +288,12 @@ export const make = <
   Config = DefaultLocalConfig<R>,
   StartR = never,
   Req = never,
+  EnvironmentReq = never,
 >(
   cls: ResourceClassLike<R> | Platform<R, any, any, any, any>,
   serverEntryUrl: string,
   spec: Effect.Effect<LocalProviderSpec<R, Config, StartR>, never, Req>,
+  options?: RpcProvider.RpcProviderOptions<EnvironmentReq>,
 ) =>
   RpcProvider.effect(
     cls,
@@ -280,6 +302,7 @@ export const make = <
       const {
         resolveConfig = defaultResolveConfig<R, Config>,
         start,
+        deactivate: deactivateHook,
         stop,
         stables,
         precreate,
@@ -367,6 +390,32 @@ export const make = <
         );
       });
 
+      const deactivateInstance = Effect.fn(function* ({
+        input,
+        deleting,
+      }: {
+        input: StopContext<R>;
+        deleting: boolean;
+      }) {
+        const existing = instances.get(input.id);
+        if (existing && existing.instanceId !== input.instanceId) {
+          // A newer generation is active under this logical id. Neither an
+          // old-generation transition nor delete may tear it down or clean
+          // up its shared local-runtime state.
+          return;
+        }
+        if (existing) {
+          yield* teardown(existing);
+          instances.delete(input.id);
+        }
+        if (deactivateHook) {
+          yield* deactivateHook(input);
+        }
+        if (deleting && stop) {
+          yield* stop(input);
+        }
+      });
+
       const provider = {
         list:
           list ??
@@ -380,6 +429,7 @@ export const make = <
           id,
           fqn,
           instanceId,
+          olds,
           news: rawNews,
           newBindings,
           output,
@@ -387,6 +437,7 @@ export const make = <
           id: string;
           fqn: string;
           instanceId: string;
+          olds: R["Props"] | undefined;
           news: any;
           newBindings: any;
           output: R["Attributes"] | undefined;
@@ -401,6 +452,8 @@ export const make = <
             fqn,
             instanceId,
             news: news as R["Props"],
+            olds,
+            output,
             bindings: newBindings as ResourceBinding<R["Binding"]>[],
           };
           const { config, configHash } = yield* resolveDesired(input);
@@ -420,6 +473,8 @@ export const make = <
           fqn,
           instanceId,
           news,
+          olds,
+          output,
           bindings,
           session,
         }: {
@@ -427,6 +482,8 @@ export const make = <
           fqn: string;
           instanceId: string;
           news: R["Props"];
+          olds: R["Props"] | undefined;
+          output: R["Attributes"] | undefined;
           bindings: ResourceBinding<R["Binding"]>[];
           session: ScopedPlanStatusSession;
         }) {
@@ -438,6 +495,8 @@ export const make = <
                 fqn,
                 instanceId,
                 news: stripEffects(news) as R["Props"],
+                olds,
+                output,
                 bindings,
               };
               const { config, configHash } = yield* resolveDesired(input);
@@ -462,34 +521,26 @@ export const make = <
             }),
           );
         }),
-        delete: Effect.fn(function* ({
-          id,
-          instanceId,
-        }: {
+        deactivate: Effect.fn(function* (args: DeactivateContext<R>) {
+          yield* withLock(
+            args.id,
+            deactivateInstance({ input: args, deleting: false }),
+          );
+        }),
+        delete: Effect.fn(function* (args: {
           id: string;
+          fqn: string;
           instanceId: string;
+          olds: R["Props"];
+          output: R["Attributes"];
+          session: ScopedPlanStatusSession;
+          bindings: ResourceBinding<R["Binding"]>[];
+          force?: boolean;
         }) {
+          const { id } = args;
           yield* withLock(
             id,
-            Effect.gen(function* () {
-              const existing = instances.get(id);
-              if (existing && existing.instanceId !== instanceId) {
-                // A replacement's new generation is registered under this
-                // logical id — the old generation's delete must not touch
-                // it (nor the cross-restart state `stop` would clean up).
-                return;
-              }
-              if (existing) {
-                yield* teardown(existing);
-                instances.delete(id);
-              }
-              // Runs even when nothing is registered: cross-restart state
-              // (proxies, restart hooks) and out-of-session cleanup (e.g.
-              // deleting a local row during a live deploy) still need it.
-              if (stop) {
-                yield* stop({ id, instanceId });
-              }
-            }),
+            deactivateInstance({ input: args, deleting: true }),
           );
         }),
         ...(precreate ? { precreate } : {}),
@@ -507,6 +558,7 @@ export const make = <
       never,
       Req | Exclude<StartR, Scope.Scope>
     >,
+    options,
   );
 
 const defaultResolveConfig = <R extends ResourceLike, Config>(

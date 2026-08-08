@@ -1127,6 +1127,89 @@ export const fqnProbeProvider = () =>
     delete: Effect.fn(function* () {}),
   });
 
+// PublishedVersion / VersionAlias — the `AWS.Lambda.Version` + `AWS.Lambda.Alias`
+// shape. The Version's identity attributes are stable, but the version NUMBER
+// it publishes is not; the Alias holds the WHOLE Version instance and reads
+// that non-stable attribute inside its own reconcile. Used to pin that a
+// planned `noop` on the Alias still re-evaluates its inputs at apply and
+// observes a freshly published version.
+
+export type PublishedVersionProps = {
+  /** Changing the code republishes: a new, non-stable `version` number. */
+  code: string;
+};
+
+export interface PublishedVersion extends Resource<
+  "Test.PublishedVersion",
+  PublishedVersionProps,
+  {
+    functionName: string;
+    functionArn: string;
+    /** NON-stable: the whole point of the fixture. */
+    version: string;
+  }
+> {}
+
+export const PublishedVersion = Resource<PublishedVersion>(
+  "Test.PublishedVersion",
+);
+
+export const publishedVersionProvider = () =>
+  Provider.succeed(PublishedVersion, {
+    list: () => Effect.succeed([]),
+    stables: ["functionName", "functionArn"],
+    reconcile: Effect.fn(function* ({ id, news }) {
+      return {
+        functionName: id,
+        functionArn: `arn:test:function:us-east-1:123456789:${id}`,
+        version: news.code,
+      };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
+export type VersionAliasProps = {
+  /** The WHOLE upstream instance, not a projected attribute. */
+  target: PublishedVersion;
+  aliasName: string;
+};
+
+export interface VersionAlias extends Resource<
+  "Test.VersionAlias",
+  VersionAliasProps,
+  {
+    aliasName: string;
+    /** The upstream's non-stable `version` as observed by reconcile. */
+    targetVersion: string;
+  }
+> {}
+
+export const VersionAlias = Resource<VersionAlias>("Test.VersionAlias");
+
+/** Every `version` the alias's reconcile actually observed, in order. */
+export const versionAliasReconciles: { id: string; version: string }[] = [];
+
+export const versionAliasProvider = () =>
+  Provider.succeed(VersionAlias, {
+    list: () => Effect.succeed([]),
+    diff: Effect.fn(function* ({ news, olds }) {
+      if (!isResolved(news)) return undefined;
+      // Mirrors `AWS.Lambda.Alias`: only identity changes are decisive, every
+      // other verdict is left to the engine's `havePropsChanged` fallback.
+      if (olds !== undefined && news.aliasName !== olds.aliasName) {
+        return { action: "replace" } as const;
+      }
+      return undefined;
+    }),
+    reconcile: Effect.fn(function* ({ id, news }) {
+      const target = news.target as unknown as PublishedVersion["Attributes"];
+      const version = target?.version;
+      versionAliasReconciles.push({ id, version });
+      return { aliasName: news.aliasName, targetVersion: version };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
 /**
  * Run `eff` as if under `alchemy dev`: overrides `AlchemyContext.dev` so
  * plans and applies inside resolve the LOCAL provider mode by default —
@@ -1289,6 +1372,84 @@ export const modalResourceProvider = () =>
     local: () => modalVariant("local"),
   });
 
+export interface InPlaceModalResource extends Resource<
+  "Test.InPlaceModalResource",
+  { value?: string },
+  {
+    value: string;
+    runtime: ProviderMode;
+    physicalId: string;
+  }
+> {}
+
+export const InPlaceModalResource = Resource<InPlaceModalResource>(
+  "Test.InPlaceModalResource",
+);
+
+export const inPlaceModalCalls: {
+  stack: string;
+  mode: ProviderMode;
+  op: "reconcile" | "deactivate" | "delete";
+  id: string;
+  instanceId: string;
+  physicalId: string | undefined;
+}[] = [];
+
+const inPlaceModalVariant = (mode: ProviderMode) =>
+  Provider.effect(
+    InPlaceModalResource,
+    Effect.gen(function* () {
+      const record = (
+        op: "reconcile" | "deactivate" | "delete",
+        input: {
+          id: string;
+          instanceId: string;
+          output?: InPlaceModalResource["Attributes"];
+        },
+      ) =>
+        Effect.gen(function* () {
+          inPlaceModalCalls.push({
+            stack: yield* modalStackName,
+            mode,
+            op,
+            id: input.id,
+            instanceId: input.instanceId,
+            physicalId: input.output?.physicalId,
+          });
+        });
+
+      return {
+        list: () => Effect.succeed([]),
+        read: ({ output }: { output?: InPlaceModalResource["Attributes"] }) =>
+          Effect.succeed(output),
+        diff: Effect.fn(function* ({ news, olds }) {
+          if (!isResolved(news)) return undefined;
+          return news.value === olds?.value
+            ? ({ action: "noop" } as const)
+            : ({ action: "update" } as const);
+        }),
+        reconcile: Effect.fn(function* (input) {
+          yield* record("reconcile", input);
+          return {
+            value: input.news.value ?? input.id,
+            runtime: mode,
+            physicalId:
+              input.output?.physicalId ?? `physical-${input.instanceId}`,
+          };
+        }),
+        deactivate: (input) => record("deactivate", input),
+        delete: (input) => record("delete", input),
+      };
+    }),
+  );
+
+export const inPlaceModalResourceProvider = () =>
+  ProviderLayer.dual(InPlaceModalResource, {
+    live: () => inPlaceModalVariant("live"),
+    local: () => inPlaceModalVariant("local"),
+    modeTransition: "in-place",
+  });
+
 // Layers
 export const TestLayers = () =>
   Layer.mergeAll(
@@ -1309,6 +1470,9 @@ export const TestLayers = () =>
     deleteFirstResourceProvider(),
     driftResourceProvider(),
     modalResourceProvider(),
+    inPlaceModalResourceProvider(),
+    publishedVersionProvider(),
+    versionAliasProvider(),
   );
 
 export const InMemoryTestLayers = () =>
