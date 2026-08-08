@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["package.json", "test"],
+  "include": ["package.json", "tsdown.config.ts", "test"],
   "exclude": [
     "test/Local/fixtures/rpc-server-entry.ts",
     "test/Local/fixtures/rpc-spawner-parent.ts",

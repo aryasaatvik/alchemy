@@ -3,6 +3,7 @@ import {
   createArtifactStore,
   makeScopedArtifacts,
 } from "@/Artifacts.ts";
+import { AlchemyContextLive } from "@/AlchemyContext.ts";
 import {
   makeSourceContext,
   resolveSource,
@@ -13,6 +14,7 @@ import type { WorkerProps } from "@/Cloudflare/Workers/Worker.ts";
 import { NodeServices } from "@effect/platform-node";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as crypto from "node:crypto";
 
 const providerModule = new URL(
@@ -45,7 +47,7 @@ const provide = <A, E>(
       Artifacts,
       makeScopedArtifacts(createArtifactStore(), "test"),
     ),
-    Effect.provide(NodeServices.layer),
+    Effect.provide(Layer.provideMerge(AlchemyContextLive, NodeServices.layer)),
     Effect.scoped,
   );
 

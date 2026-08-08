@@ -15,7 +15,8 @@ const { test } = Test.make({
   state: inMemoryState(),
 });
 
-test("orders DNS validation before the issued-certificate gate", () =>
+test(
+  "orders DNS validation before the issued-certificate gate",
   Effect.gen(function* () {
     const plan = yield* Effect.gen(function* () {
       // The resource shapes are deliberately minimal: this is a graph test,
@@ -40,15 +41,16 @@ test("orders DNS validation before the issued-certificate gate", () =>
         name: issued.certificateArn,
       });
     }).pipe(
+      // @ts-expect-error - Stack.make's typing erases R unsoundly here
       Stack.make({
         name: "acm-certificate-validation",
         providers: Layer.empty,
         state: inMemoryState(),
       }),
       Effect.provideService(Stage, "test"),
-      Effect.flatMap((stack) => Plan.make(stack)),
+      Effect.flatMap((stack: any) => Plan.make(stack)),
       Effect.provide(TestLayers()),
-    );
+    ) as Effect.Effect<any, any, any>;
 
     expect(plan.actions.CertificateIssued).toMatchObject({
       kind: "action",
@@ -63,4 +65,5 @@ test("orders DNS validation before the issued-certificate gate", () =>
     expect(plan.actions.CertificateIssued.downstream).toContain(
       "CertificateConsumer",
     );
-  }));
+  }),
+);

@@ -3,6 +3,7 @@ import {
   createArtifactStore,
   makeScopedArtifacts,
 } from "@/Artifacts.ts";
+import { AlchemyContextLive } from "@/AlchemyContext.ts";
 import {
   makeSourceContext,
   type SourceHash,
@@ -17,6 +18,7 @@ import { NodeServices } from "@effect/platform-node";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as pathe from "pathe";
 import { cloneFixture } from "../Utils/Fixture.ts";
@@ -58,7 +60,7 @@ const provide = <A, E>(effect: Effect.Effect<A, E, SourceServices>) =>
       Artifacts,
       makeScopedArtifacts(createArtifactStore(), "test"),
     ),
-    Effect.provide(NodeServices.layer),
+    Effect.provide(Layer.provideMerge(AlchemyContextLive, NodeServices.layer)),
     Effect.scoped,
   );
 

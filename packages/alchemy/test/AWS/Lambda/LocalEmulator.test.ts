@@ -3,6 +3,7 @@ import * as Test from "@/Test/Alchemy";
 import * as Lambda from "@distilled.cloud/aws/lambda";
 import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import { fileURLToPath } from "node:url";
 
 const initialHandler = fileURLToPath(
@@ -29,7 +30,9 @@ test.provider.skipIf(process.env.AWS_ENDPOINT_URL === undefined)(
         FunctionName: first.functionName,
         Payload: new TextEncoder().encode("{}"),
       });
-      expect(new TextDecoder().decode(initial.Payload)).toContain("ok");
+      expect(
+        yield* Stream.mkString(Stream.decodeText(initial.Payload!)),
+      ).toContain("ok");
 
       const updated = yield* stack.deploy(
         AWS.Lambda.Function("LocalEmulatorFunction", {
@@ -42,7 +45,9 @@ test.provider.skipIf(process.env.AWS_ENDPOINT_URL === undefined)(
         FunctionName: updated.functionName,
         Payload: new TextEncoder().encode("{}"),
       });
-      expect(new TextDecoder().decode(response.Payload)).toContain("updated");
+      expect(
+        yield* Stream.mkString(Stream.decodeText(response.Payload!)),
+      ).toContain("updated");
     }),
   { timeout: 120_000 },
 );

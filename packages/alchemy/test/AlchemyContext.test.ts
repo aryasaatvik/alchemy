@@ -2,7 +2,7 @@ import { AlchemyContext, makeAlchemyContext } from "@/AlchemyContext.ts";
 import { getStableContextDir } from "@/Bundle/TempRoot.ts";
 import { ExecStackOptions } from "@/Cli/commands/deploy.ts";
 import { localStorageDirectory } from "@/Cloudflare/LocalRuntime.ts";
-import { watchPythonWorkerBundle } from "@/Cloudflare/Workers/PythonWorkerBundle.ts";
+import { watchPythonWorkerBundle } from "@/Cloudflare/Workers/Sources/Python.ts";
 import { Stack } from "@/Stack.ts";
 import { makeLocalState } from "@/State/LocalState.ts";
 import { Stage } from "@/Stage.ts";

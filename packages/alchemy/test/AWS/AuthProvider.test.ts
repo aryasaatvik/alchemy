@@ -180,7 +180,7 @@ describe("local AWS auth", () => {
 
   it.effect("rejects every partial local credential tuple", () =>
     Effect.gen(function* () {
-      for (const env of [
+      const partialEnvs: Record<string, string>[] = [
         { AWS_ACCESS_KEY_ID: "100000000004" },
         { AWS_SECRET_ACCESS_KEY: "samva-local-floci" },
         { AWS_SESSION_TOKEN: "samva-local-session" },
@@ -188,7 +188,8 @@ describe("local AWS auth", () => {
           AWS_ACCESS_KEY_ID: "100000000004",
           AWS_SESSION_TOKEN: "samva-local-session",
         },
-      ]) {
+      ];
+      for (const env of partialEnvs) {
         const error = yield* localAwsCredentials({
           method: "local",
           accountId: "100000000004",

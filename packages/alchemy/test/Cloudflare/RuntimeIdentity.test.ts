@@ -5,6 +5,7 @@ import {
 } from "@/Cloudflare/CloudflareEnvironment.ts";
 import { makeR2HttpScope } from "@/Cloudflare/R2/BucketHttp.ts";
 import { makeLocalWorkerStandardBindings } from "@/Cloudflare/Workers/LocalWorkerProvider.ts";
+import * as PluginContext from "@alchemy.run/cloudflare-runtime/core/PluginContext";
 import { describe, expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
@@ -57,7 +58,18 @@ describe("Cloudflare runtime identity", () => {
           descriptorNames: new Set(),
           selfUrl: undefined,
         });
-        const bindings = yield* Effect.all(hooks);
+        const bindings = yield* Effect.all(hooks).pipe(
+          Effect.provideService(
+            PluginContext.PluginContext,
+            yield* PluginContext.make({
+              name: "worker",
+              compatibilityDate: "2026-03-10",
+              compatibilityFlags: [],
+              bindings: [],
+              modules: [],
+            }),
+          ),
+        );
         const accountBindings = bindings.filter(
           (binding) => binding.name === "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
         );
