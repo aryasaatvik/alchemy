@@ -349,19 +349,105 @@ const mapDurablePropsInput = (props: unknown) =>
     ? Effect.map(props as Effect.Effect<DurableFunctionProps>, mapDurableProps)
     : mapDurableProps(props as DurableFunctionProps);
 
+const makeDurableHandle = (name: string, host: Function) =>
+  Effect.gen(function* () {
+    // Resolve the distilled operations once at init — they close over the
+    // ambient Credentials/Region/HttpClient so the handle's runtime
+    // callables need no cloud services of their own.
+    const invoke = yield* Lambda.invoke;
+    const getDurableExecution = yield* Lambda.getDurableExecution;
+    const listDurableExecutionsByFunction =
+      yield* Lambda.listDurableExecutionsByFunction;
+    const stopDurableExecution = yield* Lambda.stopDurableExecution;
+    const sendCallbackSuccess =
+      yield* Lambda.sendDurableExecutionCallbackSuccess;
+    const sendCallbackFailure =
+      yield* Lambda.sendDurableExecutionCallbackFailure;
+    const sendCallbackHeartbeat =
+      yield* Lambda.sendDurableExecutionCallbackHeartbeat;
+
+    // Capture the function-name Output WITHOUT resolving it. This is a
+    // self-reference — `host` is the very Function this wrapper owns — and
+    // its Output source only registers during reconcile. Resolve it lazily
+    // inside runtime callables instead.
+    const FunctionName = host.functionName;
+
+    const handle: DurableFunctionHandle<any, any> = {
+      Type: TypeId,
+      name,
+      start: (options) =>
+        Effect.gen(function* () {
+          const functionName = yield* yield* FunctionName;
+          const response = yield* invoke({
+            FunctionName: functionName,
+            InvocationType: "Event",
+            DurableExecutionName: options?.name,
+            Qualifier: options?.qualifier,
+            Payload: encodeDurableEnvelope(name, options?.params),
+          });
+          return {
+            executionArn: response.DurableExecutionArn,
+            statusCode: response.StatusCode,
+          };
+        }),
+      get: (executionArn) =>
+        getDurableExecution({ DurableExecutionArn: executionArn }),
+      list: (options) =>
+        Effect.gen(function* () {
+          const functionName = yield* yield* FunctionName;
+          return yield* listDurableExecutionsByFunction({
+            FunctionName: functionName,
+            DurableExecutionName: options?.name,
+            Statuses: options?.statuses,
+          });
+        }),
+      stop: (executionArn, error) =>
+        stopDurableExecution({
+          DurableExecutionArn: executionArn,
+          Error: error,
+        }),
+      sendCallbackSuccess: (callbackId, result) =>
+        sendCallbackSuccess({
+          CallbackId: callbackId,
+          Result: result === undefined ? undefined : JSON.stringify(result),
+        }).pipe(Effect.asVoid),
+      sendCallbackFailure: (callbackId, error) =>
+        sendCallbackFailure({
+          CallbackId: callbackId,
+          Error: error,
+        }).pipe(Effect.asVoid),
+      sendCallbackHeartbeat: (callbackId) =>
+        sendCallbackHeartbeat({ CallbackId: callbackId }).pipe(Effect.asVoid),
+    };
+
+    return {
+      ...handle,
+      function: host,
+      functionName: host.functionName,
+      functionArn: host.functionArn,
+    } satisfies DurableFunction<any, any>;
+  });
+
 const resolveDurableHandle = (id: string) => (instance: unknown) => {
   const handle = (instance as Record<symbol, unknown> | undefined)?.[
     DurableHandleKey
   ];
-  return handle !== undefined
-    ? Effect.succeed(handle as DurableFunction<any, any>)
-    : Effect.die(
-        new Error(
-          `AWS.Lambda.DurableFunction<${id}> has no durable handle — provide ` +
-            `its implementation (\`${id}.make(props, impl)\` or an inline ` +
-            `form) before yielding it.`,
-        ),
-      );
+  if (handle !== undefined) {
+    return Effect.succeed(handle as DurableFunction<any, any>);
+  }
+  if (instance !== undefined) {
+    // A nested DurableFunction is a reference when another platform is
+    // booting at runtime. Its handler init must not run in the parent, but
+    // callers still need the management-plane handle backed by its resource.
+    return makeDurableHandle(id, instance as Function);
+  }
+  return Effect.die(
+    new Error(
+      `AWS.Lambda.DurableFunction<${id}> has no durable handle — provide ` +
+        `its implementation (\`${id}.make(props, impl)\` or an inline ` +
+        `form) before yielding it.`,
+    ),
+  );
 };
 
 /**
@@ -379,30 +465,6 @@ const composeDurableImpl = (
     // Self: the Function resource this wrapper owns (the Platform machinery
     // provides `Function.Self` during its own init).
     const host = yield* Function;
-
-    // Resolve the distilled operations once at init — they close over the
-    // ambient Credentials/Region/HttpClient so the handle's runtime
-    // callables need no cloud services of their own.
-    const invoke = yield* Lambda.invoke;
-    const getDurableExecution = yield* Lambda.getDurableExecution;
-    const listDurableExecutionsByFunction =
-      yield* Lambda.listDurableExecutionsByFunction;
-    const stopDurableExecution = yield* Lambda.stopDurableExecution;
-    const sendCallbackSuccess =
-      yield* Lambda.sendDurableExecutionCallbackSuccess;
-    const sendCallbackFailure =
-      yield* Lambda.sendDurableExecutionCallbackFailure;
-    const sendCallbackHeartbeat =
-      yield* Lambda.sendDurableExecutionCallbackHeartbeat;
-
-    // Capture the function-name Output WITHOUT resolving it. This is a
-    // self-reference — `host` is the very Function this wrapper's init is
-    // building — and `functionName`'s Output source only registers during
-    // that function's own reconcile. Yielding it here (init/plan time) would
-    // block forever (the reconcile that produces it waits on this init to
-    // finish). Resolve it lazily inside the runtime callables instead, the
-    // same posture as `InvokeFunctionHttp`.
-    const FunctionName = host.functionName;
 
     if (!globalThis.__ALCHEMY_RUNTIME__) {
       // Self-binding: the statements land on this function's own execution
@@ -452,56 +514,12 @@ const composeDurableImpl = (
       });
     }
 
-    const handle: DurableFunctionHandle<any, any> = {
-      Type: TypeId,
-      name,
-      start: (options) =>
-        Effect.gen(function* () {
-          // `FunctionName` is the host's own unresolved Output (captured raw at
-          // init to avoid the plan-time self-reference deadlock). Resolve both
-          // stages — Output → Accessor → string — lazily at runtime.
-          const functionName = yield* yield* FunctionName;
-          const response = yield* invoke({
-            FunctionName: functionName,
-            InvocationType: "Event",
-            DurableExecutionName: options?.name,
-            Qualifier: options?.qualifier,
-            Payload: encodeDurableEnvelope(name, options?.params),
-          });
-          return {
-            executionArn: response.DurableExecutionArn,
-            statusCode: response.StatusCode,
-          };
-        }),
-      get: (executionArn) =>
-        getDurableExecution({ DurableExecutionArn: executionArn }),
-      list: (options) =>
-        Effect.gen(function* () {
-          const functionName = yield* yield* FunctionName;
-          return yield* listDurableExecutionsByFunction({
-            FunctionName: functionName,
-            DurableExecutionName: options?.name,
-            Statuses: options?.statuses,
-          });
-        }),
-      stop: (executionArn, error) =>
-        stopDurableExecution({
-          DurableExecutionArn: executionArn,
-          Error: error,
-        }),
-      sendCallbackSuccess: (callbackId, result) =>
-        sendCallbackSuccess({
-          CallbackId: callbackId,
-          Result: result === undefined ? undefined : JSON.stringify(result),
-        }).pipe(Effect.asVoid),
-      sendCallbackFailure: (callbackId, error) =>
-        sendCallbackFailure({
-          CallbackId: callbackId,
-          Error: error,
-        }).pipe(Effect.asVoid),
-      sendCallbackHeartbeat: (callbackId) =>
-        sendCallbackHeartbeat({ CallbackId: callbackId }).pipe(Effect.asVoid),
-    };
+    const handle = yield* makeDurableHandle(name, host);
+
+    // Publish the reference before evaluating the handler init. The init can
+    // resolve DurableFunctionScope for chained starts, while other platforms
+    // can synthesize the same reference without running this handler init.
+    (host as unknown as Record<symbol, unknown>)[DurableHandleKey] = handle;
 
     // Resolve the body function. Bindings resolved in the impl's init close
     // over their services; the returned closure's only leftover requirements
@@ -516,15 +534,6 @@ const composeDurableImpl = (
         run: (input) => fn(input) as Effect.Effect<unknown>,
       }),
     );
-
-    // Expose the full DurableFunction value (handle + resource refs) to
-    // `yield* MyDurableFunction` for every authoring form.
-    (host as unknown as Record<symbol, unknown>)[DurableHandleKey] = {
-      ...handle,
-      function: host,
-      functionName: host.functionName,
-      functionArn: host.functionArn,
-    } satisfies DurableFunction<any, any>;
   });
 
 /**

@@ -43,6 +43,17 @@ export interface PlatformProps {
   isExternal?: boolean;
 }
 
+/** @internal */
+export const shouldInitializePlatform = (
+  phase: "plan" | "runtime",
+  parent: Pick<BaseRuntimeContext, "Type" | "id"> | undefined,
+  type: string,
+  id: string,
+): boolean =>
+  phase !== "runtime" ||
+  parent === undefined ||
+  (parent.Type === type && parent.id === id);
+
 /**
  * Provide the platform class's layer (`cls.make(props, impl)`) with a
  * lifetime that matches the phase.
@@ -195,7 +206,7 @@ export interface Platform<
       const Id extends string,
       Shape extends MainShape,
       PropsReq = never,
-      InitReq extends Services | PlatformServices | Resource = never,
+      InitReq = never,
     >(
       id: Id,
       props:
@@ -223,10 +234,7 @@ export interface Platform<
       id: Id,
     ): Effect.Effect<Resource & Rpc<Self>, never, Resource["Providers"]> &
       Named<Id> & {
-        make<
-          PropsReq = never,
-          InitReq extends Services | PlatformServices | Resource = never,
-        >(
+        make<PropsReq = never, InitReq = never>(
           props:
             | InputProps<Resource["Props"]>
             | Effect.Effect<
@@ -244,7 +252,7 @@ export interface Platform<
         new (_: never): BaseShape & Named<Id> & Tag<Resource["Type"]>;
       };
   };
-  <PropsReq = never, InitReq extends Services | PlatformServices = never>(
+  <PropsReq = never, InitReq = never>(
     id: string,
     props:
       | InputProps<Resource["Props"]>
@@ -260,7 +268,7 @@ export interface Platform<
     const Id extends string,
     Shape extends MainShape,
     PropsReq = never,
-    InitReq extends Services | PlatformServices = never,
+    InitReq = never,
   >(
     id: Id,
     props:
@@ -495,6 +503,20 @@ export const Platform = <
               Effect.context<never>(),
             ]),
             Effect.fn(function* ([props, runtimeContext, outerServices]) {
+              const phase = yield* ALCHEMY_PHASE;
+              const parentRuntimeContext = yield* CurrentRuntimeContext;
+              // A platform init program is also its deployment declaration,
+              // so plan must traverse nested platforms. At runtime, however,
+              // only the entry platform owns the process being booted. A
+              // nested Function/Worker/Task is a resource handle dependency;
+              // rerunning its init here would register the wrong handlers and
+              // execute its cold-start I/O inside the parent process.
+              const initialize = shouldInitializePlatform(
+                phase,
+                parentRuntimeContext,
+                type,
+                id,
+              );
               // The init effect (`impl`) is evaluated inside an
               // `Effect.provide(...)` region below, whose implementation
               // (`scopedWith`) would otherwise shadow the ambient `Scope`
@@ -520,128 +542,134 @@ export const Platform = <
                 runtimeContext,
               );
 
-              yield* impl.pipe(
-                Effect.flatMap((impl) => {
-                  if (!impl) return Effect.void;
-                  const shape = impl as Record<string, unknown>;
-                  // Serve when there's a `fetch` handler OR any RPC shape
-                  // methods. A pure-RPC impl (methods, no `fetch`) still needs
-                  // the server to boot — hand `serveRpc` a default 404 fallback
-                  // so `/__rpc__/*` is dispatched to the shape methods and
-                  // everything else 404s.
-                  // May be an `HttpEffect` or an Effect resolving to one (the
-                  // `Main.fetch` shape); `serve` accepts both.
-                  const fetch = shape.fetch as any;
-                  const hasRpcMethods = Object.keys(shape).some(
-                    (key) => key !== "fetch",
-                  );
-                  if (!fetch && !hasRpcMethods) return Effect.void;
-                  // Hand the full impl to `serve` so the runtime can expose any
-                  // non-handler methods on the impl shape (RPC methods)
-                  // alongside the standard `fetch` handler.
-                  return (
-                    runtimeContext.serve?.(
-                      fetch ??
-                        Effect.succeed(
-                          HttpServerResponse.text("Not Found", { status: 404 }),
-                        ),
-                      { shape },
-                    ) ?? Effect.die("No serve handler")
-                  );
-                }),
-                Effect.provide(
-                  Layer.effect(
-                    ConfigProvider.ConfigProvider,
-                    Effect.gen(function* () {
-                      // a Config Provider that we use to intercept config lookups and bind them to the RuntimeContext
-                      const configProvider =
-                        yield* ConfigProvider.ConfigProvider;
-                      const phase = yield* ALCHEMY_PHASE;
-
-                      return ConfigProvider.make(
-                        Effect.fn(function* (path) {
-                          const ctx = yield* CurrentRuntimeContext;
-                          // `set`/`get` store keys verbatim, so canonicalize the
-                          // logical config path here (the caller's job) before
-                          // handing it to the RuntimeContext.
-                          const key = sanitizeKey(
-                            path.map((p) => p.toString()).join("_"),
-                          );
-                          const node = yield* configProvider.load(path);
-                          if (phase === "plan" && node) {
-                            // bind it to the RuntimeContext if running in plan phase
-                            const output = Output.literal(
-                              Redacted.make(node.value),
-                            );
-                            yield* ctx?.set(key, output) ?? Effect.void;
-                            return node;
-                          } else if (phase === "runtime" && ctx) {
-                            // retrieve from the RuntimeContext if running in runtime phase
-                            const value =
-                              yield* ctx.get<Redacted.Redacted<string>>(key);
-                            if (value) {
-                              return ConfigProvider.makeValue(
-                                Redacted.isRedacted(value)
-                                  ? Redacted.value(value)
-                                  : value,
-                              );
-                            }
-                          }
-                          // fallback to the config provider otherwise
-                          return node;
-                        }),
+              yield* initialize
+                ? impl.pipe(
+                    Effect.flatMap((impl) => {
+                      if (!impl) return Effect.void;
+                      const shape = impl as Record<string, unknown>;
+                      // Serve when there's a `fetch` handler OR any RPC shape
+                      // methods. A pure-RPC impl (methods, no `fetch`) still needs
+                      // the server to boot — hand `serveRpc` a default 404 fallback
+                      // so `/__rpc__/*` is dispatched to the shape methods and
+                      // everything else 404s.
+                      // May be an `HttpEffect` or an Effect resolving to one (the
+                      // `Main.fetch` shape); `serve` accepts both.
+                      const fetch = shape.fetch as any;
+                      const hasRpcMethods = Object.keys(shape).some(
+                        (key) => key !== "fetch",
+                      );
+                      if (!fetch && !hasRpcMethods) return Effect.void;
+                      // Hand the full impl to `serve` so the runtime can expose any
+                      // non-handler methods on the impl shape (RPC methods)
+                      // alongside the standard `fetch` handler.
+                      return (
+                        runtimeContext.serve?.(
+                          fetch ??
+                            Effect.succeed(
+                              HttpServerResponse.text("Not Found", {
+                                status: 404,
+                              }),
+                            ),
+                          { shape },
+                        ) ?? Effect.die("No serve handler")
                       );
                     }),
-                  ).pipe(
-                    Layer.provideMerge(
-                      Layer.mergeAll(
-                        // Pin init's ambient `Scope` to this layer's build
-                        // scope. `Effect.provide` (`scopedWith`) would
-                        // otherwise shadow it with a transient scope that
-                        // closes the moment init returns; the build scope
-                        // lives for the instance under the runtime bridges,
-                        // so init-level finalizers run at instance shutdown
-                        // (Lambda's SIGTERM window) or never (workerd) —
-                        // request-coupled cleanup belongs in handlers, where
-                        // the bridge provides a per-event scope. It also
-                        // wins over any `Scope` captured in `outerServices`
-                        // below.
-                        Layer.succeed(Scope, buildScope),
-                        Layer.succeed(Platform.Platform, runtimeContext),
-                        Layer.succeed(PlatformContext, runtimeContext),
-                        Layer.succeed(RuntimeContext, runtimeContext),
-                        // Host contexts (EC2 instances, ECS tasks, processes)
-                        // carry a `run` for registering long-running loops.
-                        // Expose it as `ServerHost` so an inline program can
-                        // `yield* ServerHost` during plan/deploy without the
-                        // caller providing the layer itself.
-                        "run" in runtimeContext &&
-                          typeof (runtimeContext as { run?: unknown }).run ===
-                            "function"
-                          ? Layer.succeed(ServerHost, {
-                              run: (runtimeContext as ProcessContext).run,
-                            })
-                          : Layer.empty,
-                        Layer.succeed(resource.Self, instance),
-                        Layer.succeed(Platform.Self, instance),
-                        Layer.succeed(Self, instance),
-                        runtimeContext.planServices
-                          ? Layer.unwrap(
-                              ALCHEMY_PHASE.pipe(
-                                Effect.map((phase) =>
-                                  phase === "plan"
-                                    ? runtimeContext.planServices!
-                                    : Layer.empty,
-                                ),
-                              ),
-                            )
-                          : Layer.empty,
+                    Effect.provide(
+                      Layer.effect(
+                        ConfigProvider.ConfigProvider,
+                        Effect.gen(function* () {
+                          // a Config Provider that we use to intercept config lookups and bind them to the RuntimeContext
+                          const configProvider =
+                            yield* ConfigProvider.ConfigProvider;
+                          const phase = yield* ALCHEMY_PHASE;
+
+                          return ConfigProvider.make(
+                            Effect.fn(function* (path) {
+                              const ctx = yield* CurrentRuntimeContext;
+                              // `set`/`get` store keys verbatim, so canonicalize the
+                              // logical config path here (the caller's job) before
+                              // handing it to the RuntimeContext.
+                              const key = sanitizeKey(
+                                path.map((p) => p.toString()).join("_"),
+                              );
+                              const node = yield* configProvider.load(path);
+                              if (phase === "plan" && node) {
+                                // bind it to the RuntimeContext if running in plan phase
+                                const output = Output.literal(
+                                  Redacted.make(node.value),
+                                );
+                                yield* ctx?.set(key, output) ?? Effect.void;
+                                return node;
+                              } else if (phase === "runtime" && ctx) {
+                                // retrieve from the RuntimeContext if running in runtime phase
+                                const value =
+                                  yield* ctx.get<Redacted.Redacted<string>>(
+                                    key,
+                                  );
+                                if (value) {
+                                  return ConfigProvider.makeValue(
+                                    Redacted.isRedacted(value)
+                                      ? Redacted.value(value)
+                                      : value,
+                                  );
+                                }
+                              }
+                              // fallback to the config provider otherwise
+                              return node;
+                            }),
+                          );
+                        }),
+                      ).pipe(
+                        Layer.provideMerge(
+                          Layer.mergeAll(
+                            // Pin init's ambient `Scope` to this layer's build
+                            // scope. `Effect.provide` (`scopedWith`) would
+                            // otherwise shadow it with a transient scope that
+                            // closes the moment init returns; the build scope
+                            // lives for the instance under the runtime bridges,
+                            // so init-level finalizers run at instance shutdown
+                            // (Lambda's SIGTERM window) or never (workerd) —
+                            // request-coupled cleanup belongs in handlers, where
+                            // the bridge provides a per-event scope. It also
+                            // wins over any `Scope` captured in `outerServices`
+                            // below.
+                            Layer.succeed(Scope, buildScope),
+                            Layer.succeed(Platform.Platform, runtimeContext),
+                            Layer.succeed(PlatformContext, runtimeContext),
+                            Layer.succeed(RuntimeContext, runtimeContext),
+                            // Host contexts (EC2 instances, ECS tasks, processes)
+                            // carry a `run` for registering long-running loops.
+                            // Expose it as `ServerHost` so an inline program can
+                            // `yield* ServerHost` during plan/deploy without the
+                            // caller providing the layer itself.
+                            "run" in runtimeContext &&
+                              typeof (runtimeContext as { run?: unknown })
+                                .run === "function"
+                              ? Layer.succeed(ServerHost, {
+                                  run: (runtimeContext as ProcessContext).run,
+                                })
+                              : Layer.empty,
+                            Layer.succeed(resource.Self, instance),
+                            Layer.succeed(Platform.Self, instance),
+                            Layer.succeed(Self, instance),
+                            runtimeContext.planServices
+                              ? Layer.unwrap(
+                                  ALCHEMY_PHASE.pipe(
+                                    Effect.map((phase) =>
+                                      phase === "plan"
+                                        ? runtimeContext.planServices!
+                                        : Layer.empty,
+                                    ),
+                                  ),
+                                )
+                              : Layer.empty,
+                          ),
+                        ),
+                        Layer.provideMerge(Layer.succeedContext(outerServices)),
                       ),
                     ),
-                    Layer.provideMerge(Layer.succeedContext(outerServices)),
-                  ),
-                ),
-              );
+                  )
+                : Effect.void;
 
               instance.Props = {
                 ...props,
