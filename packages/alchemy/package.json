@@ -398,6 +398,7 @@
     "@smithy/shared-ini-file-loader": "catalog:aws",
     "@smithy/types": "catalog:aws",
     "@types/aws-lambda": "catalog:aws",
+    "archiver": "^7.0.1",
     "aws4fetch": "catalog:aws",
     "capnweb": "^0.6.1",
     "fast-glob": "catalog:cloudflare-runtime",

@@ -1,6 +1,9 @@
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import { randomUUID } from "node:crypto";
 import { ChildProcess } from "effect/unstable/process";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 import { constants as fsConstants } from "node:fs";
@@ -72,6 +75,18 @@ export interface InstallResolvedPackagesOptions {
    */
   readonly target?: "lambda" | "host";
   readonly runNpmInstall?: NpmInstallRunner;
+  /** Additional npm flags applied to every install phase. */
+  readonly additionalNpmArgs?: ReadonlyArray<string>;
+}
+
+export interface InstallResolvedPackagesFromLocalCacheOptions {
+  /** Source package directory used to locate the authoritative workspace lockfile. */
+  readonly cwd: string;
+  readonly identity: PackageInstallIdentity;
+  readonly architecture: "x86_64" | "arm64";
+  readonly runNpmInstall?: NpmInstallRunner;
+  /** @internal Deterministic test seam; production resolves the npm version from PATH. */
+  readonly npmIdentity?: string;
 }
 
 export interface InstallPackagesOptions {
@@ -221,6 +236,22 @@ const npmCommandArgs = (
   ];
 };
 
+const localCacheInstallFlags = [
+  "--prefer-offline",
+  "--no-audit",
+  "--no-fund",
+] as const;
+
+const localPackageCacheSchema = 1;
+const localPackageCacheInstallPolicy = "npm-linux-glibc-prefer-offline-v1";
+
+interface LocalPackageCacheMetadata {
+  readonly schema: number;
+  readonly key: string;
+  readonly filesHash: string;
+  readonly fileCount: number;
+}
+
 /**
  * Normalizes and validates a `build.install` declaration to a
  * package-root → requested-version map. Array entries default to `"*"`.
@@ -350,64 +381,173 @@ export function installResolvedPackages(
   const packageNames = Object.keys(options.resolved).sort();
   if (packageNames.length === 0) return Effect.succeed([]);
 
-  const runInstall = (
-    directory: string,
-    args: ReadonlyArray<string>,
-  ): Effect.Effect<void, BundleError, ChildProcessSpawner> =>
-    options.runNpmInstall === undefined
-      ? runNpmInstall(directory, args)
-      : options
-          .runNpmInstall(directory, args)
-          .pipe(Effect.mapError(toBundleError));
-
   return Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
 
     return yield* Effect.acquireUseRelease(
       fileSystem.makeTempDirectory({ prefix: "alchemy-lambda-packages-" }),
       (directory) =>
         Effect.gen(function* () {
-          const hasOverrides =
-            options.overrides !== undefined &&
-            Object.keys(options.overrides).length > 0;
-          const manifest = JSON.stringify(
-            {
-              private: true,
-              dependencies: options.resolved,
-              ...(hasOverrides ? { overrides: options.overrides } : {}),
-            },
-            null,
-            2,
-          );
-          yield* fileSystem.writeFileString(
-            pathService.join(directory, "package.json"),
-            `${manifest}\n`,
-          );
-          if (hasOverrides) {
-            // Generate a lock so `npm ci` reproduces the override-pinned graph.
-            yield* runInstall(
-              directory,
-              npmLockfileArgs(options.architecture, options.target),
-            );
-            yield* runInstall(
-              directory,
-              npmInstallArgs(
-                options.architecture,
-                packageNames,
-                options.target,
-              ),
-            );
-          } else {
-            yield* runInstall(
-              directory,
-              npmPlainInstallArgs(options.architecture, options.target),
-            );
-          }
+          yield* installResolvedPackagesIntoDirectory(options, directory);
           return yield* readArtifactFiles(directory);
         }),
       (directory) =>
         fileSystem.remove(directory, { recursive: true }).pipe(Effect.ignore),
+    );
+  }).pipe(Effect.mapError(toBundleError));
+}
+
+/** Materialize one resolved package graph into an already-owned directory. */
+const installResolvedPackagesIntoDirectory = (
+  options: InstallResolvedPackagesOptions,
+  directory: string,
+): Effect.Effect<
+  void,
+  BundleError,
+  FileSystem.FileSystem | Path.Path | ChildProcessSpawner
+> => {
+  const packageNames = Object.keys(options.resolved).sort();
+  if (packageNames.length === 0) return Effect.void;
+
+  const runInstall = (
+    args: ReadonlyArray<string>,
+  ): Effect.Effect<void, BundleError, ChildProcessSpawner> => {
+    const effectiveArgs = [...args, ...(options.additionalNpmArgs ?? [])];
+    return options.runNpmInstall === undefined
+      ? runNpmInstall(directory, effectiveArgs)
+      : options
+          .runNpmInstall(directory, effectiveArgs)
+          .pipe(Effect.mapError(toBundleError));
+  };
+
+  return Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const hasOverrides =
+      options.overrides !== undefined &&
+      Object.keys(options.overrides).length > 0;
+    const manifest = JSON.stringify(
+      {
+        private: true,
+        dependencies: options.resolved,
+        ...(hasOverrides ? { overrides: options.overrides } : {}),
+      },
+      null,
+      2,
+    );
+    yield* fileSystem.writeFileString(
+      pathService.join(directory, "package.json"),
+      `${manifest}\n`,
+    );
+    if (hasOverrides) {
+      // Generate a lock so `npm ci` reproduces the override-pinned graph.
+      yield* runInstall(npmLockfileArgs(options.architecture, options.target));
+      yield* runInstall(
+        npmInstallArgs(options.architecture, packageNames, options.target),
+      );
+    } else {
+      yield* runInstall(
+        npmPlainInstallArgs(options.architecture, options.target),
+      );
+    }
+  }).pipe(Effect.mapError(toBundleError));
+};
+
+/**
+ * Reuses the exact Linux Lambda package tree for local-emulator reconciles.
+ * The cache is deliberately rooted beneath the workspace's lockfile-owned
+ * `node_modules`; deploys continue to use {@link installResolvedPackages}.
+ */
+export function installResolvedPackagesFromLocalCache(
+  options: InstallResolvedPackagesFromLocalCacheOptions,
+): Effect.Effect<
+  ReadonlyArray<InstalledPackageFile>,
+  BundleError,
+  FileSystem.FileSystem | Path.Path | ChildProcessSpawner
+> {
+  if (Object.keys(options.identity.resolved).length === 0) {
+    return Effect.succeed([]);
+  }
+
+  const installWithoutCache = () =>
+    installResolvedPackages({
+      resolved: options.identity.resolved,
+      overrides: options.identity.overrides,
+      architecture: options.architecture,
+      runNpmInstall: options.runNpmInstall,
+    });
+
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const cacheRoot = yield* findLocalPackageCacheRoot(options.cwd);
+    if (cacheRoot === undefined) {
+      return yield* installWithoutCache();
+    }
+
+    const npmIdentity =
+      options.npmIdentity ?? (yield* readNpmIdentity(options.cwd));
+    const key = yield* sha256Object({
+      schema: localPackageCacheSchema,
+      installPolicy: localPackageCacheInstallPolicy,
+      resolved: options.identity.resolved,
+      overrides: options.identity.overrides,
+      lockfile: options.identity.lockfile,
+      architecture: options.architecture,
+      npm: npmIdentity,
+    });
+    const entry = path.join(cacheRoot, key);
+    const lockPath = path.join(cacheRoot, `${key}.lock`);
+
+    return yield* withLocalPackageCacheLock(
+      lockPath,
+      Effect.gen(function* () {
+        const cached = yield* readValidLocalPackageCacheEntry(entry, key);
+        if (cached !== undefined) return cached;
+
+        if (yield* fs.exists(entry)) {
+          yield* fs.remove(entry, { recursive: true });
+        }
+
+        const suffix = yield* Effect.sync(randomUUID);
+        const staging = `${entry}.tmp-${suffix}`;
+
+        return yield* Effect.acquireUseRelease(
+          fs
+            .makeDirectory(staging, { recursive: true })
+            .pipe(Effect.as(staging)),
+          () =>
+            Effect.gen(function* () {
+              const artifact = path.join(staging, "artifact");
+              yield* fs.makeDirectory(artifact, { recursive: true });
+              yield* installResolvedPackagesIntoDirectory(
+                {
+                  resolved: options.identity.resolved,
+                  overrides: options.identity.overrides,
+                  architecture: options.architecture,
+                  runNpmInstall: options.runNpmInstall,
+                  additionalNpmArgs: localCacheInstallFlags,
+                },
+                artifact,
+              );
+              const files = yield* readArtifactFiles(artifact);
+              const filesHash = yield* hashInstalledPackageFiles(files);
+              const metadata: LocalPackageCacheMetadata = {
+                schema: localPackageCacheSchema,
+                key,
+                filesHash,
+                fileCount: files.length,
+              };
+              yield* fs.writeFileString(
+                path.join(staging, "complete.json"),
+                `${JSON.stringify(metadata, null, 2)}\n`,
+              );
+              yield* fs.rename(staging, entry);
+              return files;
+            }),
+          () => fs.remove(staging, { recursive: true }).pipe(Effect.ignore),
+        );
+      }),
     );
   }).pipe(Effect.mapError(toBundleError));
 }
@@ -1784,6 +1924,230 @@ const resolveCatalogEntry = (
   }
   return catalog?.[packageName];
 };
+
+const findLocalPackageCacheRoot = (
+  cwd: string,
+): Effect.Effect<
+  string | undefined,
+  BundleError,
+  FileSystem.FileSystem | Path.Path
+> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const lockfilePath = yield* findUp(cwd, lockfileNames);
+    if (lockfilePath === undefined) return undefined;
+
+    const workspaceRoot = path.dirname(lockfilePath);
+    const nodeModules = path.join(workspaceRoot, "node_modules");
+    const [realWorkspaceRoot, realNodeModules] = yield* Effect.all([
+      fs
+        .realPath(workspaceRoot)
+        .pipe(Effect.catch(() => Effect.succeed(undefined))),
+      fs
+        .realPath(nodeModules)
+        .pipe(Effect.catch(() => Effect.succeed(undefined))),
+    ]);
+    if (realWorkspaceRoot === undefined || realNodeModules === undefined) {
+      return undefined;
+    }
+
+    const relative = path.relative(realWorkspaceRoot, realNodeModules);
+    if (
+      relative === "" ||
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      return undefined;
+    }
+
+    const cacheRoot = path.join(
+      realNodeModules,
+      ".cache",
+      "alchemy",
+      "lambda-packages",
+    );
+    return yield* fs.makeDirectory(cacheRoot, { recursive: true }).pipe(
+      Effect.as(cacheRoot),
+      Effect.catch(() => Effect.succeed(undefined)),
+    );
+  }).pipe(Effect.mapError(toBundleError));
+
+const readNpmIdentity = (
+  cwd: string,
+): Effect.Effect<string, BundleError, ChildProcessSpawner> =>
+  Effect.sync(() =>
+    ChildProcess.setCwd(
+      ChildProcess.make("npm", ["--version"], {
+        shell: false,
+        env: { ...process.env },
+      }),
+      cwd,
+    ),
+  ).pipe(
+    Effect.flatMap(exec),
+    Effect.scoped,
+    Effect.mapError((cause) =>
+      toBundleError(
+        cause instanceof Error && cause.message.includes("ENOENT")
+          ? new Error(
+              "Failed to resolve npm identity: npm was not found on PATH",
+            )
+          : cause,
+      ),
+    ),
+    Effect.flatMap(({ exitCode, stdout, stderr }) =>
+      exitCode === 0
+        ? Effect.succeed(`npm@${stdout.trim()}`)
+        : Effect.fail(
+            new BundleError({
+              message: `Failed to resolve npm identity (exit ${exitCode}): ${stderr}`,
+            }),
+          ),
+    ),
+  );
+
+const withLocalPackageCacheLock = <A, E, R>(
+  lockPath: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | BundleError, R | FileSystem.FileSystem | Path.Path> =>
+  Effect.acquireUseRelease(
+    acquireLocalPackageCacheLock(lockPath),
+    () => effect,
+    (owner) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const currentOwner = yield* fs
+          .readFileString(path.join(lockPath, "owner"))
+          .pipe(Effect.catch(() => Effect.succeed(undefined)));
+        if (currentOwner === owner) {
+          yield* fs.remove(lockPath, { recursive: true }).pipe(Effect.ignore);
+        }
+      }),
+  );
+
+const acquireLocalPackageCacheLock = (
+  lockPath: string,
+): Effect.Effect<string, BundleError, FileSystem.FileSystem | Path.Path> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const maxAttempts = 2_400;
+    const staleAfterMillis = 10 * 60_000;
+    const owner = yield* Effect.sync(randomUUID);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const acquired = yield* fs.makeDirectory(lockPath).pipe(
+        Effect.as(true),
+        Effect.catchTag("PlatformError", (error) =>
+          error.reason._tag === "AlreadyExists"
+            ? Effect.succeed(false)
+            : Effect.fail(
+                new BundleError({
+                  message: `Failed to acquire local Lambda package cache lock '${lockPath}'`,
+                  cause: error,
+                }),
+              ),
+        ),
+      );
+      if (acquired) {
+        yield* fs.writeFileString(path.join(lockPath, "owner"), owner).pipe(
+          Effect.catchTag("PlatformError", (error) =>
+            fs.remove(lockPath, { recursive: true }).pipe(
+              Effect.ignore,
+              Effect.andThen(
+                Effect.fail(
+                  new BundleError({
+                    message: `Failed to initialize local Lambda package cache lock '${lockPath}'`,
+                    cause: error,
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+        return owner;
+      }
+
+      const stat = yield* fs
+        .stat(lockPath)
+        .pipe(Effect.catch(() => Effect.succeed(undefined)));
+      const modified =
+        stat === undefined ? undefined : Option.getOrUndefined(stat.mtime);
+      const now = yield* Clock.currentTimeMillis;
+      if (
+        modified !== undefined &&
+        now - modified.getTime() > staleAfterMillis
+      ) {
+        const suffix = yield* Effect.sync(randomUUID);
+        const stalePath = path.join(
+          path.dirname(lockPath),
+          `${path.basename(lockPath)}.stale-${suffix}`,
+        );
+        const reclaimed = yield* fs.rename(lockPath, stalePath).pipe(
+          Effect.as(true),
+          Effect.catch(() => Effect.succeed(false)),
+        );
+        if (reclaimed) {
+          yield* fs.remove(stalePath, { recursive: true }).pipe(Effect.ignore);
+          continue;
+        }
+      }
+      yield* Effect.sleep(50);
+    }
+
+    return yield* Effect.fail(
+      new BundleError({
+        message: `Timed out waiting for local Lambda package cache lock '${lockPath}'`,
+      }),
+    );
+  });
+
+const hashInstalledPackageFiles = (
+  files: ReadonlyArray<InstalledPackageFile>,
+) =>
+  Effect.gen(function* () {
+    const entries: Array<{ path: string; hash: string }> = [];
+    for (const file of [...files].sort((left, right) =>
+      left.path.localeCompare(right.path),
+    )) {
+      entries.push({ path: file.path, hash: yield* sha256(file.content) });
+    }
+    return yield* sha256Object(entries);
+  });
+
+const readValidLocalPackageCacheEntry = (
+  entry: string,
+  key: string,
+): Effect.Effect<
+  ReadonlyArray<InstalledPackageFile> | undefined,
+  never,
+  FileSystem.FileSystem | Path.Path
+> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const metadata = yield* fs.readFileString(
+      path.join(entry, "complete.json"),
+    );
+    const parsed = yield* Effect.try(
+      () => JSON.parse(metadata) as LocalPackageCacheMetadata,
+    );
+    if (
+      parsed.schema !== localPackageCacheSchema ||
+      parsed.key !== key ||
+      !Number.isSafeInteger(parsed.fileCount) ||
+      typeof parsed.filesHash !== "string"
+    ) {
+      return undefined;
+    }
+    const files = yield* readArtifactFiles(path.join(entry, "artifact"));
+    if (files.length !== parsed.fileCount) return undefined;
+    const filesHash = yield* hashInstalledPackageFiles(files);
+    return filesHash === parsed.filesHash ? files : undefined;
+  }).pipe(Effect.catch(() => Effect.succeed(undefined)));
 
 const readArtifactFiles = (directory: string) =>
   Effect.gen(function* () {

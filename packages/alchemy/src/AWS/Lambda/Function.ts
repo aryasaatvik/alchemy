@@ -6,6 +6,7 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Region } from "@distilled.cloud/aws/Region";
 import type * as lambda from "aws-lambda";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -25,6 +26,7 @@ import * as Bundle from "../../Bundle/Bundle.ts";
 import {
   hashPackageInstallIdentity,
   installResolvedPackages,
+  installResolvedPackagesFromLocalCache,
   matchesPackageRoot,
   normalizeInstallTargets,
   resolvePackageInstallIdentity,
@@ -58,7 +60,7 @@ import {
   hasTags,
 } from "../../Tags.ts";
 import { sha256 } from "../../Util/sha256.ts";
-import { zipCode } from "../../Util/zip.ts";
+import { zipCode, type ZipCompression } from "../../Util/zip.ts";
 import { Assets } from "../Assets.ts";
 import {
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
@@ -1404,6 +1406,14 @@ export interface FunctionProviderOptions {
   transformEnvironment?: (
     environment: LambdaEnvironment,
   ) => Effect.Effect<LambdaEnvironment, unknown>;
+  /**
+   * Reuse content-addressed Linux package trees beneath the source workspace's
+   * node_modules. Reserved for the local-emulator provider; deploy artifacts
+   * continue to materialize dependencies in a fresh isolated directory.
+   */
+  localPackageCache?: boolean;
+  /** Archive compression selected by an execution-substrate provider. */
+  archiveCompression?: ZipCompression;
 }
 
 export type FunctionLifecycleInput<
@@ -1692,11 +1702,18 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         sourcemap,
         uploadSourceMap,
       } = yield* resolveFunctionBundleConfig(props);
+      const bundleStartedAt = yield* Clock.currentTimeMillis;
       const bundleOutput = yield* Bundle.build(
         inputOptions,
         outputOptions,
         extra,
       );
+      if (options?.localPackageCache === true) {
+        const now = yield* Clock.currentTimeMillis;
+        yield* Effect.logInfo(
+          `[alchemy:lambda-local-artifact] bundle-build end duration_ms=${now - bundleStartedAt}`,
+        );
+      }
 
       const mainFile = bundleOutput.files[0];
       const code =
@@ -1740,24 +1757,57 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         : bundleOutput.hash;
 
       const buildArchive = Effect.gen(function* () {
+        const packagesStartedAt = yield* Clock.currentTimeMillis;
         const installedPackageFiles = hasInstalledPackages
-          ? yield* installResolvedPackages({
-              resolved,
-              overrides: installIdentity.overrides,
-              architecture,
-            })
+          ? yield* options?.localPackageCache === true
+              ? installResolvedPackagesFromLocalCache({
+                  cwd,
+                  identity: installIdentity,
+                  architecture,
+                })
+              : installResolvedPackages({
+                  resolved,
+                  overrides: installIdentity.overrides,
+                  architecture,
+                })
           : [];
+        if (options?.localPackageCache === true) {
+          const now = yield* Clock.currentTimeMillis;
+          yield* Effect.logInfo(
+            `[alchemy:lambda-local-artifact] package-cache end duration_ms=${now - packagesStartedAt} files=${installedPackageFiles.length}`,
+          );
+        }
         const archiveFiles = [...extraFiles, ...installedPackageFiles];
+        const zipStartedAt = yield* Clock.currentTimeMillis;
+        if (options?.localPackageCache === true) {
+          yield* Effect.logInfo(
+            `[alchemy:lambda-local-artifact] zip start compression=${options.archiveCompression ?? "DEFLATE"} files=${archiveFiles.length}`,
+          );
+        }
         const archive = yield* zipCode(
           code,
           archiveFiles.length > 0 ? archiveFiles : undefined,
+          options?.archiveCompression,
         );
+        if (options?.localPackageCache === true) {
+          const now = yield* Clock.currentTimeMillis;
+          yield* Effect.logInfo(
+            `[alchemy:lambda-local-artifact] zip end duration_ms=${now - zipStartedAt} bytes=${archive.byteLength}`,
+          );
+        }
         // The S3 asset key is content-addressed, so the archive hash must be a
         // true hash of the bytes when native packages are present.
+        const hashStartedAt = yield* Clock.currentTimeMillis;
         const archiveHash =
           installedPackageFiles.length > 0
             ? yield* sha256(archive)
             : bundleOutput.hash;
+        if (options?.localPackageCache === true) {
+          const now = yield* Clock.currentTimeMillis;
+          yield* Effect.logInfo(
+            `[alchemy:lambda-local-artifact] sha end duration_ms=${now - hashStartedAt}`,
+          );
+        }
         return { archive, archiveHash };
       });
 
@@ -2415,7 +2465,11 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         const code = new TextEncoder().encode(
           `export default () => ({ statusCode: 503, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "function initializing" }) })`,
         );
-        const archive = yield* zipCode(code);
+        const archive = yield* zipCode(
+          code,
+          undefined,
+          options?.archiveCompression,
+        );
         const hash = yield* hashBundle(code);
         yield* createOrUpdateFunction({
           id,

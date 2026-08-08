@@ -125,6 +125,106 @@ layer(NodeServices.layer)("Lambda function bundle resolution", (it) => {
   );
 
   it.effect(
+    "reuses one verified workspace dependency authority across local bundles",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectory({
+          prefix: "alchemy-local-lambda-workspace-",
+        });
+        const workspace = path.join(root, "evaluation-workspace");
+        const sourceDir = path.join(root, "function-source", "src");
+        const nodeModules = path.join(workspace, "node_modules");
+        const dependency = path.join(nodeModules, "fixture-dependency");
+        const bundleDirs = [
+          path.join(root, "instances", "first", "bundle"),
+          path.join(root, "instances", "second", "bundle"),
+        ];
+        const main = path.join(sourceDir, "handler.mjs");
+        let installs = 0;
+
+        try {
+          yield* fs.makeDirectory(sourceDir, { recursive: true });
+          yield* fs.makeDirectory(dependency, { recursive: true });
+          yield* fs.writeFileString(
+            path.join(workspace, "package.json"),
+            JSON.stringify({
+              dependencies: { "fixture-dependency": "1.0.0" },
+            }),
+          );
+          yield* fs.writeFileString(
+            path.join(dependency, "package.json"),
+            JSON.stringify({
+              name: "fixture-dependency",
+              version: "1.0.0",
+            }),
+          );
+          yield* fs.writeFileString(
+            path.join(dependency, "index.js"),
+            'module.exports = "workspace";',
+          );
+          yield* fs.writeFileString(
+            main,
+            'import fixture from "fixture-dependency"; export default fixture;',
+          );
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              for (const [index, bundleDir] of bundleDirs.entries()) {
+                const config = yield* prepareLocalFunctionBundle(
+                  {
+                    main,
+                    isExternal: true,
+                    build: {
+                      install: { "fixture-dependency": "1.0.0" },
+                    },
+                  },
+                  bundleDir,
+                  {
+                    additionalDependencySearchRoots: [workspace],
+                    runNpmInstall: () =>
+                      Effect.sync(() => {
+                        installs += 1;
+                      }),
+                  },
+                );
+                expect(config.dependencySource).toEqual({
+                  _tag: "Workspace",
+                  nodeModulesPath: yield* fs.realPath(nodeModules),
+                });
+                expect(
+                  yield* fs.readLink(path.join(bundleDir, "node_modules")),
+                ).toBe(yield* fs.realPath(nodeModules));
+                yield* writeLocalBundleFiles(bundleDir, [
+                  {
+                    path: "index.js",
+                    content: `export default ${index};`,
+                  },
+                ]);
+              }
+
+              expect(installs).toBe(0);
+              expect(
+                yield* fs.readFileString(path.join(bundleDirs[0]!, "index.js")),
+              ).toBe("export default 0;");
+              expect(
+                yield* fs.readFileString(path.join(bundleDirs[1]!, "index.js")),
+              ).toBe("export default 1;");
+            }),
+          );
+
+          for (const bundleDir of bundleDirs) {
+            expect(yield* fs.exists(bundleDir)).toBe(false);
+          }
+          expect(yield* fs.exists(dependency)).toBe(true);
+        } finally {
+          yield* fs.remove(root, { recursive: true }).pipe(Effect.ignore);
+        }
+      }),
+  );
+
+  it.effect(
     "materializes build.install packages for isolated local children",
     () =>
       Effect.gen(function* () {
@@ -145,6 +245,19 @@ layer(NodeServices.layer)("Lambda function bundle resolution", (it) => {
             JSON.stringify({
               type: "module",
               dependencies: { "fixture-native-data": "1.0.0" },
+            }),
+          );
+          const staleDependency = path.join(
+            sourceDir,
+            "node_modules",
+            "fixture-native-data",
+          );
+          yield* fs.makeDirectory(staleDependency, { recursive: true });
+          yield* fs.writeFileString(
+            path.join(staleDependency, "package.json"),
+            JSON.stringify({
+              name: "fixture-native-data",
+              version: "2.0.0",
             }),
           );
 
@@ -208,6 +321,9 @@ export default {
                     }),
                 },
               );
+              expect(config.dependencySource).toEqual({
+                _tag: "IsolatedInstall",
+              });
 
               for (const version of ["v1", "v2"]) {
                 if (version === "v2") yield* writeHandler(version);

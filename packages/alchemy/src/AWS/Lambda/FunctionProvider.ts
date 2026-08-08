@@ -9,6 +9,7 @@ import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
@@ -292,6 +293,8 @@ export const LocalEmulatorFunctionProvider = (
   Provider.effect(
     Function,
     makeFunctionProvider({
+      archiveCompression: "NATIVE_FAST",
+      localPackageCache: true,
       transformEnvironment: (environment) =>
         localEmulatorFunctionEnvironment(environment, options),
     }),
@@ -343,6 +346,7 @@ export const LocalFunctionProvider = () =>
       const runtime = yield* LiveLambdaRuntime;
       const path = yield* Path.Path;
       const { dotAlchemy } = yield* AlchemyContext;
+      const evaluationCwd = yield* Effect.sync(() => process.cwd());
 
       const liveBinding = (id: string): FunctionBinding => ({
         sid: "alchemy:live-lambda",
@@ -440,7 +444,23 @@ export const LocalFunctionProvider = () =>
           "lambda",
           sanitizeId(id),
         );
-        const config = yield* prepareLocalFunctionBundle(props, bundleDir);
+        const dependencyStartedAt = yield* Clock.currentTimeMillis;
+        const config = yield* prepareLocalFunctionBundle(props, bundleDir, {
+          additionalDependencySearchRoots: [evaluationCwd],
+        });
+        const dependencyFinishedAt = yield* Clock.currentTimeMillis;
+        if (config.dependencySource._tag === "Workspace") {
+          yield* Effect.log(
+            `[${id}] Reused lock-materialized workspace dependencies in ${dependencyFinishedAt - dependencyStartedAt}ms`,
+          );
+          yield* Effect.logDebug(
+            `[${id}] Workspace dependencies: ${config.dependencySource.nodeModulesPath}`,
+          );
+        } else if (config.dependencySource._tag === "IsolatedInstall") {
+          yield* Effect.log(
+            `[${id}] Installed isolated local dependencies in ${dependencyFinishedAt - dependencyStartedAt}ms`,
+          );
+        }
         const handler = props.isExternal
           ? (props.handler ?? "default")
           : "default";
