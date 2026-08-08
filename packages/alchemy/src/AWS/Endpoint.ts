@@ -26,13 +26,19 @@ const makeFromEnvironment = <E, R>(
   return Layer.effect(
     Endpoint.ServiceEndpoint,
     Effect.gen(function* () {
-      const env = yield* AWSEnvironment.current;
+      // Forcing the environment resolves credentials — an unconfigured or
+      // non-interactive profile must not fail layer construction. Defer that
+      // failure to the first credential use and resolve endpoints from the
+      // configured map alone in the meantime.
+      const env = yield* AWSEnvironment.current.pipe(
+        Effect.catchDefect(() => Effect.succeed(undefined)),
+      );
       const serviceEndpoints = yield* ConfiguredServiceEndpoints;
       return {
         resolve: (service: string) =>
           serviceEndpoints[service] ??
-          env.serviceEndpoints?.[service] ??
-          env.endpoint,
+          env?.serviceEndpoints?.[service] ??
+          env?.endpoint,
       } satisfies Endpoint.ServiceEndpointResolver;
     }),
   ).pipe(Layer.provideMerge(configured));

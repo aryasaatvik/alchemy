@@ -1464,7 +1464,10 @@ export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
 
 export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
   Effect.gen(function* () {
-    const alchemyEnv = yield* resolveFunctionRuntimeEnv;
+    // Resolved lazily on first lifecycle use: forcing the AWS environment at
+    // provider-construction time would require credentials before any resource
+    // needs them, breaking `providers()` for unconfigured profiles.
+    const alchemyEnv = yield* Effect.cached(resolveFunctionRuntimeEnv);
 
     const createFunctionName = (id: string, functionName: string | undefined) =>
       Effect.gen(function* () {
@@ -1955,7 +1958,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
       const resolvedRuntimeEnv = resolveFunctionEnvironment(
         env,
         news,
-        alchemyEnv,
+        yield* alchemyEnv,
       );
       const runtimeEnv = options?.transformEnvironment
         ? yield* options.transformEnvironment(resolvedRuntimeEnv)
@@ -2483,7 +2486,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
           archive,
           hash,
           functionName,
-          env: alchemyEnv,
+          env: yield* alchemyEnv,
           session,
         });
 
