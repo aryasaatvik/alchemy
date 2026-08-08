@@ -246,7 +246,6 @@ export const LiveContainerProvider = () =>
           // live deploy pushes to Cloudflare's registry, which the local
           // `workerd` runtime can't pull. See `prepareContainerBuildContext`.
           const contextDir = yield* getStableContextDir(
-            process.cwd(),
             dotAlchemy,
             `${id}-container`,
           );
@@ -411,7 +410,6 @@ export const LiveContainerProvider = () =>
           }
           const runtime = props.runtime ?? "bun";
           const contextDir = yield* getStableContextDir(
-            process.cwd(),
             dotAlchemy,
             `${id}-container`,
           );

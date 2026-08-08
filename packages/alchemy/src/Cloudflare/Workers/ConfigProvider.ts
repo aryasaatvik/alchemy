@@ -7,10 +7,10 @@ import cloudflare_workers from "./cloudflare_workers.ts";
 /**
  * A `ConfigProvider` backed by the running Worker's environment.
  *
- * Values that were auto-bound by the deploy-time `Config` interceptor
- * arrive in the env as `{"_tag":"Redacted","value":...}` markers; they are
- * reified back to their raw source value before `Config` schemas decode
- * them, matching the provider the Worker bridge installs by default.
+ * Values that were auto-bound by the deploy-time `Config` interceptor arrive
+ * through Alchemy's versioned packed env wire. They are reified back to their
+ * raw source value before `Config` schemas decode them, matching the provider
+ * the Worker bridge installs by default.
  */
 export const WorkerConfigProvider = () =>
   cloudflare_workers.pipe(

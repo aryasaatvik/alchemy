@@ -1,84 +1,153 @@
+import { reifyBoundConfigProvider } from "@/Runtime";
 import {
+  isPackedEnvValue,
   packEnvValue,
   packEnvValueKeepRedacted,
   unpackEnvValue,
-} from "@/RuntimeContext.ts";
+} from "@/RuntimeContext";
 import { describe, expect, it } from "alchemy-test";
+import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
-describe("packEnvValue / unpackEnvValue", () => {
-  it("stores a plain string verbatim (no quote characters on the wire)", () => {
-    // #1243: a queue name must reach the env binding bare so raw readers
-    // (dashboard, MessageBatch.queue comparisons) see the real name.
-    expect(packEnvValue("my-queue")).toBe("my-queue");
-    expect(packEnvValue("https://example.com/a?b=c")).toBe(
-      "https://example.com/a?b=c",
-    );
-  });
-
-  it("keeps ambiguous strings packed so the read side can't reinterpret them", () => {
-    // These would JSON.parse into a different value if stored bare.
-    for (const s of [
-      "123",
-      "-4.5",
-      "null",
+describe("RuntimeContext environment values", () => {
+  it("preserves every unprefixed environment value as a string", () => {
+    for (const raw of [
+      "100000000004",
+      "42",
       "true",
-      '"quoted"',
-      '{"a":1}',
-      "[1]",
-    ]) {
-      expect(packEnvValue(s)).toBe(JSON.stringify(s));
-      expect(unpackEnvValue(packEnvValue(s))).toBe(s);
-    }
-  });
-
-  it("round-trips every string exactly", () => {
-    for (const s of [
-      "my-queue",
-      "",
-      " ",
-      "123",
+      "false",
       "null",
-      "Infinity",
-      '"unterminated',
-      "{not json",
-      "line\nbreak",
+      '"quoted"',
+      '{"enabled":true}',
+      '["json","array"]',
+      "~1xunknown-tag",
     ]) {
-      expect(unpackEnvValue(packEnvValue(s))).toBe(s);
+      expect(unpackEnvValue(raw)).toBe(raw);
+    }
+    expect(unpackEnvValue(undefined)).toBeUndefined();
+  });
+
+  it("does not reinterpret the ambiguous legacy JSON wire", () => {
+    const legacyNumber = "100000000004";
+    const legacySecret = '{"_tag":"Redacted","value":"secret"}';
+    expect(unpackEnvValue(legacyNumber)).toBe(legacyNumber);
+    expect(unpackEnvValue(legacySecret)).toBe(legacySecret);
+  });
+
+  it("keeps ordinary strings raw and escapes reserved prefixes", () => {
+    expect(packEnvValue("100000000004")).toBe("100000000004");
+    expect(isPackedEnvValue(packEnvValue("100000000004"))).toBe(false);
+
+    for (const value of ["~1j42", 'alchemy:env:v1:"legacy"']) {
+      const packed = packEnvValue(value);
+      expect(isPackedEnvValue(packed)).toBe(true);
+      expect(unpackEnvValue(packed)).toBe(value);
     }
   });
 
-  it("round-trips non-string JSON values", () => {
-    expect(unpackEnvValue(packEnvValue(8080))).toBe(8080);
-    expect(unpackEnvValue(packEnvValue(true))).toBe(true);
-    expect(unpackEnvValue(packEnvValue({ a: [1, "x"] }))).toEqual({
-      a: [1, "x"],
-    });
-  });
-
-  it("round-trips Redacted through the marker", () => {
-    const out = unpackEnvValue<Redacted.Redacted<string>>(
-      packEnvValue(Redacted.make("s3cret")),
+  it("round-trips explicitly packed JSON values", () => {
+    for (const value of [
+      42,
+      true,
+      false,
+      null,
+      { enabled: true },
+      ["json", 1],
+    ]) {
+      const packed = packEnvValue(value);
+      expect(isPackedEnvValue(packed)).toBe(true);
+      expect(unpackEnvValue(packed)).toEqual(value);
+    }
+    expect(() => packEnvValue(undefined)).toThrow(
+      "Cannot pack undefined as an environment value",
     );
-    expect(Redacted.isRedacted(out)).toBe(true);
-    expect(Redacted.value(out!)).toBe("s3cret");
   });
 
-  it("packEnvValueKeepRedacted keeps the wrapper outside the packed string", () => {
-    const packed = packEnvValueKeepRedacted(Redacted.make("s3cret"));
-    expect(Redacted.isRedacted(packed)).toBe(true);
-    const inner = Redacted.value(packed as Redacted.Redacted<string>);
-    const out = unpackEnvValue<Redacted.Redacted<string>>(inner);
-    expect(Redacted.isRedacted(out)).toBe(true);
-    expect(Redacted.value(out!)).toBe("s3cret");
-    // Non-Redacted values stay plain strings.
-    expect(packEnvValueKeepRedacted("my-queue")).toBe("my-queue");
+  it("decodes the previous versioned wire", () => {
+    expect(unpackEnvValue('alchemy:env:v1:"bound"')).toBe("bound");
+    expect(unpackEnvValue("alchemy:env:v1:42")).toBe(42);
+
+    const secret = unpackEnvValue(
+      'alchemy:env:v1:{"_tag":"Redacted","value":"secret"}',
+    );
+    expect(Redacted.isRedacted(secret)).toBe(true);
+    expect(Redacted.value(secret as Redacted.Redacted<unknown>)).toBe("secret");
   });
 
-  it("unpackEnvValue passes through raw env vars a user set directly", () => {
-    expect(unpackEnvValue("my-queue")).toBe("my-queue");
-    expect(unpackEnvValue(undefined)).toBeUndefined();
-    // A user-set raw numeric env var still parses — unchanged behavior.
-    expect(unpackEnvValue("123")).toBe(123);
+  it("round-trips packed secrets without exposing the outer secret channel", () => {
+    const stringSecret = packEnvValue(Redacted.make("secret"));
+    expect(stringSecret).toBe("~1rsecret");
+    expect(
+      Redacted.value(
+        unpackEnvValue(stringSecret) as Redacted.Redacted<unknown>,
+      ),
+    ).toBe("secret");
+
+    const secret = Redacted.make({ token: "secret" });
+    const packed = packEnvValue(secret);
+    const unpacked = unpackEnvValue(packed);
+    expect(Redacted.isRedacted(unpacked)).toBe(true);
+    expect(Redacted.value(unpacked as Redacted.Redacted<unknown>)).toEqual({
+      token: "secret",
+    });
+
+    const kept = packEnvValueKeepRedacted(secret);
+    expect(Redacted.isRedacted(kept)).toBe(true);
+    const keptPacked = Redacted.value(kept as Redacted.Redacted<string>);
+    expect(isPackedEnvValue(keptPacked)).toBe(true);
+    expect(
+      Redacted.value(unpackEnvValue(keptPacked) as Redacted.Redacted<unknown>),
+    ).toEqual({ token: "secret" });
   });
+
+  it.effect(
+    "reifies only packed values for generated runtime Config reads",
+    () => {
+      const env = {
+        RAW_ACCOUNT_ID: "100000000004",
+        RAW_BOOLEAN: "false",
+        RAW_NULL: "null",
+        RAW_JSON: '{"enabled":true}',
+        PACKED_STRING: packEnvValue("bound"),
+        PACKED_NUMBER: packEnvValue(42),
+        PACKED_BOOLEAN: packEnvValue(true),
+        PACKED_JSON: packEnvValue({ enabled: true }),
+        PACKED_SECRET: Redacted.value(
+          packEnvValueKeepRedacted(
+            Redacted.make("secret"),
+          ) as Redacted.Redacted<string>,
+        ),
+      };
+      const provider = reifyBoundConfigProvider(
+        ConfigProvider.fromUnknown(env),
+        env,
+      );
+
+      return Effect.gen(function* () {
+        const values = yield* Effect.all({
+          rawAccountId: Config.string("RAW_ACCOUNT_ID"),
+          rawBoolean: Config.string("RAW_BOOLEAN"),
+          rawNull: Config.string("RAW_NULL"),
+          rawJson: Config.string("RAW_JSON"),
+          packedString: Config.string("PACKED_STRING"),
+          packedNumber: Config.number("PACKED_NUMBER"),
+          packedBoolean: Config.boolean("PACKED_BOOLEAN"),
+          packedJson: Config.string("PACKED_JSON"),
+          packedSecret: Config.redacted("PACKED_SECRET"),
+        });
+
+        expect(values.rawAccountId).toBe("100000000004");
+        expect(values.rawBoolean).toBe("false");
+        expect(values.rawNull).toBe("null");
+        expect(values.rawJson).toBe('{"enabled":true}');
+        expect(values.packedString).toBe("bound");
+        expect(values.packedNumber).toBe(42);
+        expect(values.packedBoolean).toBe(true);
+        expect(values.packedJson).toBe('{"enabled":true}');
+        expect(Redacted.value(values.packedSecret)).toBe("secret");
+      }).pipe(Effect.provide(ConfigProvider.layer(provider)));
+    },
+  );
 });

@@ -40,6 +40,7 @@ import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { isLocalId } from "../LocalRuntime.ts";
+import { isSelfUrl } from "./Worker.ts";
 import type { WorkerBinding } from "./WorkerBinding.ts";
 
 export class WorkerValidationError extends Schema.TaggedError<WorkerValidationError>()(
@@ -50,6 +51,83 @@ export class WorkerValidationError extends Schema.TaggedError<WorkerValidationEr
     value: Schema.Unknown,
   },
 ) {}
+
+/**
+ * Env keys that the local runtime always supplies itself. A user-supplied
+ * `env` entry with the same name must not be emitted a second time — workerd
+ * rejects duplicate bindings.
+ */
+const STANDARD_RUNTIME_BINDING_NAMES = new Set([
+  "ALCHEMY_PHASE",
+  "ALCHEMY_WORKER_NAME",
+  "ALCHEMY_STACK_NAME",
+  "ALCHEMY_STAGE",
+  "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
+]);
+
+/**
+ * The identity bindings every locally-emulated Worker receives, plus the
+ * user's own `env` entries.
+ *
+ * `accountId` is validated here rather than at the call site: a blank account
+ * would otherwise be materialized as an empty `ALCHEMY_CLOUDFLARE_ACCOUNT_ID`
+ * binding and surface much later as an opaque 400 from an account-scoped API.
+ *
+ * `config.env` must already have its `Worker.URL` sentinels substituted with
+ * the resolved dev-proxy URL — `selfUrl` here only backstops any sentinel the
+ * caller left in place.
+ */
+export const makeLocalWorkerStandardBindings = Effect.fn(function* ({
+  accountId,
+  workerName,
+  stackName,
+  stage,
+  env,
+  descriptorNames,
+  selfUrl,
+}: {
+  readonly accountId: string;
+  readonly workerName: string;
+  readonly stackName: string;
+  readonly stage: string;
+  readonly env: Record<string, unknown> | undefined;
+  readonly descriptorNames: ReadonlySet<string>;
+  readonly selfUrl: string | undefined;
+}) {
+  if (typeof accountId !== "string" || accountId.trim().length === 0) {
+    return yield* new WorkerValidationError({
+      message: "Cloudflare account ID is missing from the local Worker runtime",
+      hint: "Set CLOUDFLARE_ACCOUNT_ID or reconfigure the active Alchemy profile",
+      value: accountId,
+    });
+  }
+
+  return [
+    Text.local("ALCHEMY_PHASE", "runtime"),
+    Text.local("ALCHEMY_WORKER_NAME", workerName),
+    Text.local("ALCHEMY_STACK_NAME", stackName),
+    Text.local("ALCHEMY_STAGE", stage),
+    Text.local("ALCHEMY_CLOUDFLARE_ACCOUNT_ID", accountId),
+    ...Object.entries(env ?? {})
+      .filter(
+        ([key, value]) =>
+          value !== undefined &&
+          !descriptorNames.has(key) &&
+          !STANDARD_RUNTIME_BINDING_NAMES.has(key),
+      )
+      .map(([key, value]) => {
+        if (isSelfUrl(value)) {
+          return Text.local(key, selfUrl!);
+        }
+        const unredacted = Redacted.isRedacted(value)
+          ? Redacted.value(value)
+          : value;
+        return typeof unredacted === "string"
+          ? Text.local(key, unredacted)
+          : Json.local(key, unredacted);
+      }),
+  ] satisfies BindingHook<BindingServices>[];
+});
 
 export const toRuntimeBinding = Effect.fn(function* (
   b: WorkerBinding,
@@ -306,21 +384,15 @@ export const materializeRuntimeBindings = Effect.fn(function* (
     config.bindingDescriptors.map((descriptor) => descriptor.name),
   );
   const workerBindings: BindingHook<BindingServices>[] = [
-    Text.local("ALCHEMY_PHASE", "runtime"),
-    Text.local("ALCHEMY_WORKER_NAME", config.name),
-    Text.local("ALCHEMY_STACK_NAME", options.stack.name),
-    Text.local("ALCHEMY_STAGE", options.stack.stage),
-    Text.local("ALCHEMY_CLOUDFLARE_ACCOUNT_ID", options.accountId),
-    ...Object.entries(config.env ?? {})
-      .filter(([key]) => !descriptorNames.has(key))
-      .map(([key, value]) => {
-        const unredacted = Redacted.isRedacted(value)
-          ? Redacted.value(value)
-          : value;
-        return typeof unredacted === "string"
-          ? Text.local(key, unredacted)
-          : Json.local(key, unredacted);
-      }),
+    ...(yield* makeLocalWorkerStandardBindings({
+      accountId: options.accountId,
+      workerName: config.name,
+      stackName: options.stack.name,
+      stage: options.stack.stage,
+      env: config.env,
+      descriptorNames,
+      selfUrl: options.selfUrl,
+    })),
     ...(config.hasAssets ? [Assets.local("ASSETS")] : []),
     ...(config.devAccess !== undefined
       ? [Json.local("ALCHEMY_DEV_ACCESS", config.devAccess)]

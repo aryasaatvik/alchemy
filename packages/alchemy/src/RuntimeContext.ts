@@ -51,6 +51,28 @@ export interface BaseRuntimeContext {
 export const sanitizeKey = (key: string): string =>
   key.replaceAll(/[^a-zA-Z0-9]/g, "_");
 
+/** Compact versioned discriminator for values serialized by {@link packEnvValue}. */
+export const PACKED_ENV_VALUE_PREFIX = "~1";
+
+/** Previous packed-value discriminator, retained for deployed runtime compatibility. */
+const LEGACY_PACKED_ENV_VALUE_PREFIX = "alchemy:env:v1:";
+
+const PACKED_ENV_VALUE_TAGS = ["s", "j", "r", "R"] as const;
+type PackedEnvValueTag = (typeof PACKED_ENV_VALUE_TAGS)[number];
+
+const compactTag = (raw: string): PackedEnvValueTag | undefined => {
+  if (!raw.startsWith(PACKED_ENV_VALUE_PREFIX)) {
+    return undefined;
+  }
+  const tag = raw.at(PACKED_ENV_VALUE_PREFIX.length);
+  return PACKED_ENV_VALUE_TAGS.find((candidate) => candidate === tag);
+};
+
+/** Whether an environment string uses an explicit packed-value wire. */
+export const isPackedEnvValue = (raw: string): boolean =>
+  raw.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX) ||
+  compactTag(raw) !== undefined;
+
 /**
  * The wire format `RuntimeContext.set`/`get` use to carry a `Redacted` value
  * through an environment variable. `JSON.stringify(Redacted)` emits the
@@ -74,44 +96,35 @@ export const isRedactedMarker = (value: unknown): value is RedactedMarker =>
   "value" in value;
 
 /**
- * Returns true when {@link unpackEnvValue}'s `JSON.parse` would reinterpret
- * the raw string as something other than itself — a number (`"123"`), a
- * boolean, `null`, or a JSON document. Such strings must stay
- * `JSON.stringify`-packed; everything else round-trips verbatim through the
- * parse-failure fallback.
+ * Serialize a binding value for an env var behind a compact versioned wire.
+ * Ordinary strings remain verbatim. Strings beginning with a reserved prefix
+ * are escaped, JSON values retain their types, and `Redacted<string>` uses a
+ * raw-string payload so the common secret-binding path adds only three bytes.
  */
-const parsesAsJson = (value: string): boolean => {
-  try {
-    JSON.parse(value);
-    return true;
-  } catch {
-    return false;
+export const packEnvValue = (value: unknown): string => {
+  if (Redacted.isRedacted(value)) {
+    const redacted = Redacted.value(value);
+    if (typeof redacted === "string") {
+      return `${PACKED_ENV_VALUE_PREFIX}r${redacted}`;
+    }
+    const payload = JSON.stringify(redacted);
+    if (payload === undefined) {
+      throw new TypeError("Cannot pack undefined as an environment value");
+    }
+    return `${PACKED_ENV_VALUE_PREFIX}R${payload}`;
   }
+  if (typeof value === "string") {
+    return value.startsWith(PACKED_ENV_VALUE_PREFIX) ||
+      value.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX)
+      ? `${PACKED_ENV_VALUE_PREFIX}s${value}`
+      : value;
+  }
+  const payload = JSON.stringify(value);
+  if (payload === undefined) {
+    throw new TypeError("Cannot pack undefined as an environment value");
+  }
+  return `${PACKED_ENV_VALUE_PREFIX}j${payload}`;
 };
-
-/**
- * Serialize a binding value for an env var: `Redacted` values are packed as
- * a {@link RedactedMarker}, non-string values as JSON.
- *
- * A plain string is stored **verbatim** whenever `JSON.parse` would reject
- * it — which is almost every real-world string (names, URLs, ids). Packing
- * those too would put `"my-queue"` (quote characters included) on the wire,
- * where anything that consumes the raw binding without going through
- * {@link unpackEnvValue} — the Cloudflare dashboard, a hand-written env
- * read, a queue-name comparison against `MessageBatch.queue` — sees the
- * quoted form and mismatches (#1243). Only ambiguous strings (`"123"`,
- * `"null"`, JSON documents) keep the pack so the read side can't
- * reinterpret them.
- */
-export const packEnvValue = (value: unknown): string =>
-  Redacted.isRedacted(value)
-    ? JSON.stringify({
-        _tag: "Redacted",
-        value: Redacted.value(value),
-      } satisfies RedactedMarker)
-    : typeof value === "string" && !parsesAsJson(value)
-      ? value
-      : JSON.stringify(value);
 
 /**
  * Like {@link packEnvValue}, but a `Redacted` input keeps its `Redacted`
@@ -129,10 +142,10 @@ export const packEnvValueKeepRedacted = (
 
 /**
  * Parse an env-var string produced by {@link packEnvValue} back into its
- * value: rebuild `Redacted` from the marker, return other JSON values
- * as-is, and fall back to the raw string for non-JSON input (a verbatim
- * string from `packEnvValue`, or an env var the user set directly).
- * `undefined` passes through.
+ * value. Unprefixed values and unknown compact tags are ordinary environment
+ * strings and pass through verbatim, even when their contents are valid JSON.
+ * The previous `alchemy:env:v1:` wire remains readable. `undefined` passes
+ * through.
  *
  * Runtime `get` accessors MUST feed this from the raw environment
  * (`process.env[key]` / the platform env object) — never through
@@ -147,14 +160,28 @@ export const unpackEnvValue = <T>(raw: string | undefined): T | undefined => {
   if (raw === undefined) {
     return undefined;
   }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (isRedactedMarker(parsed)) {
-      return Redacted.make(parsed.value) as unknown as T;
-    }
-    return parsed as T;
-  } catch {
-    return raw as unknown as T; // assume it's just a string
+  if (raw.startsWith(LEGACY_PACKED_ENV_VALUE_PREFIX)) {
+    const parsed: unknown = JSON.parse(
+      raw.slice(LEGACY_PACKED_ENV_VALUE_PREFIX.length),
+    );
+    return (
+      isRedactedMarker(parsed) ? Redacted.make(parsed.value) : parsed
+    ) as T;
+  }
+  const tag = compactTag(raw);
+  if (tag === undefined) {
+    return raw as unknown as T;
+  }
+  const payload = raw.slice(PACKED_ENV_VALUE_PREFIX.length + 1);
+  switch (tag) {
+    case "s":
+      return payload as T;
+    case "j":
+      return JSON.parse(payload) as T;
+    case "r":
+      return Redacted.make(payload) as T;
+    case "R":
+      return Redacted.make(JSON.parse(payload)) as T;
   }
 };
 

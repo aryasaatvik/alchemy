@@ -2,7 +2,6 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { getAuthProvider } from "../Auth/AuthProvider.ts";
 import { ALCHEMY_PROFILE, AlchemyProfile } from "../Auth/Profile.ts";
 import {
@@ -11,9 +10,40 @@ import {
   type CloudflareResolvedCredentials,
 } from "./Auth/AuthProvider.ts";
 
+/**
+ * Stable Cloudflare identity available to both deployment providers and
+ * generated application runtimes.
+ *
+ * Authentication is deliberately owned by the separate `Credentials`
+ * service. Runtime hosts only need the account identity required to resolve
+ * resource-derived configuration; they must not receive Alchemy's deployment
+ * credential as an environment variable.
+ */
+export interface CloudflareRuntimeIdentity {
+  readonly type: "runtime";
+  readonly accountId: string;
+  readonly source: { readonly type: "runtime" };
+}
+
+/**
+ * The account-only environment available inside a deployed Worker or
+ * container. Runtime hosts deliberately receive no deployment credentials.
+ */
+export const runtimeIdentity = (
+  accountId: string,
+): CloudflareRuntimeIdentity => ({
+  type: "runtime",
+  accountId,
+  source: { type: "runtime" },
+});
+
+export type CloudflareEnvironmentShape =
+  | CloudflareResolvedCredentials
+  | CloudflareRuntimeIdentity;
+
 export class CloudflareEnvironment extends Context.Service<
   CloudflareEnvironment,
-  Effect.Effect<CloudflareResolvedCredentials>
+  Effect.Effect<CloudflareEnvironmentShape>
 >()("Cloudflare::CloudflareEnvironment") {
   readonly kind = "Environment" as const;
 }
@@ -23,13 +53,11 @@ const CLOUDFLARE_ACCOUNT_ID = Config.string("CLOUDFLARE_ACCOUNT_ID");
 export const fromEnv = () =>
   Layer.effect(
     CloudflareEnvironment,
-    Effect.gen(function* () {
-      const accountId = yield* CLOUDFLARE_ACCOUNT_ID.pipe(
-        Config.option,
-        Config.map(Option.getOrUndefined),
-      );
-      return { account: accountId } as any;
-    }),
+    CLOUDFLARE_ACCOUNT_ID.pipe(
+      Effect.map((accountId) => runtimeIdentity(accountId)),
+      Effect.orDie,
+      Effect.cached,
+    ),
   );
 
 export const fromProfile = () =>

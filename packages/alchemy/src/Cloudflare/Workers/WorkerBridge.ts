@@ -20,7 +20,10 @@ import {
 import { Self } from "../../Self.ts";
 import { Stack } from "../../Stack.ts";
 import { buildEventTelemetry } from "../../Telemetry.ts";
-import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import {
+  CloudflareEnvironment,
+  runtimeIdentity,
+} from "../CloudflareEnvironment.ts";
 import cloudflare_workers from "./cloudflare_workers.ts";
 import { isScopeEjected } from "./HttpServer.ts";
 import {
@@ -297,10 +300,9 @@ const getSharedBuild = (
               ConfigProvider.ConfigProvider,
               ConfigProvider.orElse(
                 ConfigProvider.fromUnknown({ ALCHEMY_PHASE: "runtime" }),
-                // Auto-bound `Config` values arrive in `env` as
-                // `{"_tag":"Redacted","value":...}` markers; reify them so a
-                // `Config` re-read inside a request handler decodes the raw
-                // source value instead of the marker JSON.
+                // Auto-bound `Config` values arrive through Alchemy's
+                // versioned packed env wire; reify them so a `Config` re-read
+                // inside a request handler decodes the raw source value.
                 reifyBoundConfigProvider(
                   ConfigProvider.fromUnknown(env),
                   env as Record<string, unknown>,
@@ -319,11 +321,11 @@ const getSharedBuild = (
           Layer.provideMerge(
             Layer.succeed(
               CloudflareEnvironment,
-              // TODO(sam): fix this with maybe a CloudflareAccountId Effect service
-              // @ts-expect-error - this is hacky, but we only need and have this property
-              Effect.succeed({
-                account: (env as any).ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
-              }),
+              Effect.succeed(
+                runtimeIdentity(
+                  (env as Record<string, string>).ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
+                ),
+              ),
             ),
           ),
           Layer.provideMerge(
