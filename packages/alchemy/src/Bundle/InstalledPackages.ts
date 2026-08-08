@@ -66,6 +66,11 @@ export interface InstallResolvedPackagesOptions {
   /** Locked parent-package → child-package versions used to pin transitives. */
   readonly overrides?: PackageOverrides;
   readonly architecture: "x86_64" | "arm64";
+  /**
+   * Installation target. Lambda artifacts default to Linux; local handler
+   * children use the host so native packages match the process loading them.
+   */
+  readonly target?: "lambda" | "host";
   readonly runNpmInstall?: NpmInstallRunner;
 }
 
@@ -162,15 +167,23 @@ export function matchesPackageRoot(moduleId: string, root: string): boolean {
 
 export function npmInstallArgs(
   architecture: "x86_64" | "arm64",
+  _packageNames?: ReadonlyArray<string>,
+  target: "lambda" | "host" = "lambda",
 ): ReadonlyArray<string> {
+  if (target === "host") {
+    return hostInstallArgs();
+  }
   return npmCommandArgs("ci", architecture);
 }
 
 export function npmLockfileArgs(
   architecture: "x86_64" | "arm64",
+  target: "lambda" | "host" = "lambda",
 ): ReadonlyArray<string> {
   return [
-    ...npmCommandArgs("install", architecture),
+    ...(target === "host"
+      ? hostInstallArgs()
+      : npmCommandArgs("install", architecture)),
     "--package-lock-only",
     "--ignore-scripts",
   ];
@@ -178,9 +191,19 @@ export function npmLockfileArgs(
 
 export function npmPlainInstallArgs(
   architecture: "x86_64" | "arm64",
+  target: "lambda" | "host" = "lambda",
 ): ReadonlyArray<string> {
+  if (target === "host") {
+    return hostInstallArgs();
+  }
   return npmCommandArgs("install", architecture);
 }
+
+/**
+ * Local handler children install for the host platform so native packages
+ * match the process that loads them.
+ */
+const hostInstallArgs = (): ReadonlyArray<string> => ["install", "--force"];
 
 const npmCommandArgs = (
   command: "ci" | "install",
@@ -363,12 +386,22 @@ export function installResolvedPackages(
           );
           if (hasOverrides) {
             // Generate a lock so `npm ci` reproduces the override-pinned graph.
-            yield* runInstall(directory, npmLockfileArgs(options.architecture));
-            yield* runInstall(directory, npmInstallArgs(options.architecture));
+            yield* runInstall(
+              directory,
+              npmLockfileArgs(options.architecture, options.target),
+            );
+            yield* runInstall(
+              directory,
+              npmInstallArgs(
+                options.architecture,
+                packageNames,
+                options.target,
+              ),
+            );
           } else {
             yield* runInstall(
               directory,
-              npmPlainInstallArgs(options.architecture),
+              npmPlainInstallArgs(options.architecture, options.target),
             );
           }
           return yield* readArtifactFiles(directory);

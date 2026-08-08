@@ -155,6 +155,13 @@ describe("Lambda external packages", () => {
     ]);
   });
 
+  it("uses the current platform for local handler children", () => {
+    expect(npmInstallArgs("arm64", ["sharp"], "host")).toEqual([
+      "install",
+      "--force",
+    ]);
+  });
+
   it.effect("resolves catalog versions from pnpm-workspace.yaml", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

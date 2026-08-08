@@ -23,6 +23,7 @@ export default [
   // the cli bundle below).
   defineConfig({
     entry: ["bin/exec.ts"],
+    external: ["cloudflare:workers"],
     format: ["esm"],
     clean: false,
     shims: true,

@@ -1,3 +1,4 @@
+import { AlchemyContextLive } from "@/AlchemyContext.ts";
 import * as Cloudflare from "@/Cloudflare";
 import { WorkerBundle } from "@/Cloudflare/Workers/Sources/Rolldown";
 import * as Alchemy from "@/index.ts";
@@ -6,6 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, layer } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -34,7 +36,47 @@ const writeFixture = Effect.fn(function* (files: Record<string, string>) {
   return root;
 });
 
-layer(NodeServices.layer)("WorkerBundle", (it) => {
+const workerBundleServices = Layer.provideMerge(
+  AlchemyContextLive,
+  NodeServices.layer,
+);
+
+layer(workerBundleServices)("WorkerBundle", (it) => {
+  it.effect("preserves workerd virtual-module imports", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* writeFixture({
+        "package.json": "{}",
+        "worker.mjs": [
+          `import { env } from "cloudflare:workers";`,
+          `export default {`,
+          `  fetch: () => new Response(String(env.TEST_VALUE)),`,
+          `};`,
+        ].join("\n"),
+      });
+
+      try {
+        const bundler = yield* WorkerBundle;
+        const output = yield* bundler.build({
+          id: "worker-bundle-workerd-virtual-module",
+          main: path.join(root, "worker.mjs"),
+          compatibility: { date: "2026-03-17", flags: [] },
+          entry: { kind: "external" },
+          stack: { name: "worker-bundle-test", stage: "test" },
+          extraOptions: undefined,
+        });
+
+        const code = output.files
+          .map((file) => decode(file.content))
+          .join("\n");
+        expect(code).toMatch(/from\s*["']cloudflare:workers["']/);
+      } finally {
+        yield* fs.remove(root, { recursive: true }).pipe(Effect.ignore);
+      }
+    }),
+  );
+
   // Regression test for #880: CJS dependencies (like `pg`) that
   // `require("events")` must have those requires converted into ESM imports
   // of the workerd-provided Node builtins. Left unconverted, rolldown emits
@@ -47,7 +89,6 @@ layer(NodeServices.layer)("WorkerBundle", (it) => {
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const root = yield* writeFixture({
-          // Anchors findCwdForBundle so bundle output stays in the temp dir.
           "package.json": "{}",
           "dep.cjs": [
             `const { EventEmitter } = require("events");`,
