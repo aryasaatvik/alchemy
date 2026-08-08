@@ -73,11 +73,10 @@ import { CurrentRuntimeContext, unpackEnvValue } from "./RuntimeContext.ts";
 export type TelemetryLayer = Layer.Layer<never, any, any>;
 
 /**
- * Read one bound value back at runtime. `rc.set` packs values for the env
- * var wire (plain values JSON-stringified, `Redacted` as a marker routed
- * through the secret channel), so the raw env string must be unpacked with
- * {@link unpackEnvValue} — it handles all three shapes (packed JSON,
- * Redacted marker, and a raw string set directly in the environment).
+ * Read one bound value back at runtime. `rc.set` uses Alchemy's versioned env
+ * wire (`Redacted` still routes through the secret channel), so the raw env
+ * string must be decoded with {@link unpackEnvValue}. Ordinary unprefixed env
+ * strings remain strings.
  */
 const readBoundValue = (key: string): Effect.Effect<unknown> =>
   Config.string(key).pipe(
