@@ -25,6 +25,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as os from "node:os";
+import { AlchemyContext } from "../../AlchemyContext.ts";
 import type * as Bundle from "../../Bundle/Bundle.ts";
 import * as LocalProvider from "../../Local/LocalProvider.ts";
 import { Stack } from "../../Stack.ts";
@@ -55,6 +56,7 @@ import { WorkerBundle, type WorkerBundleOptions } from "./Sources/Rolldown.ts";
 import { createWorkerName } from "./WorkerName.ts";
 import { resolveTailConsumers } from "./WorkerProvider.ts";
 import {
+  makeLocalWorkerStandardBindings,
   materializeRuntimeBindings,
   WorkerValidationError,
 } from "./RuntimeBindings.ts";
@@ -64,6 +66,42 @@ import { DEFAULT_DEV_PORT, type ViteChildConfig } from "./ViteChild.shared.ts";
 /** Local dev-server options (the worker-mode arm of `WorkerProps["dev"]`). */
 type DevServerOptions = Extract<WorkerProps["dev"], { mode?: "worker" }> & {
   port: number;
+};
+
+/**
+ * Keep a local Worker's proxy URL stable across dev-sidecar restarts.
+ *
+ * The proxy registry is process-local, while the last successful URL is
+ * durable Alchemy state. Reusing that port prevents downstream local
+ * resources from briefly observing a stale URL while the Worker restarts.
+ * An explicitly configured port remains authoritative.
+ *
+ * @internal
+ */
+export const resolveDevServerOptions = (
+  dev: DevServerOptions,
+  explicitPort: number | undefined,
+  previousUrl: string | undefined,
+): DevServerOptions => {
+  if (explicitPort !== undefined) return { ...dev, port: explicitPort };
+  if (previousUrl !== undefined && URL.canParse(previousUrl)) {
+    const url = new URL(previousUrl);
+    const port = Number(url.port);
+    if (
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "0.0.0.0" ||
+        url.hostname === "::1" ||
+        url.hostname === "[::1]") &&
+      Number.isSafeInteger(port) &&
+      port > 0 &&
+      port <= 65_535
+    ) {
+      return { ...dev, port };
+    }
+  }
+  return dev;
 };
 
 // Hosts that bind every interface — the dev server is then reachable at
@@ -99,12 +137,20 @@ const resolveLocalUrls = (serverUrl: URL): Effect.Effect<string[]> =>
     ];
   });
 
+// Re-exported for the local-runtime identity tests, which pin this
+// module's public surface (main #1076 moved the implementation into
+// RuntimeBindings.ts so the vite child runner can share it).
+export { makeLocalWorkerStandardBindings, WorkerValidationError };
+
 export const LocalWorkerProvider = () =>
   LocalProvider.make(
     Worker,
     LOCAL_ENTRY_URL,
     Effect.gen(function* () {
-      const bundler = yield* WorkerBundle;
+      const alchemyContext = yield* AlchemyContext;
+      const bundler = yield* WorkerBundle.pipe(
+        Effect.provideService(AlchemyContext, alchemyContext),
+      );
       const runtime = yield* Runtime;
       const stack = yield* Stack;
       const storageDirectory = yield* localStorageDirectory;
@@ -861,22 +907,24 @@ export const LocalWorkerProvider = () =>
           | FileSystem.FileSystem
           | Path.Path
           | Scope.Scope
-        > = isPythonMain(worker.bundleOptions.main)
-          ? watchPythonWorkerBundle({
-              id: worker.bundleOptions.id,
-              main: worker.bundleOptions.main,
-              compatibility: worker.compatibility,
-            })
-          : worker.prebuilt
-            ? // Prebuilt (`bundle: false`): fs-watch the entry directory
-              // and re-read the module graph byte-for-byte — running the
-              // rolldown watcher would re-bundle the prebuilt artifact
-              // and violate the deploy path's byte-for-byte contract.
-              watchPrebuiltWorkerBundle({
+        > = (
+          isPythonMain(worker.bundleOptions.main)
+            ? watchPythonWorkerBundle({
+                id: worker.bundleOptions.id,
                 main: worker.bundleOptions.main,
-                rules: worker.rules,
+                compatibility: worker.compatibility,
               })
-            : bundler.watch(worker.bundleOptions);
+            : worker.prebuilt
+              ? // Prebuilt (`bundle: false`): fs-watch the entry directory
+                // and re-read the module graph byte-for-byte — running the
+                // rolldown watcher would re-bundle the prebuilt artifact
+                // and violate the deploy path's byte-for-byte contract.
+                watchPrebuiltWorkerBundle({
+                  main: worker.bundleOptions.main,
+                  rules: worker.rules,
+                })
+              : bundler.watch(worker.bundleOptions)
+        ).pipe(Stream.provideService(AlchemyContext, alchemyContext));
         yield* serveBundleStream(worker, proxy, bundles);
         return proxy.url;
       });
@@ -1102,6 +1150,7 @@ export const LocalWorkerProvider = () =>
             AlchemyArtifacts,
             makeScopedArtifacts(createArtifactStore(), worker.id),
           ),
+          Effect.provideService(AlchemyContext, alchemyContext),
         );
         const devCtx: DevContext = {
           id: worker.id,
@@ -1191,7 +1240,7 @@ export const LocalWorkerProvider = () =>
           };
         }),
 
-        start: Effect.fn(function* ({ id, config, invalidate }) {
+        start: Effect.fn(function* ({ id, news, output, config, invalidate }) {
           const { accountId } = yield* cloudflareEnv;
 
           // `dev: { mode: "external" }` opts out of running a local Worker
@@ -1228,11 +1277,17 @@ export const LocalWorkerProvider = () =>
           // the proxy is stable per worker id (the same instance `runWorker`
           // / `runVite` attach to below), so the URL is known before workerd
           // starts. Trailing slash stripped to match the cloud value's shape.
+          const requestedDev = (news as WorkerProps).dev;
+          const dev = resolveDevServerOptions(
+            config.dev,
+            requestedDev?.mode === "external" ? undefined : requestedDev?.port,
+            output?.url,
+          );
           const needsSelfUrl =
             config.bindingDescriptors.some((b) => b.type === "self_url") ||
             Object.values(config.env ?? {}).some(isSelfUrl);
           const selfUrl = needsSelfUrl
-            ? (yield* maybeStartProxy(id, config.dev)).url
+            ? (yield* maybeStartProxy(id, dev)).url
                 .toString()
                 .replace(/\/$/, "")
             : undefined;
@@ -1254,8 +1309,14 @@ export const LocalWorkerProvider = () =>
           );
           const worker: RunnableWorkerConfig = {
             ...config,
+            // `env` already has its `Worker.URL` sentinels substituted (see
+            // above), so the Vite dev server inlines the local URL into
+            // VITE_*-prefixed define entries.
             env,
-            dev: config.dev,
+            // Integration keeps the requested-port / prior-URL resolution
+            // (`news`/`output`) rather than passing `config.dev` straight
+            // through, so a dev proxy keeps a stable address across restarts.
+            dev,
             workerBindings,
           };
           const serverUrl = yield* config.source

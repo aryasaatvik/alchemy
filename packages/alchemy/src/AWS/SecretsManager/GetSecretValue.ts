@@ -1,7 +1,7 @@
 import * as secretsmanager from "@distilled.cloud/aws/secrets-manager";
 import * as Effect from "effect/Effect";
 import * as Binding from "../../Binding.ts";
-import type { Secret } from "./Secret.ts";
+import type { Secret, SecretReference } from "./Secret.ts";
 
 export interface GetSecretValueRequest extends Omit<
   secretsmanager.GetSecretValueRequest,
@@ -41,7 +41,7 @@ export interface GetSecretValue extends Binding.Service<
   GetSecretValue,
   "AWS.SecretsManager.GetSecretValue",
   (
-    secret: Secret,
+    secret: Secret | SecretReference,
   ) => Effect.Effect<
     (
       request?: GetSecretValueRequest,

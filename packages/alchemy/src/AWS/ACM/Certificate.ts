@@ -627,10 +627,23 @@ export const CertificateProvider = () =>
             (news.validationMethod ?? defaultValidationMethod) === "DNS" &&
             news.hostedZoneId !== undefined;
 
-          if (shouldAutoValidate && certificate.Status !== "ISSUED") {
+          if (
+            (news.validationMethod ?? defaultValidationMethod) === "DNS" &&
+            certificate.Status !== "ISSUED"
+          ) {
+            // Externally-validated DNS certificates still expose their
+            // validation record through this resource's attributes. Wait for
+            // ACM to publish it before committing state; otherwise the first
+            // DescribeCertificate response can permanently capture an empty
+            // ResourceRecord and downstream DNS providers have nothing to
+            // create.
             const withRecords = yield* waitForValidationRecords(certificateArn);
-            yield* upsertValidationRecords(news.hostedZoneId!, withRecords);
-            certificate = yield* waitForIssued(certificateArn);
+            if (shouldAutoValidate) {
+              yield* upsertValidationRecords(news.hostedZoneId!, withRecords);
+              certificate = yield* waitForIssued(certificateArn);
+            } else {
+              certificate = withRecords;
+            }
           }
 
           // Sync options — only the CT logging preference is mutable in

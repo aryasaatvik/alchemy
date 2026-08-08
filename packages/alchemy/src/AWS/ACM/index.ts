@@ -3,6 +3,7 @@ export {
   AccountConfigurationProvider,
 } from "./AccountConfiguration.ts";
 export { Certificate, CertificateProvider } from "./Certificate.ts";
+export * from "./CertificateValidation.ts";
 export * from "./DescribeCertificate.ts";
 export * from "./DescribeCertificateHttp.ts";
 export * from "./ExpiryEventSource.ts";

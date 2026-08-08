@@ -17,6 +17,7 @@ import {
 } from "../../State/State.ts";
 import { encodeState, reviveState } from "../../State/StateEncoding.ts";
 import { recordStateStoreInit } from "../../Telemetry/Metrics.ts";
+import type { StackServices } from "../../Stack.ts";
 import { AwsAuth } from "../AuthProvider.ts";
 import * as AwsCredentials from "../Credentials.ts";
 import * as Endpoint from "../Endpoint.ts";
@@ -126,7 +127,9 @@ type S3Deps = Credentials | HttpClient | Region;
  * );
  * ```
  */
-export const state = (options: S3StateOptions = {}) =>
+export const state = (
+  options: S3StateOptions = {},
+): Layer.Layer<State, never, StackServices> =>
   Layer.effect(
     State,
     Effect.gen(function* () {

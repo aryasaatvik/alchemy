@@ -79,6 +79,11 @@ test.provider.skipIf(!!process.env.FAST)(
       );
 
       expect(cert.certificateArn).toBeDefined();
+      expect(
+        cert.domainValidationOptions.every(
+          (validation) => validation.ResourceRecord !== undefined,
+        ),
+      ).toBe(true);
 
       const provider = yield* Provider.findProvider(Certificate);
       // ACM `ListCertificates` is eventually consistent — a freshly requested

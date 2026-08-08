@@ -139,6 +139,20 @@ describe("Docker.Container", { concurrent: false }, () => {
     }),
   );
 
+  test.provider("returns Docker's assigned ephemeral host port", (stack) =>
+    Effect.gen(function* () {
+      const container = yield* stack.deploy(
+        Docker.Container("ephemeral-port-container", {
+          image: "nginx:alpine",
+          ports: [{ external: 0, internal: 80 }],
+          start: true,
+        }),
+      );
+
+      expect(container.ports["80/tcp"]).toBeGreaterThan(0);
+    }),
+  );
+
   test.provider("creates a stopped container when start is false", (stack) =>
     Effect.gen(function* () {
       const container = yield* stack.deploy(
@@ -380,7 +394,7 @@ describe("Docker.Container", { concurrent: false }, () => {
         Docker.Container("healthcheck-container", {
           image: "nginx:alpine",
           healthcheck: {
-            cmd: "true",
+            cmd: ["CMD", "true"],
             interval: "1 second",
             timeout: "2 seconds",
             retries: 3,
@@ -399,6 +413,7 @@ describe("Docker.Container", { concurrent: false }, () => {
       expect(health?.Timeout).toBe(2_000_000_000);
       expect(health?.Retries).toBe(3);
       expect(health?.StartPeriod).toBe(1_000_000_000);
+      expect(health?.Test).toEqual(["CMD-SHELL", "true"]);
     }),
   );
 });

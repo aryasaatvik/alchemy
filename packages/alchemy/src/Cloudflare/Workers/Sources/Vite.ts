@@ -17,6 +17,7 @@ import { viteSupportsPortZero } from "@alchemy.run/cloudflare-runtime/core/inter
 import { hashDirectory, type MemoOptions } from "../../../Command/Memo.ts";
 import { findAvailablePort, initialCwd } from "../../../Util/Node.ts";
 import { sha256Object } from "../../../Util/sha256.ts";
+import packageJson from "../../../../package.json" with { type: "json" };
 import { readAssets } from "../Assets.ts";
 import type { SourceDevHandle, SourceProvider } from "../Source.ts";
 import { runViteBuildChild } from "../ViteChild.ts";
@@ -305,6 +306,29 @@ const resolveViteEnv = (env: Record<string, unknown>) =>
     );
   });
 
+// A Vite build's output depends on the bundler toolchain as much as on
+// the project sources: a plugin fix in this package must invalidate
+// memoized builds, or a redeploy silently ships the stale bundle.
+const toolchainHashInput = `alchemy:${packageJson.version}`;
+// The ambient environment is an input for the same reason, on Vite's
+// own contract: NODE_ENV overrides the production build default (a dev
+// NODE_ENV once shipped a development React build), and every
+// `VITE_`-prefixed variable is exposed to client code through
+// `import.meta.env` — identical sources compile to different bundles
+// under different values, which a files-only hash can never
+// invalidate. Declared `env` props need no entry here: they change the
+// metadata hash, and any update re-runs the build. Read per hash, not
+// per module load, so the values are the ones the in-process build
+// will actually see. Values only feed the sha256 — they are never
+// persisted.
+const buildEnvHashInputs = () => [
+  `node-env:${process.env.NODE_ENV ?? ""}`,
+  ...Object.entries(process.env)
+    .filter(([key]) => key.startsWith("VITE_"))
+    .map(([key, value]) => `vite-env:${key}=${value ?? ""}`)
+    .sort(),
+];
+
 /**
  * Hash the vite project's input tree (root + workspaces + lockfiles) —
  * the rebuild-free change signal for the `input` hash slot.
@@ -346,7 +370,12 @@ export const hashViteInput = Effect.fn(function* <E, R>(
       { concurrency: "unbounded" },
     ).pipe(
       Effect.flatMap(([root, ...workspaces]) =>
-        sha256Object([root, ...workspaces.sort()]),
+        sha256Object([
+          toolchainHashInput,
+          ...buildEnvHashInputs(),
+          root,
+          ...workspaces.sort(),
+        ]),
       ),
       Effect.map((hash) => ({ hash, workspaces: undefined })),
     );
@@ -360,7 +389,12 @@ export const hashViteInput = Effect.fn(function* <E, R>(
     (cwd) => hashWorkspaceDirectory(cwd),
     { concurrency: "unbounded" },
   );
-  const hash = yield* sha256Object([root, ...workspaceHashes.sort()]);
+  const hash = yield* sha256Object([
+    toolchainHashInput,
+    ...buildEnvHashInputs(),
+    root,
+    ...workspaceHashes.sort(),
+  ]);
   return { hash, workspaces: Array.from(workspaces).map(relativeToRoot) };
 });
 
