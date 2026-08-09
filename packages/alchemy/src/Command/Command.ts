@@ -24,6 +24,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type { ScopedPlanStatusSession } from "../Cli/Cli.ts";
 import { isNonInteractive } from "../Util/interactive.ts";
+import { registerExitKill } from "../Util/killProcessGroup.ts";
 import {
   makeCommandRedactor,
   redactPlatformReason,
@@ -81,7 +82,7 @@ export class CommandExecutor extends Context.Service<
      */
     readonly spawn: (
       props: CommandProps,
-      options?: ChildProcess.KillOptions,
+      options?: CommandSpawnOptions,
     ) => Effect.Effect<
       ChildProcessSpawner.ChildProcessHandle,
       CommandError,
@@ -100,6 +101,12 @@ export class CommandExecutor extends Context.Service<
     >;
   }
 >()("alchemy/Command/CommandExecutor") {}
+
+/** Internal lifecycle controls for resource-specific command ownership. */
+export interface CommandSpawnOptions extends ChildProcess.KillOptions {
+  /** Disable the generic exit hook when another owner handles abrupt exit. */
+  readonly registerExitKill?: boolean;
+}
 
 /**
  * Extends Effect's `PlatformError` to include the command that failed and some command-specific error reasons.
@@ -224,7 +231,9 @@ const parseExecutionTimeout = (
   return Effect.succeed(decoded.value);
 };
 
-const terminateProcessGroup = (child: ChildProcessSpawner.ChildProcessHandle) =>
+export const terminateProcessGroup = (
+  child: ChildProcessSpawner.ChildProcessHandle,
+) =>
   Effect.gen(function* () {
     // Dispatch SIGTERM without waiting indefinitely for the root process. The
     // Effect process runtime targets the detached process group on POSIX and
@@ -306,7 +315,7 @@ export const CommandExecutorLive = () =>
       };
 
       /** Spawns a command, returning the child process handle. */
-      const spawn = (props: CommandProps, options?: ChildProcess.KillOptions) =>
+      const spawn = (props: CommandProps, options?: CommandSpawnOptions) =>
         parseCommand(props).pipe(
           Effect.flatMap(({ bin, args }) =>
             spawner.spawn(
@@ -332,6 +341,11 @@ export const CommandExecutorLive = () =>
                 forceKillAfter: options?.forceKillAfter,
               }),
             ),
+          ),
+          Effect.tap((child) =>
+            options?.registerExitKill === false
+              ? Effect.succeed(child)
+              : registerExitKill(child.pid).pipe(Effect.as(child)),
           ),
           Effect.map((child) =>
             redactChildProcessHandle(child, makeCommandRedactor(props.env)),

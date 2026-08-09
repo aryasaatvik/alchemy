@@ -9,10 +9,12 @@ import {
   CommandExecutor,
   UnexpectedExit,
   makeCommandError,
+  terminateProcessGroup,
   type CommandProps,
   type CommandRunProps,
 } from "./Command.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
+import { startDevProcessGuardian } from "../Util/DevProcessGuardian.ts";
 
 export interface DevProps extends CommandProps {
   /**
@@ -139,10 +141,16 @@ export const DevProviderLocal = () =>
               run(cleanup, session).pipe(Effect.orDie, Effect.asVoid),
             );
           }
-          const child = yield* spawn(props, {
-            killSignal: "SIGTERM",
-            forceKillAfter: "1 second",
-          });
+          // The generic exit hook is intentionally disabled for Dev: it can
+          // only issue a synchronous SIGKILL. The guardian below survives an
+          // abrupt sidecar exit and owns the bounded SIGTERM -> SIGKILL path.
+          const child = yield* spawn(props, { registerExitKill: false });
+          const guardian = startDevProcessGuardian(child.pid);
+          yield* Effect.addFinalizer(() =>
+            terminateProcessGroup(child).pipe(
+              Effect.ensuring(Effect.sync(guardian.stop)),
+            ),
+          );
           const redactor = makeCommandRedactor(props.env);
 
           let buffer = "";
