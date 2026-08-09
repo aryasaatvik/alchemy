@@ -51,6 +51,7 @@
     "nuke": "bash scripts/nuke.sh",
     "opencode": "OPENCODE_EXPERIMENTAL_OXFMT=true opencode",
     "prepare": "husky && effect-tsgo patch && bun build:cloudflare-packages",
+    "pack:integration": "bun scripts/integration-pack/cli.ts",
     "publish:packages": "pnpm publish --recursive --filter './packages/*' --access public",
     "setup": "effect-tsgo patch && bun run download:external",
     "sync:submodules": "git submodule sync --recursive && git submodule update --init --recursive",
