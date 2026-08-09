@@ -22,6 +22,8 @@ export default defineConfig({
               host: address.address,
               port: address.port,
               cwd: process.cwd(),
+              mode: server.config.mode,
+              nodeEnvironment: process.env.NODE_ENV,
             }),
           );
         });

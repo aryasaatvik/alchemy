@@ -263,6 +263,7 @@ export const Vite: {
             ...props,
             main: undefined!,
             vite: {
+              devServer: props?.devServer,
               main: props?.main,
               rootDir: props?.rootDir,
               memo: props?.memo,

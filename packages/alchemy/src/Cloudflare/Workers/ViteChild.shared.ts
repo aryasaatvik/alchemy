@@ -7,7 +7,11 @@ import type {
 } from "@alchemy.run/cloudflare-runtime/core";
 import type { BundleOutput } from "../../Bundle/Bundle.ts";
 import type { WorkerBinding } from "./WorkerBinding.ts";
-import type { WorkerAssetsConfig, WorkerSourceDescriptor } from "./Worker.ts";
+import type {
+  ViteOptions,
+  WorkerAssetsConfig,
+  WorkerSourceDescriptor,
+} from "./Worker.ts";
 
 /**
  * Default first port of the local dev-server range. Vite and
@@ -22,6 +26,7 @@ export const VITE_CHILD_HOST = "127.0.0.1";
 /** Plain-data configuration transferred from the provider to a Vite child. */
 export interface ViteChildConfig {
   rootDir: string;
+  viteDevServer?: ViteOptions["devServer"];
   publicUrl: string;
   accountId: string;
   storageDirectory: string;

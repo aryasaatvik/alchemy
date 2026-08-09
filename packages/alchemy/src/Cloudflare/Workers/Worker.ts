@@ -1072,6 +1072,19 @@ export interface WorkerSourceDescriptor {
 }
 
 export interface ViteOptions {
+  /** Local Vite server compilation settings. Deploy builds are unaffected. */
+  devServer?: {
+    /**
+     * Process-level condition used by Vite for `import.meta.env.PROD` / `DEV`
+     * and `development|production` package export conditions.
+     */
+    nodeEnvironment?: "development" | "production";
+    /**
+     * Vite mode used for config evaluation and `.env.[mode]` selection.
+     * Defaults to `development` for the local server.
+     */
+    mode?: string;
+  };
   /**
    * Overrides the module that becomes the deployed Worker entry, forwarded
    * to the Cloudflare Vite plugin's `main` option. Relative paths resolve

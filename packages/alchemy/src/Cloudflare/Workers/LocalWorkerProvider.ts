@@ -513,6 +513,7 @@ export const LocalWorkerProvider = () =>
             ? path.resolve(props.vite.rootDir ?? process.cwd(), props.vite.main)
             : undefined,
           viteEnvironments: props.vite?.viteEnvironments,
+          viteDevServer: props.vite?.devServer,
           viteRootDir: props.vite?.rootDir,
           bundleOptions: {
             id,
@@ -1032,6 +1033,9 @@ export const LocalWorkerProvider = () =>
                   startViteChild(
                     {
                       rootDir: root,
+                      ...(worker.viteDevServer === undefined
+                        ? {}
+                        : { viteDevServer: worker.viteDevServer }),
                       publicUrl: proxy.url.toString().replace(/\/$/, ""),
                       accountId,
                       storageDirectory,

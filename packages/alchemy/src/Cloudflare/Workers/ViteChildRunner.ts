@@ -71,6 +71,12 @@ const program = Effect.scoped(
       },
     );
     const source = config.source;
+    const nodeEnvironment = config.viteDevServer?.nodeEnvironment;
+    if (source === undefined && nodeEnvironment !== undefined) {
+      yield* Effect.sync(() => {
+        process.env.NODE_ENV = nodeEnvironment;
+      });
+    }
     const viteHost = "127.0.0.1";
     // `viteDev` resolves `port: 0` per the loaded Vite: a true OS-assigned
     // random port on Vite >= 8.2.1 (vitejs/vite#23158), a probed ephemeral
@@ -134,6 +140,7 @@ const program = Effect.scoped(
             port: vitePort,
             strictPort: false,
           },
+          config.viteDevServer?.mode,
         ).pipe(Effect.map((server) => server.resolvedUrls?.local[0]));
     if (!url) {
       return yield* Effect.die("Dev server child started without a local URL");

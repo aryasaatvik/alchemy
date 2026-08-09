@@ -1124,10 +1124,13 @@ if (el) {
               assets: { notFoundHandling: "single-page-application" as const },
               dev: { port: 0 },
             });
-            const appA = yield* Cloudflare.Website.Vite(
-              "ViteChildA",
-              props(rootA),
-            );
+            const appA = yield* Cloudflare.Website.Vite("ViteChildA", {
+              ...props(rootA),
+              devServer: {
+                nodeEnvironment: "production",
+                mode: "development",
+              },
+            });
             const appB = yield* Cloudflare.Website.Vite(
               "ViteChildB",
               props(rootB),
@@ -1146,12 +1149,20 @@ if (el) {
         expect(deployed.appA.url).not.toBe(deployed.appB.url);
         const [childA, childB] = yield* Effect.all(
           [
-            fetchJsonReady<{ host: string; port: number; cwd: string }>(
-              `${deployed.appA.url!}/__vite-child-origin`,
-            ),
-            fetchJsonReady<{ host: string; port: number; cwd: string }>(
-              `${deployed.appB.url!}/__vite-child-origin`,
-            ),
+            fetchJsonReady<{
+              host: string;
+              port: number;
+              cwd: string;
+              mode: string;
+              nodeEnvironment?: string;
+            }>(`${deployed.appA.url!}/__vite-child-origin`),
+            fetchJsonReady<{
+              host: string;
+              port: number;
+              cwd: string;
+              mode: string;
+              nodeEnvironment?: string;
+            }>(`${deployed.appB.url!}/__vite-child-origin`),
           ],
           { concurrency: "unbounded" },
         );
@@ -1162,6 +1173,8 @@ if (el) {
         expect(childA.port).not.toBe(childB.port);
         expect(childA.cwd).toBe(rootA);
         expect(childB.cwd).toBe(rootB);
+        expect(childA.nodeEnvironment).toBe("production");
+        expect(childA.mode).toBe("development");
         yield* Effect.all(
           [
             expectUrlContains(

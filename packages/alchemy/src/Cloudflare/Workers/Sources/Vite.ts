@@ -105,6 +105,7 @@ export const viteDev = (
   env: Record<string, unknown>,
   pluginOptions: CloudflareVitePluginOptions,
   serverOptions: vite.ServerOptions,
+  mode?: string,
 ) =>
   Effect.gen(function* () {
     yield* Effect.sync(() => {
@@ -133,6 +134,7 @@ export const viteDev = (
         Effect.promise(async () => {
           const devServer = await vite.createServer({
             root: rootDir,
+            ...(mode === undefined ? {} : { mode }),
             define: getDefine(env),
             plugins: [cloudflare(pluginOptions)],
             server,
@@ -145,7 +147,7 @@ export const viteDev = (
       (devServer) =>
         Effect.promise(async () => {
           await devServer.close();
-        }),
+      }),
     );
   });
 
@@ -467,6 +469,12 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
     return { input: hash, additionalWorkspaces: workspaces };
   }),
   dev: Effect.fn(function* (ctx) {
+    const nodeEnvironment = vite.devServer?.nodeEnvironment;
+    if (nodeEnvironment !== undefined) {
+      yield* Effect.sync(() => {
+        process.env.NODE_ENV = nodeEnvironment;
+      });
+    }
     const devServer = yield* viteDev(
       vite.rootDir,
       ctx.env ?? {},
@@ -486,6 +494,7 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
         context: ctx.runtimeContext,
       },
       { port: 0 },
+      vite.devServer?.mode,
     );
     return {
       mode: "server",
