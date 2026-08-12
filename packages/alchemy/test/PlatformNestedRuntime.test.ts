@@ -1,4 +1,7 @@
-import { shouldInitializePlatform } from "@/Platform.ts";
+import {
+  isBindableRuntimeConfigNode,
+  shouldInitializePlatform,
+} from "@/Platform.ts";
 import { describe, expect, test } from "alchemy-test";
 
 const parent = {
@@ -33,5 +36,15 @@ describe("nested platform runtime initialization", () => {
     expect(
       shouldInitializePlatform("runtime", parent, "AWS.Lambda.Function", "Api"),
     ).toBe(true);
+  });
+});
+
+describe("platform runtime config bindings", () => {
+  test("skips the synthetic node for an absent optional Config", () => {
+    expect(isBindableRuntimeConfigNode([], undefined)).toBe(false);
+  });
+
+  test("binds a named concrete Config value", () => {
+    expect(isBindableRuntimeConfigNode(["API_TOKEN"], "secret")).toBe(true);
   });
 });
