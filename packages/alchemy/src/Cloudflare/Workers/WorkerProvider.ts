@@ -17,7 +17,6 @@ import * as crypto from "node:crypto";
 import { Unowned } from "../../AdoptPolicy.ts";
 import * as Artifacts from "../../Artifacts.ts";
 import type { ScopedPlanStatusSession } from "../../Cli/Cli.ts";
-import { hashDirectory, type MemoOptions } from "../../Command/Memo.ts";
 import type { ViteFrameworkBuildOutput } from "../../Bundle/Vite.ts";
 import { havePropsChanged, isResolved, stripEffects } from "../../Diff.ts";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
@@ -49,7 +48,6 @@ import { makeSourceContext, resolveSource } from "./Source.ts";
 import {
   isSelfUrl,
   Worker,
-  type ViteOptions,
   type WorkerProps,
   type WorkerRouteConfig,
   type WorkerVersionAffinity,
@@ -67,6 +65,7 @@ import type {
 import { readPrebuiltWorkerBundle } from "./Sources/Prebuilt.ts";
 import { isPythonMain, readPythonWorkerBundle } from "./Sources/Python.ts";
 import { WorkerBundle } from "./Sources/Rolldown.ts";
+import { resolveViteMain } from "./ViteMain.ts";
 import { isWorkerLoader } from "./WorkerLoader.ts";
 import { createWorkerName } from "./WorkerName.ts";
 class MissingDurableObjects extends Data.TaggedError("MissingDurableObjects")<{
@@ -2303,15 +2302,12 @@ export const LiveWorkerProvider = () =>
             )).filter(([_, value]) => value !== undefined),
           ),
           {
-            // A relative `vite.main` is documented to resolve from the Vite
-            // root. The rolldown plugin resolves the worker entry with no
-            // importer (i.e. against `process.cwd()`), which breaks when the
-            // deploy runs from a different directory (e.g. a monorepo infra
-            // package) — absolutize before handing it over (#796).
-            main: props.vite?.main
-              ? path.resolve(
-                  initialCwd,
-                  props.vite.rootDir ?? ".",
+            // File entries are absolute before the child sees them because
+            // rolldown resolves them with no importer. Plugin-owned virtual
+            // ids must retain their scheme for the Vite plugin to resolve.
+            main: props.vite
+              ? resolveViteMain(
+                  path.resolve(initialCwd, props.vite.rootDir ?? "."),
                   props.vite.main,
                 )
               : undefined,

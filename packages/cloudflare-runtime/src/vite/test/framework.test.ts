@@ -56,12 +56,48 @@ const flue = (): vite.Plugin => ({
   },
   load(id) {
     return id === "virtual:flue/worker"
-      ? "export class FlueAgent {}; export default { fetch() { return new Response('flue') } }"
+      ? `import { DurableObject } from "cloudflare:workers";
+export class FlueAgent extends DurableObject {
+  fetch() { return new Response("flue-agent"); }
+}
+export default {
+  fetch(request, env) { return env.FLUE_AGENT.getByName("fixture").fetch(request); }
+}`
       : undefined;
   },
 });
 
 describe("Alchemy Vite framework contribution", () => {
+  it("starts with framework-declared Durable Object exports registered", async () => {
+    const options: CloudflareVitePluginOptions = {
+      worker: { name: "framework-runtime-fixture", bindings: [] },
+    };
+    const server = await vite.createServer({
+      configFile: false,
+      root,
+      logLevel: "silent",
+      server: { port: 0 },
+      plugins: [
+        flue(),
+        cloudflareViteFramework(flueWorkerConfig()),
+        cloudflareVitePlugin(options),
+      ],
+    });
+    try {
+      await server.listen();
+      const url = server.resolvedUrls?.local[0];
+      if (!url) throw new Error("Vite did not report a local URL");
+
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("flue-agent");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("builds Flue's virtual entry and combines generated and application Durable Objects through one runtime plugin", async () => {
     const options: CloudflareVitePluginOptions = {
       worker: {
@@ -112,5 +148,14 @@ describe("Alchemy Vite framework contribution", () => {
         (plugin) => plugin.name === "distilled-cloudflare:options",
       ),
     ).toHaveLength(1);
+    expect(
+      builder.config.plugins.filter(
+        (plugin) => plugin.name === "distilled-cloudflare:nodejs-unenv",
+      ),
+    ).toHaveLength(1);
+    expect(builder.config.environments.ssr.optimizeDeps.noDiscovery).toBe(true);
+    expect(builder.config.environments.ssr.resolve.builtins).toContain(
+      "node:async_hooks",
+    );
   });
 });

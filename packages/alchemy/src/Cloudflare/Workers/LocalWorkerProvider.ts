@@ -62,6 +62,7 @@ import {
 } from "./RuntimeBindings.ts";
 import { startViteChild } from "./ViteChild.ts";
 import { DEFAULT_DEV_PORT, type ViteChildConfig } from "./ViteChild.shared.ts";
+import { resolveViteMain } from "./ViteMain.ts";
 
 /** Local dev-server options (the worker-mode arm of `WorkerProps["dev"]`). */
 type DevServerOptions = Extract<WorkerProps["dev"], { mode?: "worker" }> & {
@@ -507,10 +508,13 @@ export const LocalWorkerProvider = () =>
           rules: props.rules,
           devRemote,
           vite: !!props.vite,
-          // Relative `vite.main` resolves from the Vite root (see the
-          // matching normalization in WorkerProvider's `viteBuild`).
-          viteMain: props.vite?.main
-            ? path.resolve(props.vite.rootDir ?? process.cwd(), props.vite.main)
+          // File entries resolve from the Vite root; framework-owned virtual
+          // ids stay intact for the framework plugin to resolve in the child.
+          viteMain: props.vite
+            ? resolveViteMain(
+                path.resolve(props.vite.rootDir ?? process.cwd()),
+                props.vite.main,
+              )
             : undefined,
           viteEnvironments: props.vite?.viteEnvironments,
           viteDevServer: props.vite?.devServer,

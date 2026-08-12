@@ -25,9 +25,10 @@ const RESERVED_EXPORT_NAMES = new Set(["default", "ModuleRunnerDO"]);
  */
 export function configuredExportTypes(
   options: CloudflareVitePluginOptions,
+  durableObjectNamespaces = options.worker?.durableObjectNamespaces ?? [],
 ): ExportTypes {
   const exportTypes: ExportTypes = {};
-  for (const namespace of options.worker?.durableObjectNamespaces ?? []) {
+  for (const namespace of durableObjectNamespaces) {
     exportTypes[namespace.className] = "DurableObject";
   }
   for (const workflow of options.worker?.workflows ?? []) {

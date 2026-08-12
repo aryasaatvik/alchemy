@@ -16,6 +16,7 @@ import * as vite from "vite";
 import { DistilledDevEnvironment } from "./dev-environment.ts";
 import type { ServerHandle } from "./dev-server.ts";
 import { configuredExportTypes, mergeExportTypes } from "./export-types.ts";
+import { withViteFrameworkWorker } from "./framework.ts";
 import { resolveForwardedHost } from "./forwarded-host.ts";
 import type { CloudflareVitePluginOptions } from "./plugin.ts";
 import { handleWebSocket } from "./websockets.ts";
@@ -24,7 +25,7 @@ let context: Context.Context<RuntimeServices> | undefined;
 
 export function dev(options: CloudflareVitePluginOptions): Array<vite.Plugin> {
   const environmentNames = parseViteEnvironments(options);
-  const configured = configuredExportTypes(options);
+  let configured = configuredExportTypes(options);
   // Which exports the running Worker was generated for. Kept across dev server
   // restarts so a restart does not undo what was detected.
   let exportTypes: ExportTypes = configured;
@@ -117,6 +118,15 @@ export function dev(options: CloudflareVitePluginOptions): Array<vite.Plugin> {
       if (!optionsApi) {
         throw new Error("Cannot resolve the cloudflare-runtime:options plugin");
       }
+      // Framework contributions are applied during Vite config resolution,
+      // after this plugin array was composed. Include their declared Durable
+      // Object classes before the first workerd runtime starts so its wrapper
+      // entry exports every class referenced by a generated namespace.
+      configured = configuredExportTypes(
+        options,
+        withViteFrameworkWorker(options)?.durableObjectNamespaces,
+      );
+      exportTypes = mergeExportTypes(configured, exportTypes);
       const inputs = Object.values(optionsApi.input());
       if (inputs.length > 1) {
         throw new Error(

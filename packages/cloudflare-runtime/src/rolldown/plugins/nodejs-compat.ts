@@ -17,12 +17,12 @@ const NODE_BUILTIN_MODULES_REGEXP = new RegExp(
 );
 
 export const nodejsAlsPlugin = createPlugin("nodejs-als", (options) => {
-  if (!hasNodejsAls(options.compatibilityFlags)) return;
   return {
     rolldown: {
       resolveId: {
         filter: { id: ASYNC_HOOKS_REGEXP },
         handler(id) {
+          if (!hasNodejsAls(options.compatibilityFlags)) return;
           return { id, external: true };
         },
       },
@@ -30,7 +30,8 @@ export const nodejsAlsPlugin = createPlugin("nodejs-als", (options) => {
     vite: {
       enforce: "pre",
       configEnvironment(name) {
-        if (name === "client") return;
+        if (name === "client" || !hasNodejsAls(options.compatibilityFlags))
+          return;
         return {
           resolve: {
             builtins: ["async_hooks", "node:async_hooks"],
@@ -62,26 +63,27 @@ export const getUnenv = (options: BasePluginOptions) =>
 export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
   "nodejs-unenv",
   (options) => {
-    if (!hasNodejsCompat(options.compatibilityFlags)) return;
-    const { alias, inject, polyfill, external } = getUnenv(options);
-    const entries = new Set(Object.values(alias));
-    for (const globalInject of Object.values(inject)) {
-      if (typeof globalInject === "string") {
-        entries.add(globalInject);
-      } else {
-        entries.add(globalInject[0]);
-      }
-    }
-    polyfill.forEach((module) => entries.add(module));
-    external.forEach((module) => entries.delete(module));
     const require = createRequire(import.meta.url);
+    const state = () => {
+      const { alias, inject, polyfill, external } = getUnenv(options);
+      const entries = new Set(Object.values(alias));
+      for (const globalInject of Object.values(inject)) {
+        if (typeof globalInject === "string") {
+          entries.add(globalInject);
+        } else {
+          entries.add(globalInject[0]);
+        }
+      }
+      polyfill.forEach((module) => entries.add(module));
+      external.forEach((module) => entries.delete(module));
+      return { alias, inject, polyfill, external, entries };
+    };
     const resolve = (id: string) => {
+      const { alias, external, entries } = state();
       if (alias[id] && !external.includes(alias[id])) {
         return require.resolve(alias[id]);
       }
-      if (entries.has(id)) {
-        return require.resolve(id);
-      }
+      if (entries.has(id)) return require.resolve(id);
     };
     const RESOLVE_ID_FILTER = {
       id: [
@@ -93,32 +95,41 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
     return {
       shared: {
         api: {
-          polyfill,
-          inject: Object.fromEntries(
-            Object.entries(inject).map(([injectedName, moduleSpecifier]) => {
-              assert(
-                typeof moduleSpecifier === "string",
-                `expected moduleSpecifier to be a string`,
-              );
-              return [injectedName, moduleSpecifier];
-            }),
-          ),
+          get polyfill() {
+            return state().polyfill;
+          },
+          get inject() {
+            return Object.fromEntries(
+              Object.entries(state().inject).map(
+                ([injectedName, moduleSpecifier]) => {
+                  assert(
+                    typeof moduleSpecifier === "string",
+                    `expected moduleSpecifier to be a string`,
+                  );
+                  return [injectedName, moduleSpecifier];
+                },
+              ),
+            );
+          },
         },
       },
       rolldown: {
         resolveId: {
           filter: RESOLVE_ID_FILTER,
-          handler(source, importer, options) {
+          handler(source, importer, resolveOptions) {
+            if (!hasNodejsCompat(options.compatibilityFlags)) return;
             const resolved = resolve(source);
             if (!resolved) return;
-            return this.resolve(resolved, importer, options);
+            return this.resolve(resolved, importer, resolveOptions);
           },
         },
       },
       vite: {
         enforce: "pre",
         async configEnvironment(name) {
-          if (name === "client") return;
+          if (name === "client" || !hasNodejsCompat(options.compatibilityFlags))
+            return;
+          const { external } = state();
           const { esmExternalRequirePlugin } = await import("vite");
           return {
             resolve: {
@@ -143,12 +154,10 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
                 ...nonPrefixedNodeModules,
                 ...nonPrefixedNodeModules.map((module) => `node:${module}`),
                 // New Node.js built-in modules are only published with the `node:` prefix.
-                ...[
-                  "node:sea",
-                  "node:sqlite",
-                  "node:test",
-                  "node:test/reporters",
-                ],
+                "node:sea",
+                "node:sqlite",
+                "node:test",
+                "node:test/reporters",
               ],
               ...(this.meta.rolldownVersion
                 ? {
@@ -168,6 +177,8 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
           };
         },
         async configureServer(server) {
+          if (!hasNodejsCompat(options.compatibilityFlags)) return;
+          const { entries } = state();
           await Promise.all(
             Object.values(server.environments).flatMap(async (environment) => {
               // Framework-owned Node-side environments (e.g. Astro's `astro`
@@ -195,7 +206,8 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
         },
         resolveId: {
           filter: RESOLVE_ID_FILTER,
-          handler(source, importer, options) {
+          handler(source, importer, resolveOptions) {
+            if (!hasNodejsCompat(options.compatibilityFlags)) return;
             const resolved = resolve(source);
             if (!resolved) return;
             if (
@@ -212,9 +224,9 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
                 );
               // We use the unresolved path to the polyfill and let the dependency optimizer's
               // resolver find the resolved path to the bundled version.
-              return this.resolve(id, importer, options);
+              return this.resolve(id, importer, resolveOptions);
             }
-            return this.resolve(resolved, importer, options);
+            return this.resolve(resolved, importer, resolveOptions);
           },
         },
       },
@@ -237,7 +249,6 @@ const supportsMissingImportRegistration = (environment: {
 export const nodejsImportWarningPlugin = createPlugin(
   "nodejs-import-warning",
   (options) => {
-    if (hasNodejsCompat(options.compatibilityFlags)) return;
     const imports = new Map<string, Set<string>>();
     let root = process.cwd();
     return {
@@ -261,6 +272,7 @@ export const nodejsImportWarningPlugin = createPlugin(
         resolveId: {
           filter: { id: NODE_BUILTIN_MODULES_REGEXP },
           async handler(id, importer) {
+            if (hasNodejsCompat(options.compatibilityFlags)) return;
             if (
               hasNodejsAls(options.compatibilityFlags) &&
               ASYNC_HOOKS_REGEXP.test(id)
@@ -276,6 +288,7 @@ export const nodejsImportWarningPlugin = createPlugin(
           },
         },
         buildEnd() {
+          if (hasNodejsCompat(options.compatibilityFlags)) return;
           const filteredImports: Array<{ id: string; importer: string }> = [];
           for (const [id, importers] of imports.entries()) {
             for (const importer of importers) {

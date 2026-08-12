@@ -5,7 +5,10 @@ import { createPlugin } from "../factory.ts";
 import { parseViteEnvironments, type BasePluginOptions } from "../options.ts";
 import { hasNodejsCompat } from "../utils.ts";
 import { workerEntryId } from "./virtual-modules.ts";
-import { applyViteFrameworkContributions } from "../../vite/framework.ts";
+import {
+  applyViteFrameworkContributions,
+  getViteFrameworkContribution,
+} from "../../vite/framework.ts";
 
 const DEFAULT_RESOLVE_CONDITION_NAMES = [
   "workerd",
@@ -75,6 +78,7 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>(
       vite: {
         async config(userConfig) {
           applyViteFrameworkContributions(pluginOptions, userConfig);
+          const framework = getViteFrameworkContribution(pluginOptions);
           const vite = await import("vite");
           const isRolldown = "rolldownVersion" in this.meta;
           const environmentNames = parseViteEnvironments(pluginOptions);
@@ -123,7 +127,11 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>(
                 ],
               },
               optimizeDeps: {
-                noDiscovery: false,
+                // A virtual framework entry cannot be scanned reliably before
+                // its framework plugin has generated the module. Keep that
+                // graph explicit so workerd never evaluates chunk ids while
+                // Vite is replacing the discovered-dependency bundle.
+                noDiscovery: framework.main?.startsWith("virtual:") ?? false,
                 ignoreOutdatedRequests: true,
                 entries: asArray(entries)?.map(vite.normalizePath),
                 ...(isRolldown
