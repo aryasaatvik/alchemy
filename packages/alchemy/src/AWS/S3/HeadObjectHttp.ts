@@ -9,5 +9,6 @@ export const HeadObjectHttp = Layer.effect(
     tag: "AWS.S3.HeadObject",
     operation: S3.headObject,
     actions: ["s3:GetObject"],
+    listBucket: true,
   }),
 );

@@ -21,10 +21,16 @@ describe("DurableFunction management", () => {
     });
   });
 
-  it("limits implicit self-management to list, get, and stop", () => {
+  it("grants every self-management operation exposed by the handle", () => {
     expect(durableSelfManagementActions).toEqual({
       list: ["lambda:ListDurableExecutionsByFunction"],
-      execution: ["lambda:GetDurableExecution", "lambda:StopDurableExecution"],
+      execution: [
+        "lambda:GetDurableExecution",
+        "lambda:StopDurableExecution",
+        "lambda:SendDurableExecutionCallbackSuccess",
+        "lambda:SendDurableExecutionCallbackFailure",
+        "lambda:SendDurableExecutionCallbackHeartbeat",
+      ],
     });
     expect(
       makeDurableSelfManagementPolicyStatements(
@@ -42,7 +48,13 @@ describe("DurableFunction management", () => {
       },
       {
         Effect: "Allow",
-        Action: ["lambda:GetDurableExecution", "lambda:StopDurableExecution"],
+        Action: [
+          "lambda:GetDurableExecution",
+          "lambda:StopDurableExecution",
+          "lambda:SendDurableExecutionCallbackSuccess",
+          "lambda:SendDurableExecutionCallbackFailure",
+          "lambda:SendDurableExecutionCallbackHeartbeat",
+        ],
         Resource: ["arn:aws:lambda:us-east-1:123456789012:function:orders:*"],
       },
     ]);

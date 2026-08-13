@@ -369,7 +369,13 @@ export const makeDurableListRequest = (
 /** @internal */
 export const durableSelfManagementActions = {
   list: ["lambda:ListDurableExecutionsByFunction"],
-  execution: ["lambda:GetDurableExecution", "lambda:StopDurableExecution"],
+  execution: [
+    "lambda:GetDurableExecution",
+    "lambda:StopDurableExecution",
+    "lambda:SendDurableExecutionCallbackSuccess",
+    "lambda:SendDurableExecutionCallbackFailure",
+    "lambda:SendDurableExecutionCallbackHeartbeat",
+  ],
 } as const;
 
 /** @internal */
@@ -533,10 +539,10 @@ const composeDurableImpl = (
             ],
           },
           // Listing is authorized against the function and its qualified
-          // version/alias ARNs. Execution management is scoped to executions
-          // belonging to this function. History and callback APIs are not
-          // used by the core runtime or by get/list/stop, so the self role
-          // does not receive them implicitly.
+          // version/alias ARNs. Execution management and the callback methods
+          // exposed by DurableFunctionHandle are scoped to executions
+          // belonging to this function. History remains ungranted because the
+          // handle does not expose it.
           ...makeDurableSelfManagementPolicyStatements(
             host.functionArn,
             Output.interpolate`${host.functionArn}:*`,
