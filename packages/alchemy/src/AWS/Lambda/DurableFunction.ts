@@ -156,6 +156,8 @@ export interface DurableFunctionHandle<Input = unknown, Result = unknown> {
   list(options?: {
     name?: string;
     statuses?: Lambda.ExecutionStatus[];
+    /** Function version or alias whose durable executions should be listed. */
+    qualifier?: string;
   }): Effect.Effect<
     Lambda.ListDurableExecutionsByFunctionResponse,
     Lambda.ListDurableExecutionsByFunctionError
@@ -349,6 +351,44 @@ const mapDurablePropsInput = (props: unknown) =>
     ? Effect.map(props as Effect.Effect<DurableFunctionProps>, mapDurableProps)
     : mapDurableProps(props as DurableFunctionProps);
 
+/** @internal */
+export const makeDurableListRequest = (
+  functionName: string,
+  options?: {
+    name?: string;
+    statuses?: Lambda.ExecutionStatus[];
+    qualifier?: string;
+  },
+): Lambda.ListDurableExecutionsByFunctionRequest => ({
+  FunctionName: functionName,
+  DurableExecutionName: options?.name,
+  Statuses: options?.statuses,
+  Qualifier: options?.qualifier,
+});
+
+/** @internal */
+export const durableSelfManagementActions = {
+  list: ["lambda:ListDurableExecutionsByFunction"],
+  execution: ["lambda:GetDurableExecution", "lambda:StopDurableExecution"],
+} as const;
+
+/** @internal */
+export const makeDurableSelfManagementPolicyStatements = (
+  functionArn: string | Output.Output<string>,
+  qualifiedFunctionArn: string | Output.Output<string>,
+) => [
+  {
+    Effect: "Allow" as const,
+    Action: [...durableSelfManagementActions.list],
+    Resource: [functionArn, qualifiedFunctionArn],
+  },
+  {
+    Effect: "Allow" as const,
+    Action: [...durableSelfManagementActions.execution],
+    Resource: [qualifiedFunctionArn],
+  },
+];
+
 const makeDurableHandle = (name: string, host: Function) =>
   Effect.gen(function* () {
     // Resolve the distilled operations once at init — they close over the
@@ -395,11 +435,9 @@ const makeDurableHandle = (name: string, host: Function) =>
       list: (options) =>
         Effect.gen(function* () {
           const functionName = yield* yield* FunctionName;
-          return yield* listDurableExecutionsByFunction({
-            FunctionName: functionName,
-            DurableExecutionName: options?.name,
-            Statuses: options?.statuses,
-          });
+          return yield* listDurableExecutionsByFunction(
+            makeDurableListRequest(functionName, options),
+          );
         }),
       stop: (executionArn, error) =>
         stopDurableExecution({
@@ -494,22 +532,15 @@ const composeDurableImpl = (
               Output.interpolate`${host.functionArn}:*`,
             ],
           },
-          // Management-plane handle methods. Durable execution ARNs are
-          // a distinct resource shape from the function ARN, so these
-          // stay account-wide for now.
-          {
-            Effect: "Allow",
-            Action: [
-              "lambda:GetDurableExecution",
-              "lambda:GetDurableExecutionHistory",
-              "lambda:ListDurableExecutionsByFunction",
-              "lambda:StopDurableExecution",
-              "lambda:SendDurableExecutionCallbackSuccess",
-              "lambda:SendDurableExecutionCallbackFailure",
-              "lambda:SendDurableExecutionCallbackHeartbeat",
-            ],
-            Resource: ["*"],
-          },
+          // Listing is authorized against the function and its qualified
+          // version/alias ARNs. Execution management is scoped to executions
+          // belonging to this function. History and callback APIs are not
+          // used by the core runtime or by get/list/stop, so the self role
+          // does not receive them implicitly.
+          ...makeDurableSelfManagementPolicyStatements(
+            host.functionArn,
+            Output.interpolate`${host.functionArn}:*`,
+          ),
         ],
       });
     }
