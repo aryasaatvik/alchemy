@@ -130,7 +130,7 @@ const makePlan = (options: {
     actions: {},
     actionDeletions: {},
     output: undefined,
-    cycleMembers: new Set<string>(),
+    cycleComponents: new Map<string, string>(),
     defaultMode: options.defaultMode,
   }) as unknown as Plan;
 

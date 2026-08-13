@@ -1,4 +1,6 @@
 import { Action } from "@/Action";
+import { apply } from "@/Apply";
+import * as Output from "@/Output";
 import * as Plan from "@/Plan";
 import * as Stack from "@/Stack";
 import { Stage } from "@/Stage";
@@ -12,11 +14,18 @@ import {
 import * as Test from "@/Test/Alchemy";
 import { describe, expect } from "alchemy-test";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
-import { Bucket, TestLayers } from "./test.resources";
+import {
+  BindingTarget,
+  Bucket,
+  TestLayers,
+  TestResource,
+} from "./test.resources";
 
 const TEST_STACK = "task-test";
 const TEST_STAGE = "test";
@@ -201,6 +210,76 @@ describe("Plan", () => {
   );
 
   test(
+    "forced Action output remains evaluable for downstream resources",
+    Effect.gen(function* () {
+      const Derived = Action("Derived", (_: { value: string }) =>
+        Effect.succeed({ value: "fresh" }),
+      );
+      const { hashInput } = yield* Effect.promise(
+        () => import("@/Util/sha256"),
+      );
+      yield* seed({
+        Derived: {
+          kind: "action",
+          status: "ran",
+          fqn: "Derived",
+          logicalId: "Derived",
+          namespace: undefined,
+          actionType: "Derived",
+          inputHash: yield* hashInput({ value: "same" }),
+          input: { value: "same" },
+          output: { value: "persisted" },
+          downstream: [],
+        },
+      });
+
+      const plan = yield* Effect.gen(function* () {
+        const derived = yield* Derived({ value: "same" });
+        return yield* Bucket("Consumer", { name: derived.value });
+      }).pipe((effect) => makePlan(effect, { force: true }));
+
+      expect(plan.actions.Derived).toMatchObject({
+        action: "run",
+        forced: true,
+      });
+      expect(Output.hasOutputs(plan.resources.Consumer.props)).toBe(true);
+    }),
+  );
+
+  test(
+    "running Action output remains evaluable for downstream resources",
+    Effect.gen(function* () {
+      const Derived = Action("Derived", (input: { value: string }) =>
+        Effect.succeed({ value: input.value }),
+      );
+      const { hashInput } = yield* Effect.promise(
+        () => import("@/Util/sha256"),
+      );
+      yield* seed({
+        Derived: {
+          kind: "action",
+          status: "running",
+          fqn: "Derived",
+          logicalId: "Derived",
+          namespace: undefined,
+          actionType: "Derived",
+          inputHash: yield* hashInput({ value: "same" }),
+          input: { value: "same" },
+          downstream: [],
+        },
+      });
+
+      const plan = yield* Effect.gen(function* () {
+        const derived = yield* Derived({ value: "same" });
+        return yield* Bucket("Consumer", { name: derived.value });
+      }).pipe(makePlan);
+
+      expect(plan.actions.Derived.action).toBe("run");
+      expect(Output.hasOutputs(plan.resources.Consumer.props)).toBe(true);
+    }),
+  );
+
+  test(
     "task removed from stack -> taskDeletions",
     Effect.gen(function* () {
       const { hashInput } = yield* Effect.promise(
@@ -290,6 +369,30 @@ describe("Plan", () => {
       expect(plan.actions.Sync).toBeUndefined();
     }),
   );
+
+  test(
+    "Action-containing dependency cycles fail during planning",
+    Effect.gen(function* () {
+      const Derived = Action("Derived", (input: { value: string }) =>
+        Effect.succeed({ value: input.value }),
+      );
+      const exit = yield* Effect.gen(function* () {
+        const resource = yield* BindingTarget("Resource", { string: "value" });
+        const derived = yield* Derived({ value: resource.string });
+        yield* resource.bind("FromAction", {
+          env: { ACTION_VALUE: derived.value },
+        });
+      }).pipe(makePlan, Effect.exit);
+
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (!Exit.isFailure(exit)) return;
+      const die = exit.cause.reasons.find(Cause.isDieReason);
+      const defect = die?.defect as Plan.UnsupportedActionCycle | undefined;
+      expect(defect?._tag).toBe("UnsupportedActionCycle");
+      expect(defect?.cycle.sort()).toEqual(["Derived", "Resource"]);
+      expect(defect?.actions).toEqual(["Derived"]);
+    }),
+  );
 });
 
 // ── Apply tests ───────────────────────────────────────────────────────────
@@ -349,6 +452,314 @@ describe("Apply", () => {
       expect(second).toEqual({ doubled: 42 });
       expect(yield* Ref.get(counter)).toBe(1);
     }),
+  );
+
+  test.provider(
+    "persisted noop Action output makes an unchanged downstream resource noop",
+    (stack) =>
+      Effect.gen(function* () {
+        const Derived = Action("Derived", (input: { value: string }) =>
+          Effect.succeed({ value: input.value }),
+        );
+        const program = (value: string) =>
+          Effect.gen(function* () {
+            const derived = yield* Derived({ value });
+            return yield* TestResource("Consumer", {
+              string: derived.value,
+            });
+          });
+
+        yield* stack.deploy(program("stable"));
+
+        const plan = yield* stack.plan(program("stable"));
+        expect(plan.actions.Derived.action).toBe("noop");
+        expect(plan.resources.Consumer.action).toBe("noop");
+      }),
+  );
+
+  test.provider(
+    "one Action decision is shared by every downstream consumer",
+    (stack) =>
+      Effect.gen(function* () {
+        const evaluations = yield* Ref.make(0);
+        const decisionInput = Output.literal("source").pipe(
+          Output.mapEffect(() =>
+            Ref.update(evaluations, (count) => count + 1).pipe(
+              Effect.as("stable"),
+            ),
+          ),
+        );
+        const Derived = Action("Derived", (input: { value: string }) =>
+          Effect.succeed({ value: input.value }),
+        );
+        const program = Effect.gen(function* () {
+          const derived = yield* Derived({ value: decisionInput });
+          const first = yield* TestResource("First", {
+            string: derived.value,
+          });
+          const second = yield* TestResource("Second", {
+            string: derived.value,
+          });
+          return { first, second };
+        });
+
+        yield* stack.deploy(program);
+        yield* Ref.set(evaluations, 0);
+
+        const plan = yield* stack.plan(program);
+        expect(plan.actions.Derived.action).toBe("noop");
+        expect(plan.resources.First.action).toBe("noop");
+        expect(plan.resources.Second.action).toBe("noop");
+        expect(yield* Ref.get(evaluations)).toBe(1);
+      }),
+  );
+
+  test.provider(
+    "changed Action input keeps downstream evaluation dirty and fresh",
+    (stack) =>
+      Effect.gen(function* () {
+        const Derived = Action("Derived", (input: { value: string }) =>
+          Effect.succeed({ value: input.value }),
+        );
+        const program = (value: string) =>
+          Effect.gen(function* () {
+            const derived = yield* Derived({ value });
+            return yield* TestResource("Consumer", {
+              string: derived.value,
+            });
+          });
+
+        yield* stack.deploy(program("old"));
+
+        const plan = yield* stack.plan(program("fresh"));
+        expect(plan.actions.Derived.action).toBe("run");
+        expect(plan.resources.Consumer.action).toBe("update");
+
+        const output = yield* stack.deploy(program("fresh"));
+        expect(output.string).toBe("fresh");
+      }),
+  );
+
+  test.provider(
+    "unresolved Action input keeps its downstream evaluable",
+    (stack) =>
+      Effect.gen(function* () {
+        const Derived = Action("Derived", (input: { value: string }) =>
+          Effect.succeed({ value: input.value }),
+        );
+        const program = (value: string) =>
+          Effect.gen(function* () {
+            const source = yield* TestResource("Source", { string: value });
+            const derived = yield* Derived({ value: source.string });
+            const consumer = yield* TestResource("Consumer", {
+              string: derived.value,
+            });
+            return { source, consumer };
+          });
+
+        yield* stack.deploy(program("old"));
+
+        const plan = yield* stack.plan(program("fresh"));
+        expect(plan.resources.Source.action).toBe("update");
+        expect(plan.actions.Derived.action).toBe("run");
+        expect(plan.resources.Consumer.action).toBe("update");
+
+        const output = yield* stack.deploy(program("fresh"));
+        expect(output.consumer.string).toBe("fresh");
+      }),
+  );
+
+  test.provider(
+    "captured upstream changes rerun the Action and update its downstream",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (value: string) =>
+          Effect.gen(function* () {
+            const source = yield* TestResource("Source", { string: value });
+            const Derived = Action(
+              "Derived",
+              Effect.gen(function* () {
+                const captured = yield* source.string;
+                return () => Effect.map(captured, (value) => ({ value }));
+              }),
+            );
+            const derived = yield* Derived({});
+            const consumer = yield* TestResource("Consumer", {
+              string: derived.value,
+            });
+            return { source, consumer };
+          });
+
+        yield* stack.deploy(program("old"));
+
+        const plan = yield* stack.plan(program("fresh"));
+        expect(plan.resources.Source.action).toBe("update");
+        expect(plan.actions.Derived.action).toBe("run");
+        expect(plan.resources.Consumer.action).toBe("update");
+
+        const output = yield* stack.deploy(program("fresh"));
+        expect(output.consumer.string).toBe("fresh");
+      }),
+  );
+
+  test.provider(
+    "unchanged Action chains share persisted noop outputs",
+    (stack) =>
+      Effect.gen(function* () {
+        const sourceRuns = yield* Ref.make(0);
+        const derivedRuns = yield* Ref.make(0);
+        const Source = Action("SourceAction", (_: {}) =>
+          Ref.update(sourceRuns, (count) => count + 1).pipe(
+            Effect.as({ value: "stable" }),
+          ),
+        );
+        const Derived = Action("DerivedAction", (input: { value: string }) =>
+          Ref.update(derivedRuns, (count) => count + 1).pipe(
+            Effect.as({ value: input.value }),
+          ),
+        );
+        const program = Effect.gen(function* () {
+          const source = yield* Source({});
+          const derived = yield* Derived({ value: source.value });
+          return yield* TestResource("Consumer", {
+            string: derived.value,
+          });
+        });
+
+        yield* stack.deploy(program);
+
+        const plan = yield* stack.plan(program);
+        expect(plan.actions.SourceAction.action).toBe("noop");
+        expect(plan.actions.DerivedAction.action).toBe("noop");
+        expect(plan.resources.Consumer.action).toBe("noop");
+
+        yield* stack.deploy(program);
+        expect(yield* Ref.get(sourceRuns)).toBe(1);
+        expect(yield* Ref.get(derivedRuns)).toBe(1);
+      }),
+  );
+
+  test.provider(
+    "unchanged captured values keep the Action and downstream noop",
+    (stack) =>
+      Effect.gen(function* () {
+        const runs = yield* Ref.make(0);
+        const program = Effect.gen(function* () {
+          const source = yield* TestResource("Source", { string: "stable" });
+          const Derived = Action(
+            "CapturedAction",
+            Effect.gen(function* () {
+              const captured = yield* source.string;
+              return () =>
+                Effect.gen(function* () {
+                  yield* Ref.update(runs, (count) => count + 1);
+                  return { value: yield* captured };
+                });
+            }),
+          );
+          const derived = yield* Derived({});
+          return yield* TestResource("Consumer", {
+            string: derived.value,
+          });
+        });
+
+        yield* stack.deploy(program);
+
+        const plan = yield* stack.plan(program);
+        expect(plan.resources.Source.action).toBe("noop");
+        expect(plan.actions.CapturedAction.action).toBe("noop");
+        expect(plan.resources.Consumer.action).toBe("noop");
+
+        yield* stack.deploy(program);
+        expect(yield* Ref.get(runs)).toBe(1);
+      }),
+  );
+
+  test.provider(
+    "planned noop Action reruns when an upstream noop refreshes during Apply",
+    (stack) =>
+      Effect.gen(function* () {
+        const runs = yield* Ref.make(0);
+        const program = Effect.gen(function* () {
+          const source = yield* TestResource("Source", { string: "old" });
+          const Derived = Action(
+            "Derived",
+            Effect.gen(function* () {
+              const captured = yield* source.string;
+              return () =>
+                Effect.gen(function* () {
+                  yield* Ref.update(runs, (count) => count + 1);
+                  return { value: yield* captured };
+                });
+            }),
+          );
+          const derived = yield* Derived({});
+          return yield* TestResource("Consumer", {
+            string: derived.value,
+          });
+        });
+
+        yield* stack.deploy(program);
+        const plan = yield* stack.plan(program);
+        expect(plan.resources.Source.action).toBe("noop");
+        expect(plan.actions.Derived.action).toBe("noop");
+        expect(plan.resources.Consumer.action).toBe("noop");
+
+        // Reproduce apply-time drift discovered after planning: the upstream
+        // noop re-evaluates to new desired props and upgrades itself.
+        plan.resources.Source = {
+          ...plan.resources.Source,
+          props: { string: "fresh" },
+        } as Plan.NoopUpdate;
+
+        const output = yield* apply(plan);
+        expect(output.string).toBe("fresh");
+        expect(yield* Ref.get(runs)).toBe(2);
+      }),
+  );
+
+  test.provider(
+    "planned noop Action follows a self-cyclic resource through convergence",
+    (stack) =>
+      Effect.gen(function* () {
+        const runs = yield* Ref.make(0);
+        const program = Effect.gen(function* () {
+          const source = yield* BindingTarget("Source", { string: "old" });
+          yield* source.bind("Self", { env: { SELF: source.string } });
+          const Derived = Action("Derived", (input: { value: string }) =>
+            Ref.update(runs, (count) => count + 1).pipe(
+              Effect.as({ value: input.value }),
+            ),
+          );
+          const derived = yield* Derived({ value: source.env.SELF });
+          return yield* TestResource("Consumer", {
+            string: derived.value,
+          });
+        });
+
+        yield* stack.deploy(program);
+        const plan = yield* stack.plan(program);
+        expect(plan.resources.Source.action).toBe("noop");
+        expect(plan.actions.Derived.action).toBe("noop");
+        expect(plan.resources.Consumer.action).toBe("noop");
+
+        // The self-edge lets the initial noop refresh reconcile with its old
+        // binding value; phase-3 convergence then advances `env.SELF`.
+        plan.resources.Source = {
+          ...plan.resources.Source,
+          props: { string: "fresh" },
+          bindings: plan.resources.Source.bindings.map((binding) => ({
+            ...binding,
+            data: {
+              env: { SELF: plan.resources.Source.resource.string },
+            },
+          })),
+        } as Plan.NoopUpdate;
+
+        const output = yield* apply(plan);
+        expect(output.string).toBe("fresh");
+        expect(yield* Ref.get(runs)).toBe(2);
+      }),
   );
 
   test.provider("changed input -> body re-invoked", (stack) =>

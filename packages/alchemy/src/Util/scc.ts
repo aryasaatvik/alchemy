@@ -1,17 +1,24 @@
 /**
- * Compute the set of graph nodes that participate in a dependency cycle.
+ * Cyclic graph node -> stable identity of the strongly-connected component
+ * containing it. Acyclic nodes are absent.
+ */
+export type CycleComponents = ReadonlyMap<string, string>;
+
+/**
+ * Compute the cyclic strongly-connected components of a graph.
  *
- * A node is considered "in a cycle" iff it sits in a strongly-connected
- * component (SCC) of size > 1, or has a self-edge (size-1 SCC that loops
- * back to itself).
+ * A node belongs to a cyclic SCC iff its component has size > 1, or it has a
+ * self-edge (a size-1 SCC that loops back to itself). Each member maps to the
+ * lexicographically-smallest FQN in its component, giving consumers a stable
+ * identity they can compare without conflating distinct cycles.
  *
  * Implementation is iterative Tarjan's algorithm to avoid blowing the JS
  * call stack on very wide graphs.
  */
-export const findCycleMembers = (
+export const findCycleComponents = (
   edges: Record<string, readonly string[]>,
-): Set<string> => {
-  const cycleMembers = new Set<string>();
+): CycleComponents => {
+  const cycleComponents = new Map<string, string>();
 
   let index = 0;
   const indexOf = new Map<string, number>();
@@ -63,14 +70,13 @@ export const findCycleMembers = (
           scc.push(w);
           if (w === frame.node) break;
         }
-        if (scc.length > 1) {
-          for (const fqn of scc) cycleMembers.add(fqn);
-        } else {
-          // Size-1 SCC: only counts as a cycle if it has a self-edge.
-          const only = scc[0];
-          if ((edges[only] ?? []).includes(only)) {
-            cycleMembers.add(only);
-          }
+        const only = scc[0];
+        const isCyclic = scc.length > 1 || (edges[only] ?? []).includes(only);
+        if (isCyclic) {
+          const componentId = scc.reduce((smallest, fqn) =>
+            fqn < smallest ? fqn : smallest,
+          );
+          for (const fqn of scc) cycleComponents.set(fqn, componentId);
         }
       }
 
@@ -85,5 +91,15 @@ export const findCycleMembers = (
     }
   }
 
-  return cycleMembers;
+  return cycleComponents;
+};
+
+/** Whether two nodes are peers in the same cyclic SCC. */
+export const inSameCycle = (
+  components: CycleComponents,
+  left: string,
+  right: string,
+): boolean => {
+  const component = components.get(left);
+  return component !== undefined && component === components.get(right);
 };

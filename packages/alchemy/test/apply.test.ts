@@ -690,7 +690,7 @@ describe("linear update propagation", () => {
         yield* stack.deploy(program("old-url", false));
 
         const plan = yield* stack.plan(program("new-url", true));
-        expect(plan.cycleMembers.size).toBe(0);
+        expect(plan.cycleComponents.size).toBe(0);
         expect(plan.resources.Source.action).toBe("update");
         expect(plan.resources.Alias.action).toBe("update");
         expect(plan.resources.Consumer.action).toBe("create");
@@ -1096,6 +1096,43 @@ describe("circularity via bindings", () => {
     );
 
     test.provider(
+      "external downstream waits for a self-cyclic update's terminal attr",
+      (stack) =>
+        Effect.gen(function* () {
+          yield* selfBoundStack({
+            string: "stale-value",
+          }).pipe(stack.deploy);
+
+          const downstreamUpdates: Array<string | undefined> = [];
+          const output = yield* selfBoundStack({
+            string: "fresh-value",
+          }).pipe(
+            stack.deploy,
+            hook({
+              update: (id, props) => {
+                if (id === "A") {
+                  // Keep the self-cyclic upstream between its early stale
+                  // publication and terminal reconcile long enough to make
+                  // an incorrect external early-ready dependency observable.
+                  return Effect.sleep(Duration.millis(25));
+                }
+                if (id === "B") {
+                  return Effect.sync(() => {
+                    downstreamUpdates.push(props.string);
+                  });
+                }
+                return Effect.void;
+              },
+            }),
+          );
+
+          expect(downstreamUpdates).toEqual(["fresh-value"]);
+          expect(output.B.string).toBe("fresh-value");
+        }),
+      { timeout: 10_000 },
+    );
+
+    test.provider(
       "replacing state noop replay recovers and creates downstream resources",
       (stack) =>
         Effect.gen(function* () {
@@ -1248,6 +1285,26 @@ describe("circularity via bindings", () => {
         expectConvergedStatus((yield* getState("A"))?.status);
         expectConvergedStatus((yield* getState("B"))?.status);
       }),
+    );
+
+    test.provider(
+      "updating peers in the same SCC still rendezvous on early attrs",
+      (stack) =>
+        Effect.gen(function* () {
+          yield* mutualBindingStack({
+            aString: "old-a",
+            bString: "old-b",
+          }).pipe(stack.deploy);
+
+          const output = yield* mutualBindingStack({
+            aString: "new-a",
+            bString: "new-b",
+          }).pipe(stack.deploy);
+
+          expect(output.A.env).toEqual({ PEER: "new-b" });
+          expect(output.B.env).toEqual({ PEER: "new-a" });
+        }),
+      { timeout: 10_000 },
     );
 
     test.provider("destroy succeeds with mutual bindings", (stack) =>

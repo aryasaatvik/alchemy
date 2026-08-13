@@ -500,7 +500,7 @@ export const plan = (stack: {
         deletions: {},
         actionDeletions: {},
         output: undefined,
-        cycleMembers: new Set<string>(),
+        cycleComponents: new Map<string, string>(),
       },
     } satisfies SyncPlan;
   }).pipe(

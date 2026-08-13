@@ -67,9 +67,13 @@ import {
   type UpdatedResourceState,
   type UpdatingReourceState,
 } from "./State/index.ts";
-import { isPlainData, mapPlainData } from "./Util/data.ts";
-import { findCycleMembers } from "./Util/scc.ts";
-import { hashInput } from "./Util/sha256.ts";
+import { makeActionSnapshot } from "./ActionSnapshot.ts";
+import { isPlainData } from "./Util/data.ts";
+import {
+  type CycleComponents,
+  findCycleComponents,
+  inSameCycle,
+} from "./Util/scc.ts";
 
 export type PlanError = never;
 
@@ -270,13 +274,12 @@ export type Plan<Output = any> = {
   };
   output: Output;
   /**
-   * FQNs of resources that participate in a strongly-connected component
-   * of the upstream dependency graph (or have a self-edge). The scheduler
-   * uses this to decide whether an `update` node must publish its prior
-   * attr early to break the cycle, or can simply wait for upstreams and
-   * publish a fresh attr (the common, linear case).
+   * Cyclic resource FQN -> strongly-connected component identity. The
+   * scheduler publishes prior attrs early only when a consumer and its
+   * upstream are peers in the same component; external consumers wait for
+   * terminal attrs.
    */
-  cycleMembers: ReadonlySet<string>;
+  cycleComponents: CycleComponents;
   /**
    * The run-level default {@link ProviderMode} this plan was built with
    * (`alchemy dev` → `"local"`, `alchemy deploy` → `"live"`). Renderers use
@@ -309,8 +312,8 @@ export interface MakePlanOptions {
  * least one upstream's non-stable attributes are about to change underneath
  * this consumer.
  *
- * The diff-facing projection (`materializeStableRefs`) flattens those wrappers
- * into plain stables-only objects, so `havePropsChanged` compares two identical
+ * The diff-facing value flattens those wrappers into plain stables-only
+ * objects, so `havePropsChanged` compares two identical
  * stables-only shapes and reports "no change" — even though `reconcile` will
  * observe entirely different values at apply. Feeding this flag into the
  * engine's FALLBACK verdict keeps the plan honest (the approval gate fires and
@@ -637,17 +640,64 @@ export const make = <A>(
       return { row, renamedFrom: undefined, renameMoved: false };
     });
 
-    const resolvedResources: Record<string, Effect.Effect<any>> = {};
+    type ActionDecision =
+      | {
+          action: "noop";
+          state: RanActionState;
+        }
+      | {
+          action: "run";
+          state: ActionState | undefined;
+          forced: boolean;
+        };
+
+    interface PlanResolution<A = any> {
+      /** Value retained on the plan node and evaluated against live outputs. */
+      readonly applyValue: A;
+      /** Best-known concrete projection supplied to provider diffing. */
+      readonly diffValue: A;
+    }
+
+    const resolved = <A>(value: A): PlanResolution<A> => ({
+      applyValue: value,
+      diffValue: value,
+    });
+
+    const resolvedResources: Record<
+      string,
+      Effect.Effect<PlanResolution<any>>
+    > = {};
+    const actionsByFqn = new Map(actions.map((action) => [action.FQN, action]));
+    const actionDecisions = new Map<string, ActionDecision>();
+    const resolvingActionDecisions = new Set<string>();
+    let resolveActionDecision: (
+      action: ActionLike,
+    ) => Effect.Effect<ActionDecision, Config.ConfigError>;
 
     const resolveResource = (
       resourceExpr: Output.ResourceExpr<any, any>,
-    ): Effect.Effect<any> =>
+    ): Effect.Effect<PlanResolution<any>, Config.ConfigError> =>
       Effect.gen(function* () {
-        // Tasks share the ResourceExpr machinery but have no provider /
-        // stable-properties story at plan time. Leave the expression
-        // unsubstituted — Apply resolves it from the tracker at run time.
         if (isAction(resourceExpr.src as any)) {
-          return resourceExpr;
+          const fqn = resourceExpr.src.FQN;
+          if (resolvingActionDecisions.has(fqn)) {
+            return resolved(resourceExpr);
+          }
+          const action = actionsByFqn.get(fqn);
+          const decision =
+            actionDecisions.get(fqn) ??
+            (action ? yield* resolveActionDecision(action) : undefined);
+          // A durable noop Action will publish exactly this persisted output
+          // into Apply's tracker. Exposing it during planning lets downstream
+          // providers compare concrete values without making a running,
+          // changed, forced, or otherwise-unresolved Action look settled.
+          if (decision?.action === "noop") {
+            return {
+              applyValue: resourceExpr,
+              diffValue: decision.state.output,
+            };
+          }
+          return resolved(resourceExpr);
         }
         // @ts-expect-error
         return yield* (resolvedResources[resourceExpr.src.FQN] ??=
@@ -657,23 +707,21 @@ export const make = <A>(
 
               const { provider, mode } =
                 yield* resolveProviderAndMode(resource);
-              const props = materializeStableRefs(
-                yield* resolveInput(resource.Props),
-              );
+              const props = (yield* resolveInput(resource.Props)).diffValue;
               // Falls back to the row at a former FQN (`renamedFrom`) so a
               // renamed resource's stable attributes keep flowing to
               // downstream diffs across the migration.
               const { row: oldState } = yield* getPersistedRow(resource);
 
               if (!oldState || oldState.status === "creating") {
-                return resourceExpr;
+                return resolved(resourceExpr);
               }
 
               // The resource is switching provider modes (local ⇄ live):
               // it will be replaced, so nothing about the persisted attrs
               // is stable for downstream consumers.
               if (hasModeSwitched(mode, oldState)) {
-                return resourceExpr;
+                return resolved(resourceExpr);
               }
 
               const oldProps =
@@ -711,16 +759,23 @@ export const make = <A>(
               // return one (e.g. no diff fn, or a diff that omits `stables`).
               const stables: string[] = diff?.stables ?? provider.stables ?? [];
 
-              const withStables = (output: any) =>
-                stables.length > 0
-                  ? new Output.ResourceExpr(
-                      resourceExpr.src,
-                      Object.fromEntries(
-                        stables.map((stable) => [stable, output?.[stable]]),
-                      ),
-                    )
-                  : // if there are no stable properties, treat every property as changed
-                    resourceExpr;
+              const withStables = (output: any): PlanResolution<any> => {
+                if (stables.length === 0) {
+                  // If there are no stable properties, treat every property
+                  // as changed.
+                  return resolved(resourceExpr);
+                }
+                const stableValues = Object.fromEntries(
+                  stables.map((stable) => [stable, output?.[stable]]),
+                );
+                return {
+                  applyValue: new Output.ResourceExpr(
+                    resourceExpr.src,
+                    stableValues,
+                  ),
+                  diffValue: stableValues,
+                };
+              };
 
               if (diff == null) {
                 if (havePropsChanged(oldProps, props)) {
@@ -731,7 +786,7 @@ export const make = <A>(
               } else if (diff.action === "update") {
                 return withStables(oldState?.attr);
               } else if (diff.action === "replace") {
-                return resourceExpr;
+                return resolved(resourceExpr);
               }
               // `--force` upgrades this resource's noop to an update (see the
               // diff mapping in the resource-graph pass below), so its
@@ -752,10 +807,10 @@ export const make = <A>(
                 oldState.status === "replaced"
               ) {
                 // we can safely return the attributes if we know they have stabilized
-                return oldState?.attr;
+                return resolved(oldState?.attr);
               } else {
                 // we must assume the resource doesn't exist if it hasn't stabilized
-                return resourceExpr;
+                return resolved(resourceExpr);
               }
             }),
           ));
@@ -768,8 +823,8 @@ export const make = <A>(
      * non-stable attributes are unknown at plan time and MUST be
      * re-evaluated — Apply runs `Output.evaluate(node.props, outputs)`
      * against the upstream's fresh post-reconcile attributes right before
-     * `reconcile`. This is the value plan nodes carry; the diff-facing view
-     * is derived from it by {@link materializeStableRefs}.
+     * `reconcile`. This is the value plan nodes carry; `diffValue` is the
+     * concrete projection providers compare during planning.
      */
     const resolveInput = (
       input: any,
@@ -779,10 +834,10 @@ export const make = <A>(
       // a shared visited-set) keeps legitimately-shared diamond references
       // intact and is race-free under `concurrency: "unbounded"` (#1082).
       ancestors: ReadonlySet<object> = new Set(),
-    ): Effect.Effect<any, Config.ConfigError> =>
+    ): Effect.Effect<PlanResolution<any>, Config.ConfigError> =>
       Effect.gen(function* () {
         if (!input) {
-          return input;
+          return resolved(input);
         } else if (Output.isExpr(input)) {
           return yield* resolveOutput(input);
         } else if (Config.isConfig(input)) {
@@ -799,34 +854,63 @@ export const make = <A>(
           // Resolve the ResourceExpr to get the actual resource output, then continue
           // resolving any nested outputs in the result.
           const resourceExpr = Output.of(input);
-          const resolved = yield* resolveOutput(resourceExpr);
-          if (Output.isResourceExpr(resolved)) {
-            // Still-unresolved reference (creating, replacing, or updating
-            // upstream) — keep it evaluable for Apply.
-            return resolved;
-          }
-          return yield* resolveInput(resolved, ancestors);
-        } else if (isPlainData(input)) {
-          if (ancestors.has(input)) {
-            return undefined;
-          }
-          const nested = new Set(ancestors).add(input);
-          if (Array.isArray(input)) {
-            return yield* Effect.all(
-              input.map((item) => resolveInput(item, nested)),
-              { concurrency: "unbounded" },
+          const resourceResolution = yield* resolveOutput(resourceExpr);
+          if (
+            resourceResolution.applyValue === resourceResolution.diffValue &&
+            !Output.isExpr(resourceResolution.applyValue)
+          ) {
+            return yield* resolveInput(
+              resourceResolution.applyValue,
+              ancestors,
             );
           }
-          return Object.fromEntries(
-            yield* Effect.all(
-              Object.entries(input).map(([key, value]) =>
-                resolveInput(value, nested).pipe(
-                  Effect.map((value) => [key, value]),
+          const applyValue = Output.isExpr(resourceResolution.applyValue)
+            ? resourceResolution.applyValue
+            : (yield* resolveInput(resourceResolution.applyValue, ancestors))
+                .applyValue;
+          const diffValue = Output.isExpr(resourceResolution.diffValue)
+            ? resourceResolution.diffValue
+            : (yield* resolveInput(resourceResolution.diffValue, ancestors))
+                .diffValue;
+          return { applyValue, diffValue };
+        } else if (isPlainData(input)) {
+          if (ancestors.has(input)) {
+            return resolved(undefined);
+          }
+          const nested = new Set(ancestors).add(input);
+          const entries = Array.isArray(input)
+            ? yield* Effect.all(
+                input.map((value, key) =>
+                  resolveInput(value, nested).pipe(
+                    Effect.map((value) => [key, value] as const),
+                  ),
                 ),
-              ),
-              { concurrency: "unbounded" },
-            ),
-          );
+                { concurrency: "unbounded" },
+              )
+            : yield* Effect.all(
+                Object.entries(input).map(([key, value]) =>
+                  resolveInput(value, nested).pipe(
+                    Effect.map((value) => [key, value] as const),
+                  ),
+                ),
+                { concurrency: "unbounded" },
+              );
+          const applyValue = Array.isArray(input)
+            ? entries.map(([_, value]) => value.applyValue)
+            : Object.fromEntries(
+                entries.map(([key, value]) => [key, value.applyValue]),
+              );
+          if (
+            entries.every(([_, value]) => value.applyValue === value.diffValue)
+          ) {
+            return resolved(applyValue);
+          }
+          const diffValue = Array.isArray(input)
+            ? entries.map(([_, value]) => value.diffValue)
+            : Object.fromEntries(
+                entries.map(([key, value]) => [key, value.diffValue]),
+              );
+          return { applyValue, diffValue };
         }
         // Everything else is an opaque leaf returned by identity: Duration,
         // Redacted, Date, and effect runtime values (a Worker's `exports`
@@ -836,75 +920,93 @@ export const make = <A>(
         // (#1082). Redacted additionally stays wrapped to preserve the
         // secrecy boundary. This sits after `Config.isConfig` on purpose —
         // Configs are Effects but must still resolve.
-        return input;
+        return resolved(input);
       });
 
-    /**
-     * Project a {@link resolveInput} resolution into the DIFF-facing view:
-     * replace each whole-resource `ResourceExpr` that carries stable
-     * attributes (an upstream being *updated* in place — see `withStables` in
-     * `resolveResource`) with a plain object of those stables, so the known
-     * values flow into the consumer's `diff` and `havePropsChanged` instead
-     * of the whole reference looking unresolved and `isResolved`
-     * short-circuiting (#670 — this forced the Neon `Branch` to hand-extract
-     * `project.projectId`).
-     *
-     * The projection is deliberately lossy — diffs compare VALUES. Plan nodes
-     * never carry it: they keep the evaluable resolution so `reconcile` sees
-     * the upstream's fresh non-stable attributes (e.g. a Lambda Version's
-     * `version` number — #993's alias promotion bug).
-     */
-    const materializeStableRefs = (
-      input: any,
-      // Ancestor-path cycle guard — see resolveInput (#1082). Sync DFS, so
-      // add/delete around the recursion is race-free.
-      ancestors: WeakSet<object> = new WeakSet(),
-    ): any => {
-      // Expr checks come first: Output proxies are callable, so a plain
-      // `typeof input === "object"` guard would let them slip through.
-      if (Output.isResourceExpr(input) && input.stables) {
-        return materializeStableRefs(input.stables, ancestors);
-      } else if (Output.isExpr(input)) {
-        // Genuinely unknown (e.g. a creating upstream) — nothing to show diff.
-        return input;
-      } else if (!input || !isPlainData(input)) {
-        // Primitives and non-plain instances (Duration, Redacted, Date,
-        // Effect/Layer/Context) are leaves — see isPlainData (#1082).
-        return input;
-      }
-      return mapPlainData(input, ancestors, (child) =>
-        materializeStableRefs(child, ancestors),
-      );
-    };
-
-    const resolveOutput = (expr: Output.Expr<any>): Effect.Effect<any> =>
+    const resolveOutput = (
+      expr: Output.Expr<any>,
+    ): Effect.Effect<PlanResolution<any>, Config.ConfigError> =>
       Effect.gen(function* () {
         if (Output.isResourceExpr(expr)) {
           return yield* resolveResource(expr);
         } else if (Output.isPropExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
-          return upstream?.[expr.identifier];
+          return {
+            applyValue: Output.hasOutputs(upstream.applyValue)
+              ? expr
+              : upstream.applyValue?.[expr.identifier],
+            diffValue: Output.hasOutputs(upstream.diffValue)
+              ? expr
+              : upstream.diffValue?.[expr.identifier],
+          };
         } else if (Output.isApplyExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
-          return Output.hasOutputs(upstream) ? expr : expr.f(upstream);
+          if (upstream.applyValue === upstream.diffValue) {
+            return resolved(
+              Output.hasOutputs(upstream.applyValue)
+                ? expr
+                : expr.f(upstream.applyValue),
+            );
+          }
+          return {
+            applyValue: Output.hasOutputs(upstream.applyValue)
+              ? expr
+              : expr.f(upstream.applyValue),
+            diffValue: Output.hasOutputs(upstream.diffValue)
+              ? expr
+              : expr.f(upstream.diffValue),
+          };
         } else if (Output.isEffectExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
-          return Output.hasOutputs(upstream) ? expr : yield* expr.f(upstream);
+          if (upstream.applyValue === upstream.diffValue) {
+            return resolved(
+              Output.hasOutputs(upstream.applyValue)
+                ? expr
+                : yield* expr.f(upstream.applyValue),
+            );
+          }
+          return {
+            applyValue: Output.hasOutputs(upstream.applyValue)
+              ? expr
+              : yield* expr.f(upstream.applyValue),
+            diffValue: Output.hasOutputs(upstream.diffValue)
+              ? expr
+              : yield* expr.f(upstream.diffValue),
+          };
         } else if (Output.isFlatMapExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
-          // Source still unresolved -> keep the flatMap intact for a later pass.
-          // Otherwise run `f` to produce the next Output and resolve into it.
-          return Output.hasOutputs(upstream)
+          if (upstream.applyValue === upstream.diffValue) {
+            if (Output.hasOutputs(upstream.applyValue)) return resolved(expr);
+            return yield* resolveOutput(
+              Output.asOutput(expr.f(upstream.applyValue)) as Output.Expr<any>,
+            );
+          }
+          const applyValue = Output.hasOutputs(upstream.applyValue)
             ? expr
-            : yield* resolveOutput(
-                Output.asOutput(expr.f(upstream)) as Output.Expr<any>,
-              );
+            : (yield* resolveOutput(
+                Output.asOutput(
+                  expr.f(upstream.applyValue),
+                ) as Output.Expr<any>,
+              )).applyValue;
+          const diffValue = Output.hasOutputs(upstream.diffValue)
+            ? expr
+            : (yield* resolveOutput(
+                Output.asOutput(expr.f(upstream.diffValue)) as Output.Expr<any>,
+              )).diffValue;
+          return { applyValue, diffValue };
         } else if (Output.isAllExpr(expr)) {
-          return yield* Effect.all(expr.outs.map(resolveOutput), {
+          const values = yield* Effect.all(expr.outs.map(resolveOutput), {
             concurrency: "unbounded",
           });
+          const applyValue = values.map((value) => value.applyValue);
+          return values.every((value) => value.applyValue === value.diffValue)
+            ? resolved(applyValue)
+            : {
+                applyValue,
+                diffValue: values.map((value) => value.diffValue),
+              };
         } else if (Output.isLiteralExpr(expr)) {
-          return expr.value;
+          return resolved(expr.value);
         } else if (Output.isRefExpr(expr)) {
           const refStack = expr.stack ?? stackName;
           const refStage = expr.stage ?? stage;
@@ -925,7 +1027,7 @@ export const make = <A>(
               }),
             );
           }
-          return (refState as any).attr ?? (refState as any).output;
+          return resolved((refState as any).attr ?? (refState as any).output);
         } else if (Output.isStackRefExpr(expr)) {
           const refStack = expr.stack;
           const refStage = expr.stage ?? stage;
@@ -945,7 +1047,7 @@ export const make = <A>(
               }),
             );
           }
-          return output;
+          return resolved(output);
         } else if (Output.isNamedExpr(expr)) {
           return yield* resolveOutput(expr.expr);
         }
@@ -953,6 +1055,88 @@ export const make = <A>(
           new Error("Not implemented yet" + (expr as any).kind),
         );
       });
+
+    /**
+     * Resolve the single planning decision shared by Action expressions and
+     * Action plan nodes. Only a fully materialized input matching a durable
+     * `ran` row proves the output is plan-time truth. Anything evaluable at
+     * Apply remains a run so persisted output cannot mask upstream drift.
+     */
+    resolveActionDecision = Effect.fn("plan.diff.action")(function* (
+      action: ActionLike,
+    ): Effect.fn.Return<ActionDecision, Config.ConfigError> {
+      const cached = actionDecisions.get(action.FQN);
+      if (cached) return cached;
+
+      resolvingActionDecisions.add(action.FQN);
+      const decision = yield* Effect.gen(function* () {
+        const input = yield* resolveInput(action.Input);
+        const captures = yield* resolveInput(action.Captures);
+        const persisted = persistedRows.get(action.FQN);
+        const prior = isActionState(persisted) ? persisted : undefined;
+        const inputIsResolved =
+          !Output.hasOutputs(input.diffValue) &&
+          !hasUpdatingWholeRef(input.applyValue) &&
+          !Output.hasOutputs(captures.diffValue) &&
+          !hasUpdatingWholeRef(captures.applyValue);
+        const snapshot = inputIsResolved
+          ? yield* makeActionSnapshot({
+              input: input.diffValue,
+              captures: captures.diffValue,
+            })
+          : undefined;
+        const sameInput =
+          prior?.status === "ran" &&
+          snapshot !== undefined &&
+          prior.inputHash === snapshot.inputHash;
+
+        if (sameInput && !options.force) {
+          return {
+            action: "noop" as const,
+            state: prior,
+          };
+        }
+        return {
+          action: "run" as const,
+          state: prior,
+          forced: !!options.force,
+        };
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => resolvingActionDecisions.delete(action.FQN)),
+        ),
+      );
+      actionDecisions.set(action.FQN, decision);
+      return decision;
+    });
+
+    // Resolve Actions dependency-first so every acyclic Action expression can
+    // reuse its upstream's durable noop output. Cycles are intentionally left
+    // to the in-progress guard and stay evaluable for Apply.
+    const actionDecisionOrder: ActionLike[] = [];
+    const orderedActions = new Set<string>();
+    const orderingActions = new Set<string>();
+    const orderAction = (action: ActionLike) => {
+      if (orderedActions.has(action.FQN) || orderingActions.has(action.FQN)) {
+        return;
+      }
+      orderingActions.add(action.FQN);
+      for (const upstream of Object.values(
+        Output.upstreamAny({ input: action.Input, captures: action.Captures }),
+      )) {
+        const upstreamAction = actionsByFqn.get(upstream.FQN);
+        if (upstreamAction) orderAction(upstreamAction);
+      }
+      orderingActions.delete(action.FQN);
+      orderedActions.add(action.FQN);
+      actionDecisionOrder.push(action);
+    };
+    for (const action of actions) orderAction(action);
+
+    yield* Effect.forEach(actionDecisionOrder, resolveActionDecision, {
+      concurrency: 1,
+      discard: true,
+    });
 
     // map of resource FQN -> its downstream dependencies (resources that depend on it)
     const oldDownstreamDependencies: {
@@ -1053,7 +1237,31 @@ export const make = <A>(
     // Resources that participate in a cycle when both prop and binding
     // edges are considered. Used below to decide whether an acyclic
     // binding edge should also become a downstream edge.
-    const combinedCycleMembers = findCycleMembers(allUpstreamDependencies);
+    const cycleComponents = findCycleComponents(allUpstreamDependencies);
+
+    // Actions only publish after their bodies finish and therefore cannot use
+    // the resource scheduler's early precreate/update rendezvous. Reject any
+    // SCC containing an Action instead of accepting a plan that deadlocks.
+    const actionCycleIds = new Set(
+      [...newActionFqns]
+        .map((fqn) => cycleComponents.get(fqn))
+        .filter((id): id is string => id !== undefined),
+    );
+    if (actionCycleIds.size > 0) {
+      const deadlocked = [...cycleComponents]
+        .filter(([_, component]) => actionCycleIds.has(component))
+        .map(([fqn]) => fqn);
+      const actionsInCycle = deadlocked.filter((fqn) => newActionFqns.has(fqn));
+      return yield* Effect.die(
+        new UnsupportedActionCycle({
+          message:
+            `Circular dependency involving Actions cannot be resolved: [${deadlocked.join(", ")}]. ` +
+            `Actions publish outputs only after their bodies finish and cannot rendezvous early: [${actionsInCycle.join(", ")}].`,
+          cycle: deadlocked,
+          actions: actionsInCycle,
+        }),
+      );
+    }
 
     // Map FQN -> list of downstream FQNs (resources/actions that depend on
     // this one).
@@ -1093,10 +1301,7 @@ export const make = <A>(
         }
         // Binding-only edge — exclude when both endpoints sit inside
         // the same SCC of the combined graph.
-        if (
-          combinedCycleMembers.has(upFqn) &&
-          combinedCycleMembers.has(downFqn)
-        ) {
+        if (inSameCycle(cycleComponents, upFqn, downFqn)) {
           continue;
         }
         downstream.push(downFqn);
@@ -1127,11 +1332,11 @@ export const make = <A>(
             // Apply runs `Output.evaluate(node.props, outputs)` right before
             // `reconcile`, so these references resolve to the upstream's
             // fresh post-reconcile attributes.
-            const applyProps = yield* resolveInput(resource.Props);
-            // Diff-facing view of the same resolution: stable attributes
-            // materialized so their known values flow into `diff` /
-            // `havePropsChanged`.
-            const news = materializeStableRefs(applyProps);
+            const props = yield* resolveInput(resource.Props);
+            const applyProps = props.applyValue;
+            // Diff-facing view of the same resolution: known stable and
+            // persisted values flow into `diff` / `havePropsChanged`.
+            const news = props.diffValue;
             const downstream = newDownstreamDependencies[fqn] ?? [];
 
             // Apply-facing binding rows, mirroring `applyProps`: payloads
@@ -1142,16 +1347,18 @@ export const make = <A>(
             // post-reconcile attributes. Collapse duplicates by sid so the
             // binding set handed to `diff` matches what `reconcile` receives
             // (see `dedupeBindings`).
+            const bindings = yield* resolveInput(stack.bindings[fqn] ?? []);
             const applyBindings: ResourceBinding[] = dedupeBindings(
-              yield* resolveInput(stack.bindings[fqn] ?? []),
+              bindings.applyValue,
             );
             // Diff-facing view of the same rows: stable attributes
             // materialized so `diffBindings` / `provider.diff` compare known
             // values. Terminal commits still persist the payload the provider
             // actually reconciled with (#874) — Apply commits the evaluated
             // `bindingOutputs`, not these plan-time shapes.
-            const newBindings: ResourceBinding[] =
-              materializeStableRefs(applyBindings);
+            const newBindings: ResourceBinding[] = dedupeBindings(
+              bindings.diffValue,
+            );
             // The row is looked up at the resource's FQN with a fallback to
             // its former FQNs (`renamedFrom`); a row found under a former
             // FQN arrives here already remapped to the new identity, and
@@ -1659,18 +1866,8 @@ export const make = <A>(
           Effect.fn("plan.diff.action")(function* (action) {
             const fqn = action.FQN;
             const downstream = newDownstreamDependencies[fqn] ?? [];
-            // The node carries the RAW input expression (evaluated at apply);
-            // the drift hash uses the diff-facing view so stable upstream
-            // attributes hash as their known values.
-            const resolvedInput = materializeStableRefs(
-              yield* resolveInput(action.Input),
-            );
-            const inputHash = yield* hashInput(resolvedInput);
-            const oldState = yield* state.get({
-              stack: stackName,
-              stage,
-              fqn,
-            });
+            const decision = actionDecisions.get(fqn)!;
+            const oldState = persistedRows.get(fqn);
 
             if (oldState && !isActionState(oldState)) {
               // FQN collision with a resource — surface as a fatal error so
@@ -1689,17 +1886,14 @@ export const make = <A>(
               ] as const;
             }
 
-            const prior = oldState as ActionState | undefined;
-            const sameInput =
-              prior?.status === "ran" && prior.inputHash === inputHash;
-            if (sameInput && !options.force) {
+            if (decision.action === "noop") {
               return [
                 fqn,
                 {
                   kind: "action",
                   action: "noop",
                   def: action,
-                  state: prior as RanActionState,
+                  state: decision.state,
                   downstream,
                 } satisfies ActionNoop,
               ] as const;
@@ -1711,9 +1905,9 @@ export const make = <A>(
                 action: "run",
                 def: action,
                 input: action.Input,
-                state: prior,
+                state: decision.state,
                 downstream,
-                forced: !!options.force,
+                forced: decision.forced,
               } satisfies ActionRun,
             ] as const;
           }),
@@ -1721,12 +1915,6 @@ export const make = <A>(
         { concurrency: "unbounded" },
       )) as ReadonlyArray<readonly [string, ActionApply]>,
     ) as Plan["actions"];
-
-    // SCC membership of the combined upstream graph. Apply uses it to
-    // decide whether an update node must publish its prior attr early to
-    // break a cycle, or can simply wait for upstreams like a DAG node
-    // (the common case). Computed once, above, for the downstream graph.
-    const cycleMembers = combinedCycleMembers;
 
     // Detect unsatisfiable dependency cycles among create/replace nodes.
     // Update/noop nodes signal their Deferred before waitForDeps when in a
@@ -1948,7 +2136,7 @@ export const make = <A>(
       deletions,
       actionDeletions,
       output: stack.output,
-      cycleMembers,
+      cycleComponents,
       defaultMode: runDefaultMode,
     } satisfies Plan<A> as Plan<A>;
   }).pipe(
@@ -2017,6 +2205,14 @@ export class UnsatisfiedResourceCycle extends Data.TaggedError(
   message: string;
   cycle: string[];
   missingPrecreate: string[];
+}> {}
+
+export class UnsupportedActionCycle extends Data.TaggedError(
+  "UnsupportedActionCycle",
+)<{
+  message: string;
+  cycle: string[];
+  actions: string[];
 }> {}
 
 // TODO(sam): compare props

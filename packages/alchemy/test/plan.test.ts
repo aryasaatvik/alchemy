@@ -1313,6 +1313,25 @@ describe("construct namespaces", () => {
       expect(plan.deletions).toEqual({});
     }),
   );
+
+  test(
+    "binding edges between distinct self-cyclic SCCs remain downstream edges",
+    Effect.gen(function* () {
+      const plan = yield* Effect.gen(function* () {
+        const A = yield* BindingTarget("A", { string: "a-value" });
+        const B = yield* BindingTarget("B", { string: "b-value" });
+
+        yield* A.bind("SelfA", { env: { SELF: A.string } });
+        yield* B.bind("SelfB", { env: { SELF: B.string } });
+        yield* B.bind("FromA", { env: { UPSTREAM: A.string } });
+      }).pipe(makePlan);
+
+      expect(plan.cycleComponents.get("A")).toBe("A");
+      expect(plan.cycleComponents.get("B")).toBe("B");
+      expect(plan.resources.A?.downstream).toEqual(["B"]);
+      expect(plan.resources.B?.downstream).toEqual([]);
+    }),
+  );
 });
 
 const createTestResourceState = (options: {

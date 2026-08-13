@@ -24,7 +24,7 @@ interface BaseActionState {
   status: ActionStatus;
   /** FQNs of nodes that depend on this Action's output. */
   downstream: string[];
-  /** Hash of the resolved input, used to skip noop runs. */
+  /** Hash of the resolved input and captured values, used to skip noop runs. */
   inputHash: string;
   /** Resolved input snapshot from the most recent attempt. */
   input: unknown;

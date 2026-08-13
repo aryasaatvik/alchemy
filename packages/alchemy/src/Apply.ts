@@ -8,6 +8,7 @@ import type { PlatformError } from "effect/PlatformError";
 import type { Simplify } from "effect/Types";
 import type { ActionLike } from "./Action.ts";
 import { makeResolveContext } from "./ActionRuntimeContext.ts";
+import { makeActionSnapshot, type ActionSnapshot } from "./ActionSnapshot.ts";
 import { stripUnowned, Unowned } from "./AdoptPolicy.ts";
 import { AlchemyContext } from "./AlchemyContext.ts";
 import type { AuthError } from "./Auth/AuthProvider.ts";
@@ -49,7 +50,6 @@ import type { ResourceBinding } from "./Resource.ts";
 import { Stack } from "./Stack.ts";
 import { Stage } from "./Stage.ts";
 import {
-  type ActionState,
   type CreatedResourceState,
   type CreatingResourceState,
   type DeletingResourceState,
@@ -66,7 +66,7 @@ import {
   StateStoreError,
 } from "./State/index.ts";
 import { type ResourceOp, recordResourceOp } from "./Telemetry/Metrics.ts";
-import { hashInput } from "./Util/sha256.ts";
+import { inSameCycle } from "./Util/scc.ts";
 
 export type ApplyEffect<
   P extends Plan,
@@ -391,7 +391,7 @@ const executePlan = Effect.fn(function* (
       Object.entries(tracker).map(([fqn, t]) => [fqn, t.output]),
     );
 
-  const waitForDeps = (fqns: string[]) =>
+  const waitForDeps = (consumerFqn: string, fqns: string[]) =>
     Effect.all(
       fqns
         .filter((fqn) => fqn in ready)
@@ -405,11 +405,11 @@ const executePlan = Effect.fn(function* (
           // failed. Waiting on `readyStable` means the downstream's
           // `waitForDeps` short-circuits with the upstream's failure cause.
           //
-          // Cycle members are the exception: peers in an SCC depend on each
-          // other, so they must rendezvous on the early `ready`/precreate
-          // signal to break the deadlock. Phase 3 (`converge`) re-runs them
-          // against final outputs once the cycle settles.
-          plan.cycleMembers.has(fqn)
+          // Peers in the SAME SCC are the exception: they must rendezvous on
+          // the early `ready`/precreate signal to break the deadlock. A node
+          // outside that SCC must still wait for terminal output even when
+          // its upstream participates in some cycle of its own.
+          inSameCycle(plan.cycleComponents, consumerFqn, fqn)
             ? Deferred.await(ready[fqn])
             : Deferred.await(readyStable[fqn]),
         ),
@@ -456,9 +456,9 @@ const executePlan = Effect.fn(function* (
             stackName,
             stage,
             getOutputs,
-            waitForDeps,
+            (fqns) => waitForDeps(fqn, fqns),
             failures,
-            plan.cycleMembers.has(fqn),
+            plan.cycleComponents.has(fqn),
           ),
     ),
     { concurrency: "unbounded" },
@@ -1471,19 +1471,83 @@ const executeNode = (
  * during init against the current tracker and exposing them to the body through
  * the resolve {@link RuntimeContext}. See {@link makeCaptureContext}.
  */
+const resolveActionCaptures = Effect.fn("apply.resolveActionCaptures")(
+  function* (task: ActionLike, outputs: Record<string, any>) {
+    const resolved: Record<string, unknown> = {};
+    for (const [key, output] of Object.entries(task.Captures)) {
+      resolved[key] = yield* Output.evaluate(output, outputs);
+    }
+    return resolved;
+  },
+);
+
 const runAction = Effect.fn("apply.runAction")(function* (
   task: ActionLike,
   input: any,
-  outputs: Record<string, any>,
+  captures: Record<string, unknown>,
 ) {
-  const resolved: Record<string, unknown> = {};
-  for (const [key, output] of Object.entries(task.Captures)) {
-    resolved[key] = yield* Output.evaluate(output, outputs);
-  }
   return yield* task
     .Run(input)
-    .pipe(Effect.provideService(RuntimeContext, makeResolveContext(resolved)));
+    .pipe(Effect.provideService(RuntimeContext, makeResolveContext(captures)));
 });
+
+/** Run one Action snapshot and atomically describe both persistence phases. */
+const runAndPersistAction = Effect.fn("apply.runAndPersistAction")(
+  function* (options: {
+    fqn: string;
+    task: ActionLike;
+    snapshot: ActionSnapshot;
+    downstream: string[];
+    state: {
+      set: <V extends PersistedState>(req: {
+        stack: string;
+        stage: string;
+        fqn: string;
+        value: V;
+      }) => Effect.Effect<V, StateStoreError, never>;
+    };
+    stackName: string;
+    stage: string;
+  }) {
+    const { fqn, task, snapshot, downstream, state, stackName, stage } =
+      options;
+    const common = {
+      kind: "action" as const,
+      fqn,
+      logicalId: task.LogicalId,
+      namespace: task.Namespace,
+      actionType: task.Type,
+      inputHash: snapshot.inputHash,
+      input: snapshot.input,
+      downstream,
+    };
+
+    yield* state.set({
+      stack: stackName,
+      stage,
+      fqn,
+      value: {
+        ...common,
+        status: "running",
+      } satisfies RunningActionState,
+    });
+
+    const output = yield* runAction(task, snapshot.input, snapshot.captures);
+
+    yield* state.set({
+      stack: stackName,
+      stage,
+      fqn,
+      value: {
+        ...common,
+        status: "ran",
+        output,
+      } satisfies RanActionState,
+    });
+
+    return output;
+  },
+);
 
 const executeActionNode = (
   fqn: string,
@@ -1518,16 +1582,6 @@ const executeActionNode = (
   Effect.gen(function* () {
     const task = node.def;
     const logicalId = task.LogicalId;
-    const namespace = task.Namespace;
-
-    const commit = <S extends ActionState>(value: Omit<S, "namespace">) =>
-      state.set({
-        stack: stackName,
-        stage,
-        fqn,
-        value: { ...value, namespace } as S,
-      });
-
     const report = (status: ApplyStatus) =>
       session.emit({
         kind: "status-change",
@@ -1539,72 +1593,72 @@ const executeActionNode = (
     const signalReady = Deferred.succeed(ready[fqn], void 0);
     const signalReadyStable = Deferred.succeed(readyStable[fqn], void 0);
 
+    const actionInput = node.action === "run" ? node.input : task.Input;
+    const dependencies = [
+      ...new Set([
+        ...Object.keys(Output.resolveUpstream(actionInput)),
+        ...Object.keys(Output.upstreamAny(task.Captures)),
+      ]),
+    ].filter((dependency) => dependency in readyStable);
+
+    if (node.action === "run") {
+      // Actions wait for terminal upstream values and have no early cycle
+      // rendezvous. Action-containing SCCs are rejected during planning.
+      yield* report("pending");
+    }
+    yield* waitForDeps(dependencies);
+
+    const outputs = getOutputs();
+    const resolvedInput = (yield* Output.evaluate(actionInput, outputs)) as any;
+    const resolvedCaptures = yield* resolveActionCaptures(task, outputs);
+    const snapshot = yield* makeActionSnapshot({
+      input: resolvedInput,
+      captures: resolvedCaptures,
+    });
+
     if (node.action === "noop") {
-      tracker[fqn] = {
-        output: node.state.output,
-        props: { __input: node.state.input },
-        bindings: [],
-        instanceId: fqn,
-      };
-      yield* signalReady;
-      yield* signalReadyStable;
-      terminalStatuses.set(fqn, {
-        id: logicalId,
-        type: task.Type,
-        status: "skipped",
-      });
-      yield* report("skipped");
-      return;
+      // Plan-time noop truth can drift if an upstream planned noop refreshes
+      // to new attributes during Apply. Recheck after every dependency is
+      // stable and upgrade to a run instead of publishing stale output.
+      if (snapshot.inputHash !== node.state.inputHash) {
+        yield* report("pending");
+      } else {
+        tracker[fqn] = {
+          output: node.state.output,
+          props: {
+            __input: node.state.input,
+            __inputHash: node.state.inputHash,
+          },
+          bindings: [],
+          instanceId: fqn,
+        };
+        yield* signalReady;
+        yield* signalReadyStable;
+        terminalStatuses.set(fqn, {
+          id: logicalId,
+          type: task.Type,
+          status: "skipped",
+        });
+        yield* report("skipped");
+        return;
+      }
     }
 
     // ── run ──
-    // Tasks wait on `waitForStableDeps` (post-reconcile attrs) for their
-    // upstreams, which is often the slowest dep chain in the deploy.
-    // Surface that as "pending" instead of having the task show no status
-    // until its run actually starts.
-    yield* report("pending");
-    yield* waitForDeps(
-      [
-        ...new Set([
-          ...Object.keys(Output.resolveUpstream(node.input)),
-          ...Object.keys(Output.upstreamAny(task.Captures)),
-        ]),
-      ].filter((f) => f in readyStable),
-    );
-
-    const outputs = getOutputs();
-    const resolvedInput = (yield* Output.evaluate(node.input, outputs)) as any;
-    const inputHashValue = yield* hashInput(resolvedInput);
-
-    yield* commit<RunningActionState>({
-      kind: "action",
-      status: "running",
-      fqn,
-      logicalId,
-      actionType: task.Type,
-      inputHash: inputHashValue,
-      input: resolvedInput,
-      downstream: node.downstream,
-    });
     yield* report("running");
-
-    const result = yield* runAction(task, resolvedInput, outputs);
-
-    yield* commit<RanActionState>({
-      kind: "action",
-      status: "ran",
+    const result = yield* runAndPersistAction({
       fqn,
-      logicalId,
-      actionType: task.Type,
-      inputHash: inputHashValue,
-      input: resolvedInput,
-      output: result,
+      task,
+      snapshot,
       downstream: node.downstream,
+      state,
+      stackName,
+      stage,
     });
 
     tracker[fqn] = {
       output: result,
-      props: { __input: resolvedInput },
+      props: { __input: resolvedInput, __inputHash: snapshot.inputHash },
       bindings: [],
       instanceId: fqn,
     };
@@ -1795,65 +1849,40 @@ const converge = Effect.fn(function* (
       });
     }
 
-    // Tasks: re-run when their resolved input drifts vs. the value they
-    // last applied with (e.g. an upstream resource produced new attrs in
-    // this pass). Skipped (noop) tasks are not re-checked here — their
-    // recorded inputHash is authoritative until the next plan.
+    // Actions: re-run when their resolved input or captures drift vs. the
+    // value they last applied with. This includes plan-time noops: an
+    // external Action can observe an SCC member's initial terminal value,
+    // then need another run after resource convergence changes it.
     for (const [fqn, node] of Object.entries(plan.actions)) {
-      if (node.action !== "run") continue;
       if (!tracker[fqn]) continue;
 
       const outputs = Object.fromEntries(
         Object.entries(tracker).map(([k, t]) => [k, t.output]),
       );
-      const newInput = (yield* Output.evaluate(node.input, outputs)) as any;
-      const newHash = yield* hashInput(newInput);
-      const oldInput = tracker[fqn].props?.__input;
-      const oldHash = yield* hashInput(oldInput);
-      if (newHash === oldHash) continue;
+      const actionInput = node.action === "run" ? node.input : node.def.Input;
+      const newInput = (yield* Output.evaluate(actionInput, outputs)) as any;
+      const newCaptures = yield* resolveActionCaptures(node.def, outputs);
+      const snapshot = yield* makeActionSnapshot({
+        input: newInput,
+        captures: newCaptures,
+      });
+      const oldHash = tracker[fqn].props?.__inputHash;
+      if (snapshot.inputHash === oldHash) continue;
 
       anyUpdated = true;
-
-      yield* state.set({
-        stack: stackName,
-        stage,
+      const result = yield* runAndPersistAction({
         fqn,
-        value: {
-          kind: "action",
-          status: "running",
-          fqn,
-          logicalId: node.def.LogicalId,
-          namespace: node.def.Namespace,
-          actionType: node.def.Type,
-          inputHash: newHash,
-          input: newInput,
-          downstream: node.downstream,
-        } satisfies RunningActionState,
-      });
-
-      const result = yield* runAction(node.def, newInput, outputs);
-
-      yield* state.set({
-        stack: stackName,
+        task: node.def,
+        snapshot,
+        downstream: node.downstream,
+        state,
+        stackName,
         stage,
-        fqn,
-        value: {
-          kind: "action",
-          status: "ran",
-          fqn,
-          logicalId: node.def.LogicalId,
-          namespace: node.def.Namespace,
-          actionType: node.def.Type,
-          inputHash: newHash,
-          input: newInput,
-          output: result,
-          downstream: node.downstream,
-        } satisfies RanActionState,
       });
 
       tracker[fqn] = {
         output: result,
-        props: { __input: newInput },
+        props: { __input: newInput, __inputHash: snapshot.inputHash },
         bindings: [],
         instanceId: fqn,
       };
