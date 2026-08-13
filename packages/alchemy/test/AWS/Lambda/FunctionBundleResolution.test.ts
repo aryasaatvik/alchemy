@@ -1,5 +1,10 @@
 import * as Bundle from "@/Bundle/Bundle";
-import { resolveFunctionBundleConfig } from "@/AWS/Lambda/Function";
+import {
+  makeFunctionProvider,
+  resolveFunctionBundleConfig,
+  type FunctionCodeBundle,
+  type FunctionProps,
+} from "@/AWS/Lambda/Function";
 import {
   prepareLocalFunctionBundle,
   writeLocalBundleFiles,
@@ -13,6 +18,116 @@ import * as Path from "effect/Path";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 
 layer(NodeServices.layer)("Lambda function bundle resolution", (it) => {
+  it.effect(
+    "invalidates an Effectful Function when a transitive source changes",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const platform = yield* Effect.context<
+          FileSystem.FileSystem | Path.Path
+        >();
+        const root = yield* fs.makeTempDirectory({
+          prefix: "alchemy-lambda-transitive-source-",
+        });
+        const entry = path.join(root, "handler.mjs");
+        const dependency = path.join(root, "dependency.mjs");
+
+        const writeDependency = (generation: string) =>
+          fs.writeFileString(
+            dependency,
+            `export const generation = ${JSON.stringify(generation)};`,
+          );
+
+        try {
+          yield* fs.writeFileString(
+            path.join(root, "package.json"),
+            JSON.stringify({ type: "module" }),
+          );
+          yield* fs.writeFileString(
+            entry,
+            'import { generation } from "./dependency.mjs"; export const handler = () => generation;',
+          );
+          yield* writeDependency("generation-one");
+
+          const props = {
+            main: entry,
+            isExternal: true,
+          } satisfies FunctionProps;
+          const bundleCode = Effect.fn(function* (
+            _id: string,
+            news: FunctionProps,
+          ): Effect.fn.Return<FunctionCodeBundle, Bundle.BundleError> {
+            const config = yield* resolveFunctionBundleConfig(news).pipe(
+              Effect.provide(platform),
+              Effect.mapError((cause) =>
+                cause instanceof Bundle.BundleError
+                  ? cause
+                  : new Bundle.BundleError({
+                      message: "Failed to resolve the fixture bundle",
+                      cause,
+                    }),
+              ),
+            );
+            const bundle = yield* Bundle.build(
+              config.inputOptions,
+              config.outputOptions,
+              config.extra,
+            );
+            return {
+              identityHash: bundle.hash,
+              buildArchive: Effect.succeed({
+                archive: new Uint8Array(),
+                archiveHash: bundle.hash,
+              }),
+            };
+          });
+          const provider = yield* makeFunctionProvider({ bundleCode });
+          const initial = yield* bundleCode("Function", props);
+          const attrs = (hash: string) => ({
+            functionArn: "arn:aws:lambda:us-east-1:123:function:test",
+            functionName: "test",
+            functionUrl: undefined,
+            roleName: "test-role",
+            roleArn: "arn:aws:iam::123:role/test-role",
+            code: { hash },
+          });
+          const desired = {
+            ...props,
+            // Platform() adds this runtime-only Effect to every Effectful
+            // Function declaration. Persisted props intentionally omit it.
+            exports: Effect.succeed(["handler"]),
+          };
+          const diff = (hash: string) =>
+            provider.diff!({
+              id: "Function",
+              fqn: "Function",
+              instanceId: "instance",
+              olds: props,
+              news: desired,
+              output: attrs(hash),
+              oldBindings: [],
+              newBindings: [],
+            });
+
+          expect(yield* diff(initial.identityHash)).toEqual({ action: "noop" });
+
+          yield* writeDependency("generation-two");
+          expect(yield* diff(initial.identityHash)).toEqual({
+            action: "update",
+          });
+
+          // Model Apply persisting the terminal bundle identity: the next
+          // unchanged plan must return to noop instead of remaining dirty.
+          const updated = yield* bundleCode("Function", props);
+          expect(updated.identityHash).not.toBe(initial.identityHash);
+          expect(yield* diff(updated.identityHash)).toEqual({ action: "noop" });
+        } finally {
+          yield* fs.remove(root, { recursive: true }).pipe(Effect.ignore);
+        }
+      }),
+  );
+
   it.effect("externalizes workerd's virtual module", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

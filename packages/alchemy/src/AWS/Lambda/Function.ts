@@ -33,7 +33,12 @@ import {
   type PackageInstall,
 } from "../../Bundle/InstalledPackages.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
-import { deepEqual, havePropsChanged, isResolved } from "../../Diff.ts";
+import {
+  deepEqual,
+  havePropsChanged,
+  isResolved,
+  stripEffects,
+} from "../../Diff.ts";
 import { isScopeEjected, type HttpEffect } from "../../Http.ts";
 import * as Output from "../../Output.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
@@ -2274,9 +2279,16 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
       diff: Effect.fn(function* ({
         id,
         olds,
-        news,
+        news: desired,
         output,
       }: FunctionLifecycleInput<"diff">) {
+        // Effectful Function declarations attach their runtime exports as an
+        // Effect-valued prop. That wiring is rebuilt from `main` and is not
+        // part of the provider's desired cloud configuration, so persisted
+        // props intentionally omit it. Strip runtime-only Effects before the
+        // resolution gate; otherwise every Effectful Function skips the
+        // bundle hash below and a transitive source-only edit plans `noop`.
+        const news = stripEffects(desired);
         if (!isResolved(news)) return;
         // If output is undefined (resource in creating state), defer to default diff
         if (!output) {
