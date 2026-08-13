@@ -472,6 +472,23 @@ const makeDurableHandle = (options: {
     } satisfies DurableFunction<any, any>;
   });
 
+/**
+ * Build a management-plane handle for a Durable Function owned by another
+ * Lambda. Unlike the function's self handle, this binds the target's deployed
+ * physical name into the ambient caller Function.
+ */
+export const reference = <Input = unknown, Result = unknown>(
+  durable: DurableFunction<Input, Result>,
+) =>
+  Effect.gen(function* () {
+    const functionName = yield* durable.functionName;
+    return yield* makeDurableHandle({
+      name: durable.name,
+      host: durable.function,
+      functionName,
+    });
+  });
+
 const resolveDurableHandle = (id: string) => (instance: unknown) => {
   const handle = (instance as Record<symbol, unknown> | undefined)?.[
     DurableHandleKey

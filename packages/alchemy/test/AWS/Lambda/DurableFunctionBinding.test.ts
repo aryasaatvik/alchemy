@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { pathToFileURL } from "node:url";
 import NestedDurableParentLive, {
+  NestedDurable,
   NestedDurableParent,
 } from "./fixtures/nested-durable-parent.ts";
 import SelfDurableLive, { SelfDurable } from "./fixtures/self-durable.ts";
@@ -153,7 +154,7 @@ test.provider(
         () => import(`${pathToFileURL(entry).href}?test=${Date.now()}`),
       )) as {
         default: (
-          event: { operation: "start" | "list" },
+          event: { operation: "start" | "list" | "implicit-list" },
           context: object,
         ) => Promise<unknown>;
       };
@@ -164,7 +165,12 @@ test.provider(
       expect(
         yield* Effect.promise(() => module.default({ operation: "list" }, {})),
       ).toMatchObject({ DurableExecutions: [] });
-      expect(requests).toHaveLength(2);
+      expect(
+        yield* Effect.promise(() =>
+          module.default({ operation: "implicit-list" }, {}),
+        ),
+      ).toMatchObject({ DurableExecutions: [] });
+      expect(requests).toHaveLength(3);
       expect(
         requests.every((request) => request.includes("NestedDurable-deployed")),
       ).toBe(true);
@@ -186,7 +192,7 @@ test.provider(
           "Expected string, got undefined",
         );
       }
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
     }),
   { timeout: 60_000 },
 );

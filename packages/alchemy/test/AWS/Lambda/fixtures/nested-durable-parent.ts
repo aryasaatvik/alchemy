@@ -27,12 +27,16 @@ export default NestedDurableParent.make(
         child,
       ),
     );
+    const reference = yield* Lambda.reference(durable);
     const host = yield* Lambda.Function;
 
-    yield* host.listen((event: { operation: "start" | "list" }) =>
-      event.operation === "start"
-        ? durable.start({ name: "nested-runtime", qualifier: "live" })
-        : durable.list({ name: "nested-runtime", qualifier: "live" }),
+    yield* host.listen(
+      (event: { operation: "start" | "list" | "implicit-list" }) =>
+        event.operation === "start"
+          ? reference.start({ name: "nested-runtime", qualifier: "live" })
+          : event.operation === "list"
+            ? reference.list({ name: "nested-runtime", qualifier: "live" })
+            : durable.list({ name: "nested-runtime", qualifier: "live" }),
     );
 
     return {};
