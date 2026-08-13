@@ -412,18 +412,19 @@ const makeDurableHandle = (name: string, host: Function) =>
     const sendCallbackHeartbeat =
       yield* Lambda.sendDurableExecutionCallbackHeartbeat;
 
-    // Capture the function-name Output WITHOUT resolving it. This is a
-    // self-reference — `host` is the very Function this wrapper owns — and
-    // its Output source only registers during reconcile. Resolve it lazily
-    // inside runtime callables instead.
-    const FunctionName = host.functionName;
+    // Bind the function name during init so a nested DurableFunction handle
+    // serializes the child's deployed identity into its parent runtime. The
+    // returned accessor reads that bound value at runtime. This is also the
+    // normal self-handle path: the Output dependency remains visible to the
+    // planner and the Function's cycle-aware apply rendezvous resolves it.
+    const FunctionName = yield* host.functionName;
 
     const handle: DurableFunctionHandle<any, any> = {
       Type: TypeId,
       name,
       start: (options) =>
         Effect.gen(function* () {
-          const functionName = yield* yield* FunctionName;
+          const functionName = yield* FunctionName;
           const response = yield* invoke({
             FunctionName: functionName,
             InvocationType: "Event",
@@ -440,7 +441,7 @@ const makeDurableHandle = (name: string, host: Function) =>
         getDurableExecution({ DurableExecutionArn: executionArn }),
       list: (options) =>
         Effect.gen(function* () {
-          const functionName = yield* yield* FunctionName;
+          const functionName = yield* FunctionName;
           return yield* listDurableExecutionsByFunction(
             makeDurableListRequest(functionName, options),
           );
