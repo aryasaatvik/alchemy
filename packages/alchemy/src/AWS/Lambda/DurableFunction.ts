@@ -1,4 +1,5 @@
 import * as Lambda from "@distilled.cloud/aws/lambda";
+import * as Config from "effect/Config";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
 import type * as Duration from "effect/Duration";
@@ -395,8 +396,13 @@ export const makeDurableSelfManagementPolicyStatements = (
   },
 ];
 
-const makeDurableHandle = (name: string, host: Function) =>
+const makeDurableHandle = (options: {
+  name: string;
+  host: Function;
+  functionName: Effect.Effect<string>;
+}) =>
   Effect.gen(function* () {
+    const { name, host, functionName } = options;
     // Resolve the distilled operations once at init — they close over the
     // ambient Credentials/Region/HttpClient so the handle's runtime
     // callables need no cloud services of their own.
@@ -412,21 +418,14 @@ const makeDurableHandle = (name: string, host: Function) =>
     const sendCallbackHeartbeat =
       yield* Lambda.sendDurableExecutionCallbackHeartbeat;
 
-    // Bind the function name during init so a nested DurableFunction handle
-    // serializes the child's deployed identity into its parent runtime. The
-    // returned accessor reads that bound value at runtime. This is also the
-    // normal self-handle path: the Output dependency remains visible to the
-    // planner and the Function's cycle-aware apply rendezvous resolves it.
-    const FunctionName = yield* host.functionName;
-
     const handle: DurableFunctionHandle<any, any> = {
       Type: TypeId,
       name,
       start: (options) =>
         Effect.gen(function* () {
-          const functionName = yield* FunctionName;
+          const resolvedFunctionName = yield* functionName;
           const response = yield* invoke({
-            FunctionName: functionName,
+            FunctionName: resolvedFunctionName,
             InvocationType: "Event",
             DurableExecutionName: options?.name,
             Qualifier: options?.qualifier,
@@ -441,9 +440,9 @@ const makeDurableHandle = (name: string, host: Function) =>
         getDurableExecution({ DurableExecutionArn: executionArn }),
       list: (options) =>
         Effect.gen(function* () {
-          const functionName = yield* FunctionName;
+          const resolvedFunctionName = yield* functionName;
           return yield* listDurableExecutionsByFunction(
-            makeDurableListRequest(functionName, options),
+            makeDurableListRequest(resolvedFunctionName, options),
           );
         }),
       stop: (executionArn, error) =>
@@ -484,7 +483,13 @@ const resolveDurableHandle = (id: string) => (instance: unknown) => {
     // A nested DurableFunction is a reference when another platform is
     // booting at runtime. Its handler init must not run in the parent, but
     // callers still need the management-plane handle backed by its resource.
-    return makeDurableHandle(id, instance as Function);
+    const host = instance as Function;
+    return Effect.gen(function* () {
+      // A nested handle crosses a Lambda boundary, so bind the child's
+      // deployed name into the parent while its init graph is being built.
+      const functionName = yield* host.functionName;
+      return yield* makeDurableHandle({ name: id, host, functionName });
+    });
   }
   return Effect.die(
     new Error(
@@ -552,7 +557,17 @@ const composeDurableImpl = (
       });
     }
 
-    const handle = yield* makeDurableHandle(name, host);
+    // Lambda already supplies its own physical name at runtime. Reading that
+    // standard environment value keeps the self-handle out of the Function's
+    // deploy-time props; binding host.functionName here would make the
+    // Function depend on its own output and deadlock plan resolution.
+    const handle = yield* makeDurableHandle({
+      name,
+      host,
+      functionName: Config.string("AWS_LAMBDA_FUNCTION_NAME").pipe(
+        Effect.orDie,
+      ),
+    });
 
     // Publish the reference before evaluating the handler init. The init can
     // resolve DurableFunctionScope for chained starts, while other platforms
