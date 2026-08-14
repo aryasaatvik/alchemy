@@ -2304,6 +2304,36 @@ describe("whole-resource refs resolve to the upstream's stable attributes", () =
     });
 
   test(
+    "a mapped property absent from an updating upstream's stable projection stays evaluable",
+    Effect.gen(function* () {
+      yield* seedUpdatingUpstream();
+
+      let mapperCalls = 0;
+      const plan = yield* Effect.gen(function* () {
+        const A = yield* TestResource("A", { string: "new-value" });
+        yield* TestResource("B", {
+          string: A.string.pipe(
+            Output.map((value) => {
+              mapperCalls += 1;
+              if (value === undefined) {
+                throw new TypeError("unknown output reached the mapper");
+              }
+              return value.toUpperCase();
+            }),
+          ),
+        });
+      }).pipe(makePlan);
+
+      expect(plan.resources.A!.action).toBe("update");
+      expect(plan.resources.B!.action).toBe("create");
+      expect(mapperCalls).toBe(0);
+      expect(Output.isApplyExpr((plan.resources.B as any).props.string)).toBe(
+        true,
+      );
+    }),
+  );
+
+  test(
     "the node's whole-resource ref stays an evaluable Expr carrying the stable attributes",
     Effect.gen(function* () {
       yield* seedUpdatingUpstream();

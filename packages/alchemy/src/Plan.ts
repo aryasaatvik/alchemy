@@ -931,13 +931,26 @@ export const make = <A>(
           return yield* resolveResource(expr);
         } else if (Output.isPropExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
+          const applyHasOutputs = Output.hasOutputs(upstream.applyValue);
+          const diffHasOutputs = Output.hasOutputs(upstream.diffValue);
+          // An updating resource's diff projection contains only stable
+          // attributes. A missing property is therefore unknown until Apply,
+          // not a concrete `undefined` that a downstream mapper may consume.
+          const diffHasProperty =
+            upstream.diffValue !== null &&
+            upstream.diffValue !== undefined &&
+            Object.prototype.hasOwnProperty.call(
+              upstream.diffValue,
+              expr.identifier,
+            );
           return {
-            applyValue: Output.hasOutputs(upstream.applyValue)
+            applyValue: applyHasOutputs
               ? expr
               : upstream.applyValue?.[expr.identifier],
-            diffValue: Output.hasOutputs(upstream.diffValue)
-              ? expr
-              : upstream.diffValue?.[expr.identifier],
+            diffValue:
+              diffHasOutputs || (applyHasOutputs && !diffHasProperty)
+                ? expr
+                : upstream.diffValue?.[expr.identifier],
           };
         } else if (Output.isApplyExpr(expr)) {
           const upstream = yield* resolveOutput(expr.expr);
