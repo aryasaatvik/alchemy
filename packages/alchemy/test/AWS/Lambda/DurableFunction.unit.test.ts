@@ -6,7 +6,7 @@ import {
 import { describe, expect, it } from "alchemy-test";
 
 describe("DurableFunction management", () => {
-  it("qualifies FunctionName for an exact-name list request", () => {
+  it("omits the qualifier for an exact-name list request", () => {
     expect(
       makeDurableListRequest("orders", {
         name: "order-123",
@@ -14,7 +14,7 @@ describe("DurableFunction management", () => {
         qualifier: "live",
       }),
     ).toEqual({
-      FunctionName: "orders:live",
+      FunctionName: "orders",
       DurableExecutionName: "order-123",
       Statuses: ["RUNNING"],
     });

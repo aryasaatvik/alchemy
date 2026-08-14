@@ -179,7 +179,7 @@ test.provider(
       expect(startRequest.searchParams.get("Qualifier")).toBe("live");
       for (const request of [explicitListRequest, implicitListRequest]) {
         expect(decodeURIComponent(request.pathname)).toContain(
-          "/functions/NestedDurable-deployed:live/durable-executions",
+          "/functions/NestedDurable-deployed/durable-executions",
         );
         expect(request.searchParams.get("DurableExecutionName")).toBe(
           "nested-runtime",
