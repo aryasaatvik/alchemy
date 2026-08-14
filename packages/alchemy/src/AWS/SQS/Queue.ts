@@ -485,6 +485,66 @@ export const QueueProvider = () =>
           }
           // Return undefined to allow update function to be called for other attribute changes
         }),
+        precreate: Effect.fn(function* ({ id, news = {}, session }) {
+          // Queue policies commonly name the queue's own ARN. That makes the
+          // binding graph self-referential on a greenfield deploy: the policy
+          // cannot resolve until the queue has an identity, while reconcile
+          // cannot receive the resolved policy until that identity exists.
+          //
+          // Create only the stable physical shell here. Reconcile remains the
+          // single authority for mutable attributes, user tags, and binding-
+          // contributed policy once every dependency can be evaluated.
+          const identity = {
+            queueName: news.queueName,
+            fifo: news.fifo,
+          };
+          if (!isResolved(identity)) {
+            return yield* Effect.die(
+              new Error(
+                `SQS Queue '${id}' cannot be pre-created because queueName or fifo depends on an unresolved resource output`,
+              ),
+            );
+          }
+
+          const { accountId, region } = yield* AWSEnvironment.current;
+          const queueName = yield* createQueueName(id, identity);
+          const queueArn =
+            `arn:aws:sqs:${region}:${accountId}:${queueName}` as const;
+          const internalTags = yield* createInternalTags(id);
+          let queueUrl = yield* sqs.getQueueUrl({ QueueName: queueName }).pipe(
+            Effect.map((result) => result.QueueUrl),
+            Effect.catchTag("QueueDoesNotExist", () =>
+              Effect.succeed(undefined),
+            ),
+          );
+
+          if (queueUrl === undefined) {
+            queueUrl = yield* sqs
+              .createQueue({
+                QueueName: queueName,
+                ...(identity.fifo ? { Attributes: { FifoQueue: "true" } } : {}),
+                tags: internalTags,
+              })
+              .pipe(
+                Effect.retry({
+                  while: (error) => error._tag === "QueueDeletedRecently",
+                  schedule: Schedule.fixed(1000).pipe(
+                    Schedule.tap(({ attempt }) =>
+                      session.note(
+                        `Queue was deleted recently, retrying... ${attempt}s`,
+                      ),
+                    ),
+                  ),
+                }),
+                Effect.catchTag("QueueNameExists", () =>
+                  sqs.getQueueUrl({ QueueName: queueName }),
+                ),
+                Effect.map((result) => result.QueueUrl!),
+              );
+          }
+
+          return { queueName, queueUrl, queueArn };
+        }),
         reconcile: Effect.fn(function* ({
           id,
           news = {},
