@@ -360,12 +360,28 @@ export const makeDurableListRequest = (
     statuses?: Lambda.ExecutionStatus[];
     qualifier?: string;
   },
-): Lambda.ListDurableExecutionsByFunctionRequest => ({
-  FunctionName: functionName,
-  DurableExecutionName: options?.name,
-  Statuses: options?.statuses,
-  Qualifier: options?.qualifier,
-});
+): Lambda.ListDurableExecutionsByFunctionRequest => {
+  const name = options?.name;
+  const qualifier = options?.qualifier;
+
+  // Lambda rejects a separate Qualifier query parameter when filtering by a
+  // DurableExecutionName. A qualified FunctionName is the equivalent valid
+  // request and preserves exact-name lookup against the selected alias/version.
+  if (name !== undefined && qualifier !== undefined) {
+    return {
+      FunctionName: `${functionName}:${qualifier}`,
+      DurableExecutionName: name,
+      Statuses: options?.statuses,
+    };
+  }
+
+  return {
+    FunctionName: functionName,
+    DurableExecutionName: name,
+    Statuses: options?.statuses,
+    Qualifier: qualifier,
+  };
+};
 
 /** @internal */
 export const durableSelfManagementActions = {

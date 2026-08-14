@@ -6,7 +6,7 @@ import {
 import { describe, expect, it } from "alchemy-test";
 
 describe("DurableFunction management", () => {
-  it("passes the qualifier to list requests", () => {
+  it("qualifies FunctionName for an exact-name list request", () => {
     expect(
       makeDurableListRequest("orders", {
         name: "order-123",
@@ -14,10 +14,36 @@ describe("DurableFunction management", () => {
         qualifier: "live",
       }),
     ).toEqual({
-      FunctionName: "orders",
+      FunctionName: "orders:live",
       DurableExecutionName: "order-123",
       Statuses: ["RUNNING"],
+    });
+  });
+
+  it("preserves a separate qualifier for an unfiltered list request", () => {
+    expect(
+      makeDurableListRequest("orders", {
+        statuses: ["RUNNING"],
+        qualifier: "live",
+      }),
+    ).toEqual({
+      FunctionName: "orders",
+      DurableExecutionName: undefined,
+      Statuses: ["RUNNING"],
       Qualifier: "live",
+    });
+  });
+
+  it("preserves an unqualified exact-name list request", () => {
+    expect(
+      makeDurableListRequest("orders", {
+        name: "order-123",
+      }),
+    ).toEqual({
+      FunctionName: "orders",
+      DurableExecutionName: "order-123",
+      Statuses: undefined,
+      Qualifier: undefined,
     });
   });
 

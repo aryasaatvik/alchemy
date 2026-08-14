@@ -171,28 +171,25 @@ test.provider(
         ),
       ).toMatchObject({ DurableExecutions: [] });
       expect(requests).toHaveLength(3);
-      expect(
-        requests.every((request) => request.includes("NestedDurable-deployed")),
-      ).toBe(true);
-
-      const functionNameKey = Object.entries(parent?.env ?? {}).find(
-        ([, value]) => value === "NestedDurable-deployed",
-      )?.[0];
-      expect(functionNameKey).toBeDefined();
-      delete process.env[functionNameKey!];
-      const unresolved = yield* Effect.exit(
-        Effect.tryPromise({
-          try: () => module.default({ operation: "list" }, {}),
-          catch: (cause) => cause,
-        }),
+      const [startRequest, explicitListRequest, implicitListRequest] =
+        requests.map((request) => new URL(request));
+      expect(startRequest.pathname).toContain(
+        "/functions/NestedDurable-deployed/invocations",
       );
-      expect(Exit.isFailure(unresolved)).toBe(true);
-      if (Exit.isFailure(unresolved)) {
-        expect(Cause.pretty(unresolved.cause)).toContain(
-          "Expected string, got undefined",
+      expect(startRequest.searchParams.get("Qualifier")).toBe("live");
+      for (const request of [explicitListRequest, implicitListRequest]) {
+        expect(decodeURIComponent(request.pathname)).toContain(
+          "/functions/NestedDurable-deployed:live/durable-executions",
         );
+        expect(request.searchParams.get("DurableExecutionName")).toBe(
+          "nested-runtime",
+        );
+        expect(request.searchParams.has("Qualifier")).toBe(false);
       }
-      expect(requests).toHaveLength(3);
+
+      // The runtime resolves nested binding values during cold start. The
+      // separate self-handle test below owns missing-runtime-identity coverage
+      // using a fresh bundle import rather than mutating a warm runtime cache.
     }),
   { timeout: 60_000 },
 );
