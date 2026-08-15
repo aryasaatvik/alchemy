@@ -2,11 +2,13 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import * as Config from "effect/Config";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Effectable from "effect/Effectable";
 import type * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import type { Scope } from "effect/Scope";
 import type { PackageInstall } from "../../Bundle/InstalledPackages.ts";
 import type { InputProps } from "../../Input.ts";
@@ -118,6 +120,21 @@ export interface DurableStartOptions<Input = unknown> {
   qualifier?: string;
 }
 
+/** Options for a named durable start whose execution identity is required. */
+export interface DurableNamedStartOptions<
+  Input = unknown,
+> extends DurableStartOptions<Input> {
+  name: string;
+}
+
+/** Options for an anonymous durable start. */
+export interface DurableAnonymousStartOptions<Input = unknown> extends Omit<
+  DurableStartOptions<Input>,
+  "name"
+> {
+  name?: never;
+}
+
 /**
  * A started durable execution reference.
  */
@@ -126,6 +143,51 @@ export interface DurableExecutionRef {
   executionArn: string | undefined;
   statusCode: number | undefined;
 }
+
+/** A named durable start whose exact execution identity was resolved. */
+export interface DurableNamedExecutionRef extends DurableExecutionRef {
+  executionArn: string;
+}
+
+/**
+ * Lambda accepted a named durable start but its execution identity did not
+ * become observable within Alchemy's bounded exact-name lookup window.
+ */
+export class DurableExecutionIdentityUnavailable extends Data.TaggedError(
+  "DurableExecutionIdentityUnavailable",
+)<{
+  functionName: string;
+  executionName: string;
+}> {
+  override get message() {
+    return (
+      `Durable execution "${this.executionName}" was accepted by ` +
+      `"${this.functionName}", but its ARN did not become observable.`
+    );
+  }
+}
+
+/** Lambda returned more than one execution for one exact durable name. */
+export class AmbiguousDurableExecutionIdentity extends Data.TaggedError(
+  "AmbiguousDurableExecutionIdentity",
+)<{
+  functionName: string;
+  executionName: string;
+  executionArns: string[];
+}> {
+  override get message() {
+    return (
+      `Durable execution "${this.executionName}" on ` +
+      `"${this.functionName}" resolved to multiple ARNs.`
+    );
+  }
+}
+
+export type DurableStartError =
+  | Lambda.InvokeError
+  | Lambda.ListDurableExecutionsByFunctionError
+  | DurableExecutionIdentityUnavailable
+  | AmbiguousDurableExecutionIdentity;
 
 /**
  * The typed durable-execution handle: start, inspect, stop, and complete
@@ -144,8 +206,14 @@ export interface DurableFunctionHandle<Input = unknown, Result = unknown> {
    * checkpointed re-invocations.
    */
   start(
-    options?: DurableStartOptions<Input>,
+    options: DurableNamedStartOptions<Input>,
+  ): Effect.Effect<DurableNamedExecutionRef, DurableStartError>;
+  start(
+    options?: DurableAnonymousStartOptions<Input>,
   ): Effect.Effect<DurableExecutionRef, Lambda.InvokeError>;
+  start(
+    options: DurableStartOptions<Input>,
+  ): Effect.Effect<DurableExecutionRef, DurableStartError>;
   /** Fetch the execution's status/result. */
   get(
     executionArn: string,
@@ -435,24 +503,99 @@ const makeDurableHandle = (options: {
     const sendCallbackHeartbeat =
       yield* Lambda.sendDurableExecutionCallbackHeartbeat;
 
+    function start(
+      options: DurableNamedStartOptions<any>,
+    ): Effect.Effect<DurableNamedExecutionRef, DurableStartError>;
+    function start(
+      options?: DurableAnonymousStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, Lambda.InvokeError>;
+    function start(
+      options: DurableStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, DurableStartError>;
+    function start(
+      options?: DurableStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, DurableStartError> {
+      return Effect.gen(function* () {
+        const resolvedFunctionName = yield* functionName;
+        const response = yield* invoke({
+          FunctionName: resolvedFunctionName,
+          InvocationType: "Event",
+          DurableExecutionName: options?.name,
+          Qualifier: options?.qualifier,
+          Payload: encodeDurableEnvelope(name, options?.params),
+        });
+        const executionRef = {
+          executionArn: response.DurableExecutionArn,
+          statusCode: response.StatusCode,
+        };
+
+        if (
+          executionRef.executionArn !== undefined ||
+          options?.name === undefined
+        ) {
+          return executionRef;
+        }
+
+        const executionName = options.name;
+        const executionArn = yield* listDurableExecutionsByFunction(
+          makeDurableListRequest(resolvedFunctionName, {
+            name: executionName,
+            qualifier: options.qualifier,
+          }),
+        ).pipe(
+          Effect.map((response) => {
+            const executionArns = [
+              ...new Set(
+                (response.DurableExecutions ?? [])
+                  .filter(
+                    (execution) =>
+                      execution.DurableExecutionName === executionName,
+                  )
+                  .map((execution) => execution.DurableExecutionArn),
+              ),
+            ];
+            if (executionArns.length > 1) {
+              return Effect.fail(
+                new AmbiguousDurableExecutionIdentity({
+                  functionName: resolvedFunctionName,
+                  executionName,
+                  executionArns,
+                }),
+              );
+            }
+            return Effect.succeed(Option.fromNullishOr(executionArns[0]));
+          }),
+          Effect.flatten,
+          Effect.repeat({
+            schedule: Schedule.spaced("100 millis"),
+            until: Option.isSome,
+            times: 2,
+          }),
+          Effect.flatMap(
+            Option.match({
+              onNone: () =>
+                Effect.fail(
+                  new DurableExecutionIdentityUnavailable({
+                    functionName: resolvedFunctionName,
+                    executionName,
+                  }),
+                ),
+              onSome: Effect.succeed,
+            }),
+          ),
+        );
+
+        return {
+          executionArn,
+          statusCode: response.StatusCode,
+        };
+      });
+    }
+
     const handle: DurableFunctionHandle<any, any> = {
       Type: TypeId,
       name,
-      start: (options) =>
-        Effect.gen(function* () {
-          const resolvedFunctionName = yield* functionName;
-          const response = yield* invoke({
-            FunctionName: resolvedFunctionName,
-            InvocationType: "Event",
-            DurableExecutionName: options?.name,
-            Qualifier: options?.qualifier,
-            Payload: encodeDurableEnvelope(name, options?.params),
-          });
-          return {
-            executionArn: response.DurableExecutionArn,
-            statusCode: response.StatusCode,
-          };
-        }),
+      start,
       get: (executionArn) =>
         getDurableExecution({ DurableExecutionArn: executionArn }),
       list: (options) =>

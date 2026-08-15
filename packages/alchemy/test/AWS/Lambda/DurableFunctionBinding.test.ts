@@ -18,7 +18,6 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { pathToFileURL } from "node:url";
 import NestedDurableParentLive, {
-  NestedDurable,
   NestedDurableParent,
 } from "./fixtures/nested-durable-parent.ts";
 import SelfDurableLive, { SelfDurable } from "./fixtures/self-durable.ts";
@@ -105,6 +104,7 @@ test.provider(
       );
 
       const requests: string[] = [];
+      const exactNameLookups = new Map<string, number>();
       const server = yield* Effect.acquireRelease(
         Effect.sync(() =>
           Bun.serve({
@@ -114,10 +114,34 @@ test.provider(
               const invoke = new URL(request.url).pathname.endsWith(
                 "/invocations",
               );
-              return new Response(invoke ? "{}" : '{"DurableExecutions":[]}', {
-                status: invoke ? 202 : 200,
-                headers: { "content-type": "application/json" },
-              });
+              if (invoke) {
+                return new Response("{}", {
+                  status: 202,
+                  headers: { "content-type": "application/json" },
+                });
+              }
+
+              const executionName = new URL(request.url).searchParams.get(
+                "DurableExecutionName",
+              );
+              const lookup =
+                (exactNameLookups.get(executionName ?? "") ?? 0) + 1;
+              exactNameLookups.set(executionName ?? "", lookup);
+              const executions =
+                executionName === "nested-runtime" && lookup === 3
+                  ? [
+                      {
+                        DurableExecutionArn:
+                          "arn:aws:lambda:us-east-1:123:function:NestedDurable-deployed:1/durable-execution/nested-runtime",
+                        DurableExecutionName: "nested-runtime",
+                        FunctionArn:
+                          "arn:aws:lambda:us-east-1:123:function:NestedDurable-deployed:1",
+                        Status: "RUNNING",
+                        StartTimestamp: 1,
+                      },
+                    ]
+                  : [];
+              return Response.json({ DurableExecutions: executions });
             },
           }),
         ),
@@ -154,14 +178,25 @@ test.provider(
         () => import(`${pathToFileURL(entry).href}?test=${Date.now()}`),
       )) as {
         default: (
-          event: { operation: "start" | "list" | "implicit-list" },
+          event: {
+            operation:
+              | "start"
+              | "anonymous-start"
+              | "missing-start"
+              | "list"
+              | "implicit-list";
+          },
           context: object,
         ) => Promise<unknown>;
       };
 
       expect(
         yield* Effect.promise(() => module.default({ operation: "start" }, {})),
-      ).toMatchObject({ statusCode: 202 });
+      ).toEqual({
+        executionArn:
+          "arn:aws:lambda:us-east-1:123:function:NestedDurable-deployed:1/durable-execution/nested-runtime",
+        statusCode: 202,
+      });
       expect(
         yield* Effect.promise(() => module.default({ operation: "list" }, {})),
       ).toMatchObject({ DurableExecutions: [] });
@@ -170,22 +205,49 @@ test.provider(
           module.default({ operation: "implicit-list" }, {}),
         ),
       ).toMatchObject({ DurableExecutions: [] });
-      expect(requests).toHaveLength(3);
-      const [startRequest, explicitListRequest, implicitListRequest] =
-        requests.map((request) => new URL(request));
+      expect(
+        yield* Effect.promise(() =>
+          module.default({ operation: "anonymous-start" }, {}),
+        ),
+      ).toEqual({ executionArn: undefined, statusCode: 202 });
+
+      const beforeMissingStart = requests.length;
+      const missingStart = yield* Effect.exit(
+        Effect.tryPromise({
+          try: () => module.default({ operation: "missing-start" }, {}),
+          catch: (cause) => cause,
+        }),
+      );
+      expect(Exit.isFailure(missingStart)).toBe(true);
+      if (Exit.isFailure(missingStart)) {
+        expect(Cause.pretty(missingStart.cause)).toContain(
+          "DurableExecutionIdentityUnavailable",
+        );
+      }
+      expect(requests.length - beforeMissingStart).toBe(4);
+
+      expect(requests).toHaveLength(11);
+      const requestUrls = requests.map((request) => new URL(request));
+      const [startRequest, ...remainingRequests] = requestUrls;
       expect(startRequest.pathname).toContain(
         "/functions/NestedDurable-deployed/invocations",
       );
       expect(startRequest.searchParams.get("Qualifier")).toBe("live");
-      for (const request of [explicitListRequest, implicitListRequest]) {
+      expect(
+        remainingRequests.filter((request) =>
+          request.pathname.endsWith("/invocations"),
+        ),
+      ).toHaveLength(2);
+      for (const request of remainingRequests.filter((request) =>
+        request.pathname.includes("/durable-executions"),
+      )) {
         expect(decodeURIComponent(request.pathname)).toContain(
           "/functions/NestedDurable-deployed/durable-executions",
         );
-        expect(request.searchParams.get("DurableExecutionName")).toBe(
-          "nested-runtime",
-        );
         expect(request.searchParams.has("Qualifier")).toBe(false);
       }
+      expect(exactNameLookups.get("nested-runtime")).toBe(5);
+      expect(exactNameLookups.get("missing-runtime")).toBe(3);
 
       // The runtime resolves nested binding values during cold start. The
       // separate self-handle test below owns missing-runtime-identity coverage

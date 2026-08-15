@@ -31,12 +31,53 @@ export default NestedDurableParent.make(
     const host = yield* Lambda.Function;
 
     yield* host.listen(
-      (event: { operation: "start" | "list" | "implicit-list" }) =>
-        event.operation === "start"
-          ? reference.start({ name: "nested-runtime", qualifier: "live" })
-          : event.operation === "list"
-            ? reference.list({ name: "nested-runtime", qualifier: "live" })
-            : durable.list({ name: "nested-runtime", qualifier: "live" }),
+      (event: {
+        operation:
+          | "start"
+          | "anonymous-start"
+          | "missing-start"
+          | "list"
+          | "implicit-list";
+      }) => {
+        switch (event.operation) {
+          case "start": {
+            return reference
+              .start({
+                name: "nested-runtime",
+                qualifier: "live",
+              })
+              .pipe(
+                Effect.map((started) => {
+                  const executionArn: string = started.executionArn;
+                  return { ...started, executionArn };
+                }),
+              );
+          }
+          case "anonymous-start": {
+            return reference.start({ qualifier: "live" }).pipe(
+              Effect.map((started) => {
+                const executionArn: string | undefined = started.executionArn;
+                return { ...started, executionArn };
+              }),
+            );
+          }
+          case "missing-start":
+            return reference.start({
+              name: "missing-runtime",
+              qualifier: "live",
+            });
+          case "list":
+            return reference.list({
+              name: "nested-runtime",
+              qualifier: "live",
+            });
+          case "implicit-list":
+            return durable.list({
+              name: "nested-runtime",
+              qualifier: "live",
+            });
+        }
+      },
     );
 
     return {};
