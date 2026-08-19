@@ -495,7 +495,7 @@ const park = (value: unknown, parked: Parked): unknown => {
  * marks it so; without excess checking a misspelt key is silently dropped and
  * the component quietly runs on defaults.
  */
-const STRICT = { onExcessProperty: "error" } as const;
+const STRICT = { onExcessProperty: "error", reportInput: true } as const;
 
 /**
  * A component constructor: `otlpHttp(props)` or `otlpHttp(name, props)`.

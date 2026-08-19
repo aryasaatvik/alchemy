@@ -537,8 +537,8 @@ export const LocalFunctionProvider = () =>
             );
           }
           if (
-            typeof ctx.news.url === "object" &&
-            ctx.news.url.invokeMode === "RESPONSE_STREAM"
+            typeof ctx.news.functionUrl === "object" &&
+            ctx.news.functionUrl.invokeMode === "RESPONSE_STREAM"
           ) {
             return yield* Effect.fail(
               new Error("Live Lambda does not support RESPONSE_STREAM"),

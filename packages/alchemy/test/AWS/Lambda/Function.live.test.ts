@@ -28,7 +28,7 @@ class LiveTracer extends Lambda.Function<Lambda.Function>()(
 ) {}
 
 export default LiveTracer.make(
-  { main: import.meta.url, url: true },
+  { main: import.meta.url, functionUrl: true },
   Effect.succeed({
     fetch: Effect.gen(function* () {
       const request = yield* HttpServerRequest;
@@ -78,7 +78,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 class LiveEnv extends Lambda.Function<Lambda.Function>()("LiveLambdaEnv") {}
 
 export default LiveEnv.make(
-  { main: import.meta.url, url: true },
+  { main: import.meta.url, functionUrl: true },
   Effect.succeed({
     fetch: Effect.succeed(
       HttpServerResponse.jsonUnsafe({
@@ -117,7 +117,7 @@ test.provider(
       const main = path.join(fixtureDir, "handler.ts");
       yield* fs.writeFileString(main, handlerSource("v1"));
       const entrypoint = LiveTracer.make(
-        { main, url: true },
+        { main, functionUrl: true },
         // The plan-side implementation is not executed at runtime; the
         // watcher bundles the matching Effect Function in `main`.
         Effect.succeed({}) as any,
@@ -210,7 +210,7 @@ test.provider(
             LiveEnv.make(
               {
                 main,
-                url: true,
+                functionUrl: true,
                 env: {
                   LIVE_LOCAL_MARKER: "local-target",
                   LIVE_LOCAL_LARGE: "x".repeat(3_000),

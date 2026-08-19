@@ -10,7 +10,7 @@ export class NestedDurableParent extends Lambda.Function<NestedDurableParent>()(
 ) {}
 
 export default NestedDurableParent.make(
-  { main: import.meta.url, url: false },
+  { main: import.meta.url, functionUrl: false },
   Effect.gen(function* () {
     // This is the runtime shape of a nested DurableFunction reference: the
     // parent owns only the child Function resource proxy, not the child's
@@ -18,7 +18,7 @@ export default NestedDurableParent.make(
     const child = yield* Lambda.Function("NestedDurable", {
       main: import.meta.url,
       isExternal: true,
-      url: false,
+      functionUrl: false,
     });
     const durable = yield* NestedDurable.pipe(
       Effect.provideService(

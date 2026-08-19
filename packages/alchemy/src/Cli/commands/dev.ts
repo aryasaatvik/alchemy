@@ -11,7 +11,7 @@ import * as RpcSpawner from "../../Local/RpcSpawner.ts";
 import { dataDir, envFile, force, profile, script, stage } from "./_shared.ts";
 import { ExecStackOptions } from "./deploy.ts";
 
-export class DevEvaluationExited extends Schema.TaggedErrorClass<DevEvaluationExited>()(
+export class DevEvaluationExited extends Schema.TaggedError<DevEvaluationExited>()(
   "DevEvaluationExited",
   {
     message: Schema.String,

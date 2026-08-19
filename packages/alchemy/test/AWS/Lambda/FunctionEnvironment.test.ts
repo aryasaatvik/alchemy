@@ -33,6 +33,7 @@ describe("Lambda environment size", () => {
             }),
             ALCHEMY_STACK_NAME: "samva",
             ALCHEMY_STAGE: "dev-saatvik",
+            ALCHEMY_PHASE: "runtime",
           });
         }),
       ),
@@ -204,17 +205,21 @@ describe("Lambda environment size", () => {
     "overlays raw placement-specific values after final environment resolution",
     () =>
       Effect.gen(function* () {
+        const props = {
+          main: "handler.ts",
+          build: { output: { sourcemap: false } },
+          uploadSourceMap: false,
+          env: { FROM_FUNCTION: "function" },
+        } satisfies Parameters<typeof resolveFunctionEnvironment>[1];
         const resolved = resolveFunctionEnvironment(
-          {
-            PRESERVED: "binding",
-            REDIS_URL: "redis://127.0.0.1:56379",
-          },
-          {
-            main: "handler.ts",
-            build: { output: { sourcemap: false } },
-            uploadSourceMap: false,
-            env: { FROM_FUNCTION: "function" },
-          },
+          mergeFunctionEnvironment(
+            {
+              PRESERVED: "binding",
+              REDIS_URL: "redis://127.0.0.1:56379",
+            },
+            props,
+          ),
+          props,
           { ALCHEMY_STAGE: "test" },
         );
         const transformed = yield* localEmulatorFunctionEnvironment(resolved, {

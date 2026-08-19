@@ -391,7 +391,13 @@ export const scratchStack = <ROut>(
   const stateLayer: Layer.Layer<State.State> =
     file === undefined
       ? Layer.succeed(State.State, State.InMemoryService({}))
-      : Layer.provide(State.localState(), PlatformServices);
+      : Layer.provide(
+          State.localState(),
+          Layer.provideMerge(
+            AlchemyContextLive.pipe(Layer.orDie),
+            PlatformServices,
+          ),
+        );
 
   const buildAndApply = (effect: Effect.Effect<any, any, any>) =>
     (effect as Effect.Effect<any, any, never>).pipe(

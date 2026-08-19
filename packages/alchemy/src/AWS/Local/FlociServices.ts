@@ -10,7 +10,7 @@ import * as Redacted from "effect/Redacted";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import type { Platform } from "../../Platform.ts";
 import type { ResourceClassLike, ResourceLike } from "../../Resource.ts";
-import { DEFAULT_LOCAL_ENDPOINT } from "../AuthProvider.ts";
+import { DEFAULT_LOCAL_ENDPOINT } from "../LocalEmulator.ts";
 import * as Endpoint from "../Endpoint.ts";
 import { AWSEnvironment } from "../Environment.ts";
 import * as Region from "../Region.ts";

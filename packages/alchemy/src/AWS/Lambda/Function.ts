@@ -163,7 +163,7 @@ export type AccessPointRef = string | { accessPointArn: string };
 export type LayerRef = string | { layerVersionArn: string };
 
 /** Resolve a {@link LayerRef} to its layer version ARN. */
-const layerVersionArnOf = (layer: LayerRef): string =>
+export const layerVersionArnOf = (layer: LayerRef): string =>
   typeof layer === "string" ? layer : layer.layerVersionArn;
 
 /**
@@ -210,12 +210,21 @@ export interface FunctionProps extends PlatformProps {
    */
   handler?: string;
   /**
+   * Set to `false` to skip bundling and deploy `main`'s directory as-is:
+   * every file in the directory containing `main` ships in the code
+   * archive, preserving relative paths. Use for framework outputs that are
+   * already self-contained deployment units where re-bundling can break
+   * packaged `node_modules` resolution. Implies external mode.
+   * @default true
+   */
+  bundle?: false;
+  /**
    * Whether to create a Lambda function URL, or its configuration.
    * `true` creates a public Function URL with `authType: "NONE"`.
    * Set `false` to disable the Function URL.
    * @default true
    */
-  url?: boolean | FunctionUrlConfig;
+  functionUrl?: boolean | FunctionUrlConfig;
   functionName?: string;
   // TODO(sam): use a Layer instead so we can manage Effect platform?
   runtime?: "nodejs22.x" | "nodejs24.x";
@@ -328,6 +337,23 @@ export interface FunctionProps extends PlatformProps {
    */
   durableConfig?: Lambda.DurableConfig;
 }
+
+/** The Lambda `Handler` string for a function's props: `<file>.<export>`. */
+const handlerStringOf = (props: FunctionProps): string => {
+  const externalMode = props.isExternal || props.bundle === false;
+  const base =
+    props.bundle === false && typeof props.main === "string"
+      ? props.main
+          .slice(
+            Math.max(
+              props.main.lastIndexOf("/"),
+              props.main.lastIndexOf("\\"),
+            ) + 1,
+          )
+          .replace(/\.[^.]+$/, "")
+      : "index";
+  return `${base}.${externalMode ? (props.handler ?? "default") : "default"}`;
+};
 
 /**
  * Normalize a {@link FunctionProps.timeout} to whole seconds.
@@ -576,21 +602,21 @@ interface NormalizedFunctionUrlConfig {
 }
 
 const normalizeFunctionUrl = (
-  url: FunctionProps["url"] = true,
+  functionUrl: FunctionProps["functionUrl"] = true,
 ): NormalizedFunctionUrlConfig | undefined => {
-  if (url === false) {
+  if (functionUrl === false) {
     return undefined;
   }
-  if (url === true || url === undefined) {
+  if (functionUrl === true || functionUrl === undefined) {
     return {
       authType: "NONE",
       invokeMode: "BUFFERED",
     };
   }
   return {
-    authType: url.authType ?? "NONE",
-    cors: url.cors,
-    invokeMode: url.invokeMode ?? "BUFFERED",
+    authType: functionUrl.authType ?? "NONE",
+    cors: functionUrl.cors,
+    invokeMode: functionUrl.invokeMode ?? "BUFFERED",
   };
 };
 
@@ -659,7 +685,7 @@ const matchesConfiguredExternal = (
  *
  * const func = yield* AWS.Lambda.Function("ApiFunction", {
  *   main: "./src/handler.ts",
- *   url: true,
+ *   functionUrl: true,
  * });
  * ```
  *
@@ -702,7 +728,7 @@ const matchesConfiguredExternal = (
  * ```typescript
  * export default class ApiFunction extends AWS.Lambda.Function<ApiFunction>()(
  *   "ApiFunction",
- *   { main: import.meta.url, url: true },
+ *   { main: import.meta.url, functionUrl: true },
  *   Effect.gen(function* () {
  *     // init: bind resources
  *     const getItem = yield* AWS.DynamoDB.GetItem(table);
@@ -736,7 +762,7 @@ const matchesConfiguredExternal = (
  * ```typescript
  * export default class ApiFunction extends AWS.Lambda.Function<ApiFunction>()(
  *   "ApiFunction",
- *   { main: import.meta.url, url: true },
+ *   { main: import.meta.url, functionUrl: true },
  *   Effect.gen(function* () {
  *     const host = yield* AWS.Lambda.Function;
  *
@@ -783,7 +809,7 @@ const matchesConfiguredExternal = (
  * ```typescript
  * const func = yield* AWS.Lambda.Function("ApiFunction", {
  *   main: "./src/handler.ts",
- *   url: true,
+ *   functionUrl: true,
  * });
  * ```
  *
@@ -791,7 +817,7 @@ const matchesConfiguredExternal = (
  * ```typescript
  * const func = yield* AWS.Lambda.Function("ApiFunction", {
  *   main: "./src/handler.ts",
- *   url: {
+ *   functionUrl: {
  *     authType: "AWS_IAM",
  *   },
  * });
@@ -1997,7 +2023,7 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         // module and can only address it when the module is bundled as-is
         // (isExternal). Honoring it in Effect mode deploys a Lambda that
         // dies at init with Runtime.HandlerNotFound.
-        Handler: `index.${news.isExternal ? (news.handler ?? "default") : "default"}`,
+        Handler: handlerStringOf(news),
         Role: roleArn,
         Code: codeLocation,
         Runtime: news.runtime ?? "nodejs22.x",
@@ -2205,17 +2231,17 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
 
     const createOrUpdateFunctionUrl = Effect.fn(function* ({
       functionName,
-      url,
-      oldUrl,
+      functionUrl,
+      oldFunctionUrl,
       currentFunctionUrl,
     }: {
       functionName: string;
-      url: FunctionProps["url"];
-      oldUrl?: FunctionProps["url"];
+      functionUrl: FunctionProps["functionUrl"];
+      oldFunctionUrl?: FunctionProps["functionUrl"];
       currentFunctionUrl?: string;
     }) {
-      const desired = normalizeFunctionUrl(url);
-      const previous = normalizeFunctionUrl(oldUrl);
+      const desired = normalizeFunctionUrl(functionUrl);
+      const previous = normalizeFunctionUrl(oldFunctionUrl);
       const hadFunctionUrl = previous !== undefined || !!currentFunctionUrl;
 
       if (desired) {
@@ -2310,8 +2336,8 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
         }
         if (
           !deepEqual(
-            normalizeFunctionUrl(olds.url),
-            normalizeFunctionUrl(news.url),
+            normalizeFunctionUrl(olds.functionUrl),
+            normalizeFunctionUrl(news.functionUrl),
           )
         ) {
           return { action: "update" as const };
@@ -2686,8 +2712,8 @@ export const makeFunctionProvider = (options?: FunctionProviderOptions) =>
 
         const functionUrl = yield* createOrUpdateFunctionUrl({
           functionName,
-          url: news.url,
-          oldUrl: olds?.url,
+          functionUrl: news.functionUrl,
+          oldFunctionUrl: olds?.functionUrl,
           currentFunctionUrl: output?.functionUrl,
         });
 

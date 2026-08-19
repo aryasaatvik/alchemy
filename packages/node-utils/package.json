@@ -22,6 +22,11 @@
     "test": "bun test ./test"
   },
   "exports": {
+    "./exit-hook": {
+      "types": "./lib/exit-hook.d.ts",
+      "bun": "./src/exit-hook.ts",
+      "import": "./lib/exit-hook.js"
+    },
     "./ignore": {
       "types": "./lib/ignore.d.ts",
       "bun": "./src/ignore.ts",

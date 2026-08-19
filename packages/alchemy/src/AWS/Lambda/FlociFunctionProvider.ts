@@ -39,12 +39,8 @@ import {
   flociSidecarEntry,
   makeDevWatchProvider,
 } from "../Local/DevWatchProvider.ts";
-import {
-  Function,
-  FunctionProvider,
-  layerVersionArnOf,
-  type FunctionProps,
-} from "./Function.ts";
+import { Function, layerVersionArnOf, type FunctionProps } from "./Function.ts";
+import { FunctionProvider } from "./FunctionProvider.ts";
 import {
   makeFunctionBundler,
   type FunctionBundleResult,
