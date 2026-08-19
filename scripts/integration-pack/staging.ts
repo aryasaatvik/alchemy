@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { onlyTarball, packageSlug, readManifest, run } from "./io.ts";
-import { nativePack } from "./pack.ts";
+import { nativePack, pnpmPackCommand } from "./pack.ts";
 import type {
   PackageManifest,
   PackedPackage,
@@ -296,7 +296,7 @@ export const stageAndPack = async (
     const destination = join(temporary, "out");
     await mkdir(destination);
     await run(
-      ["pnpm", "--ignore-scripts", "pack", "--pack-destination", destination],
+      pnpmPackCommand(destination),
       { cwd: directory },
     );
     const produced = await onlyTarball(destination);

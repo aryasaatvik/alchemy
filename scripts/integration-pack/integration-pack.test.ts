@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 
 import { integrationClosure } from "./graph.ts";
+import { pnpmPackCommand } from "./pack.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 
@@ -38,5 +39,17 @@ describe("integration package graph", () => {
       expect(workspace?.manifest.files).toContain("lib");
       expect(workspace?.manifest.files).toContain("src");
     }
+  });
+});
+
+describe("integration package packing", () => {
+  test("disables lifecycle scripts with pnpm's explicit config option", () => {
+    expect(pnpmPackCommand("/tmp/output")).toEqual([
+      "pnpm",
+      "--config.ignore-scripts=true",
+      "pack",
+      "--pack-destination",
+      "/tmp/output",
+    ]);
   });
 });

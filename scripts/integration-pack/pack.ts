@@ -10,6 +10,14 @@ const exportTargets = (value: unknown): ReadonlyArray<string> => {
   return Object.values(value).flatMap(exportTargets);
 };
 
+export const pnpmPackCommand = (output: string): ReadonlyArray<string> => [
+  "pnpm",
+  "--config.ignore-scripts=true",
+  "pack",
+  "--pack-destination",
+  output,
+];
+
 /** Verifies pnpm packed the workspace package, not a same-named lockfile entry. */
 const verifyNativePack = async (
   workspace: WorkspacePackage,
@@ -53,12 +61,7 @@ export const nativePack = async (
   output: string,
 ): Promise<string> => {
   await mkdir(output, { recursive: true });
-  await run(
-    ["pnpm", "--ignore-scripts", "pack", "--pack-destination", output],
-    {
-      cwd: workspace.directory,
-    },
-  );
+  await run(pnpmPackCommand(output), { cwd: workspace.directory });
   const archive = await onlyTarball(output);
   await verifyNativePack(workspace, archive);
   return archive;
