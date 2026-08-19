@@ -13,6 +13,7 @@ const exportTargets = (value: unknown): ReadonlyArray<string> => {
 export const pnpmPackCommand = (output: string): ReadonlyArray<string> => [
   "pnpm",
   "--config.ignore-scripts=true",
+  "--config.node-linker=hoisted",
   "pack",
   "--pack-destination",
   output,

@@ -47,6 +47,7 @@ describe("integration package packing", () => {
     expect(pnpmPackCommand("/tmp/output")).toEqual([
       "pnpm",
       "--config.ignore-scripts=true",
+      "--config.node-linker=hoisted",
       "pack",
       "--pack-destination",
       "/tmp/output",
