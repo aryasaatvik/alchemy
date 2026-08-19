@@ -220,6 +220,7 @@ export const stageAndPack = async (
     // package nor needed to resolve its runtime graph.
     delete installManifest.devDependencies;
     installManifest.dependencies ??= {};
+    installManifest.overrides = {};
     for (const name of installationLocals) {
       const packed = localPackages.get(name);
       if (packed === undefined)
@@ -227,6 +228,7 @@ export const stageAndPack = async (
           `${input.workspace.name} needs unpacked local dependency ${name}`,
         );
       installManifest.dependencies[name] = `file:${packed.tarball}`;
+      installManifest.overrides[name] = `file:${packed.tarball}`;
     }
     for (const name of directLocalDependencies) {
       const packed = localPackages.get(name);
@@ -256,6 +258,7 @@ export const stageAndPack = async (
     );
 
     const publishManifest = structuredClone(installManifest);
+    delete publishManifest.overrides;
     for (const name of installationLocals) {
       const dependencies = publishManifest.dependencies!;
       if (directLocalDependencies.has(name)) {

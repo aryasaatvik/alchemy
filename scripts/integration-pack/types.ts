@@ -18,6 +18,7 @@ export type PackageManifest = Record<string, unknown> & {
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  overrides?: Record<string, string>;
   bundledDependencies?: ReadonlyArray<string>;
   workspaces?: unknown;
 };
