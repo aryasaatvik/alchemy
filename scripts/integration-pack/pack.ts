@@ -10,7 +10,7 @@ const exportTargets = (value: unknown): ReadonlyArray<string> => {
   return Object.values(value).flatMap(exportTargets);
 };
 
-/** Verifies Bun packed the workspace package, not a same-named lockfile entry. */
+/** Verifies pnpm packed the workspace package, not a same-named lockfile entry. */
 const verifyNativePack = async (
   workspace: WorkspacePackage,
   archive: string,
@@ -54,15 +54,7 @@ export const nativePack = async (
 ): Promise<string> => {
   await mkdir(output, { recursive: true });
   await run(
-    [
-      "bun",
-      "pm",
-      "pack",
-      "--destination",
-      output,
-      "--ignore-scripts",
-      "--quiet",
-    ],
+    ["pnpm", "--ignore-scripts", "pack", "--pack-destination", output],
     {
       cwd: workspace.directory,
     },

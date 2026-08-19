@@ -24,21 +24,6 @@ const dependencySections = [
   "peerDependencies",
 ] as const;
 
-const catalog = async (repositoryRoot: string): Promise<unknown> => {
-  const root = await readManifest(join(repositoryRoot, "package.json"));
-  const workspaces = root.workspaces;
-  if (
-    typeof workspaces !== "object" ||
-    workspaces === null ||
-    !("catalog" in workspaces)
-  ) {
-    throw new Error(
-      "Root workspace catalog is required for integration staging",
-    );
-  }
-  return workspaces.catalog;
-};
-
 const assertPublishableManifest = (
   name: string,
   manifest: PackageManifest,
@@ -234,9 +219,6 @@ export const stageAndPack = async (
     // Development-only workspace edges are neither part of a publishable
     // package nor needed to resolve its runtime graph.
     delete installManifest.devDependencies;
-    installManifest.workspaces = {
-      catalog: await catalog(input.repositoryRoot),
-    };
     installManifest.dependencies ??= {};
     for (const name of installationLocals) {
       const packed = localPackages.get(name);
@@ -274,7 +256,6 @@ export const stageAndPack = async (
     );
 
     const publishManifest = structuredClone(installManifest);
-    delete publishManifest.workspaces;
     for (const name of installationLocals) {
       const dependencies = publishManifest.dependencies!;
       if (directLocalDependencies.has(name)) {
@@ -315,15 +296,7 @@ export const stageAndPack = async (
     const destination = join(temporary, "out");
     await mkdir(destination);
     await run(
-      [
-        "bun",
-        "pm",
-        "pack",
-        "--destination",
-        destination,
-        "--ignore-scripts",
-        "--quiet",
-      ],
+      ["pnpm", "--ignore-scripts", "pack", "--pack-destination", destination],
       { cwd: directory },
     );
     const produced = await onlyTarball(destination);

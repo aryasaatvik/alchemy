@@ -53,7 +53,11 @@ export const packageFingerprint = async (
       workspace.directory,
       join(workspace.directory, root),
     );
-  for (const path of ["bun.lock", "package.json"]) {
+  for (const path of [
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "package.json",
+  ]) {
     try {
       hash.update(`${path}\0`);
       hash.update(await readFile(join(repositoryRoot, path)));

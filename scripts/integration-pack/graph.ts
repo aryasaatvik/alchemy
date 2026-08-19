@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 import { readManifest } from "./io.ts";
 import type { PackageManifest, WorkspacePackage } from "./types.ts";
@@ -24,11 +26,24 @@ const workspaceDependencyNames = (
       .map(([name]) => name),
   );
 
+interface PnpmWorkspace {
+  readonly packages?: ReadonlyArray<string>;
+  readonly catalog?: Readonly<Record<string, string>>;
+  readonly catalogs?: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
+}
+
+const readPnpmWorkspace = async (
+  repositoryRoot: string,
+): Promise<PnpmWorkspace> =>
+  parseYaml(
+    await readFile(join(repositoryRoot, "pnpm-workspace.yaml"), "utf8"),
+  ) as PnpmWorkspace;
+
 const localCatalogDependencyNames = (
-  root: PackageManifest,
+  workspace: PnpmWorkspace,
 ): ReadonlySet<string> => {
-  const workspaces = root.workspaces;
-  if (typeof workspaces !== "object" || workspaces === null) return new Set();
   const names = new Set<string>();
   const collect = (catalog: unknown): void => {
     if (typeof catalog !== "object" || catalog === null) return;
@@ -37,14 +52,9 @@ const localCatalogDependencyNames = (
         names.add(name);
     }
   };
-  collect("catalog" in workspaces ? workspaces.catalog : undefined);
-  if (
-    "catalogs" in workspaces &&
-    typeof workspaces.catalogs === "object" &&
-    workspaces.catalogs !== null
-  ) {
-    for (const catalog of Object.values(workspaces.catalogs)) collect(catalog);
-  }
+  collect(workspace.catalog);
+  for (const catalog of Object.values(workspace.catalogs ?? {}))
+    collect(catalog);
   return names;
 };
 
@@ -54,19 +64,12 @@ const workspaceManifests = async (
   readonly manifests: ReadonlyMap<string, string>;
   readonly catalogLocalDependencies: ReadonlySet<string>;
 }> => {
-  const rootManifest = await readManifest(join(repositoryRoot, "package.json"));
-  const workspaces = rootManifest.workspaces;
-  if (
-    typeof workspaces !== "object" ||
-    workspaces === null ||
-    !("packages" in workspaces) ||
-    !Array.isArray(workspaces.packages)
-  ) {
-    throw new Error("Root package.json has no workspaces.packages array");
-  }
+  const workspace = await readPnpmWorkspace(repositoryRoot);
+  if (!Array.isArray(workspace.packages))
+    throw new Error("pnpm-workspace.yaml has no packages array");
 
   const manifests = new Map<string, string>();
-  for (const pattern of workspaces.packages) {
+  for (const pattern of workspace.packages) {
     if (typeof pattern !== "string") continue;
     const glob = new Bun.Glob(`${pattern}/package.json`);
     for await (const path of glob.scan({ cwd: repositoryRoot })) {
@@ -77,7 +80,7 @@ const workspaceManifests = async (
   }
   return {
     manifests,
-    catalogLocalDependencies: localCatalogDependencyNames(rootManifest),
+    catalogLocalDependencies: localCatalogDependencyNames(workspace),
   };
 };
 
