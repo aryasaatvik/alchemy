@@ -1,11 +1,15 @@
 import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
 import * as Cloudflare from "@/Cloudflare/index.ts";
+import { viteBuild } from "@/Cloudflare/Workers/Sources/Vite.ts";
 import * as Test from "@/Test/Alchemy";
+import { PlatformServices } from "@/Util/PlatformServices.ts";
 import * as r2 from "@distilled.cloud/cloudflare/r2";
-import { describe, expect } from "alchemy-test";
+import { describe, expect, it } from "alchemy-test";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import { MinimumLogLevel } from "effect/References";
+import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
@@ -34,6 +38,33 @@ const fixtureDir = pathe.resolve(
 const tempRoot = pathe.resolve(import.meta.dirname, "../../../.tmp");
 
 describe.concurrent("TanStack Start", () => {
+  it.effect("prerenders Cloudflare tracing in the Vite build child", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const rootDir = yield* cloneFixture(fixtureDir, {
+        prefix: "alchemy-tanstack-prerender-",
+        tempRoot,
+        entries: ["package.json", "tsconfig.json", "vite.config.ts", "src"],
+      });
+
+      const result = yield* viteBuild(
+        rootDir,
+        {},
+        {
+          compatibilityDate: "2026-04-01",
+          compatibilityFlags: ["nodejs_compat"],
+        },
+      );
+      expect(result.clientDirectory).toBeDefined();
+
+      const html = yield* fs.readFileString(
+        path.join(result.clientDirectory!, "prerendered", "index.html"),
+      );
+      expect(html).toContain("workerd prerender: object");
+    }).pipe(Effect.provide(PlatformServices), Effect.timeout("120 seconds")),
+  );
+
   /**
    * TanStack Start deploys through `Cloudflare.Website.Vite` (per the Vite
    * resource's TanStack example) — the `tanstackStart()` plugin in the
@@ -108,6 +139,14 @@ describe.concurrent("TanStack Start", () => {
           timeout: "120 seconds",
           label: "tanstack ssr home",
         });
+        yield* expectUrlContains(
+          `${site.url!}/prerendered`,
+          "workerd prerender: object",
+          {
+            timeout: "60 seconds",
+            label: "tanstack workerd prerender",
+          },
+        );
 
         // ── Server route + R2 binding round-trip ─────────────────────────
         const key = "tanstack-live-key.txt";

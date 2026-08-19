@@ -8,79 +8,97 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as IndexRouteImport } from "./routes/index";
-import { Route as ApiR2RouteImport } from "./routes/api.r2";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as PrerenderedRouteImport } from './routes/prerendered'
+import { Route as ApiR2RouteImport } from './routes/api.r2'
 
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
+const PrerenderedRoute = PrerenderedRouteImport.update({
+  id: '/prerendered',
+  path: '/prerendered',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiR2Route = ApiR2RouteImport.update({
-  id: "/api/r2",
-  path: "/api/r2",
+  id: '/api/r2',
+  path: '/api/r2',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/api/r2": typeof ApiR2Route;
+  '/': typeof IndexRoute
+  '/prerendered': typeof PrerenderedRoute
+  '/api/r2': typeof ApiR2Route
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/api/r2": typeof ApiR2Route;
+  '/': typeof IndexRoute
+  '/prerendered': typeof PrerenderedRoute
+  '/api/r2': typeof ApiR2Route
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/api/r2": typeof ApiR2Route;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/prerendered': typeof PrerenderedRoute
+  '/api/r2': typeof ApiR2Route
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/api/r2";
-  fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/api/r2";
-  id: "__root__" | "/" | "/api/r2";
-  fileRoutesById: FileRoutesById;
+  fileRoutesByFullPath: FileRoutesByFullPath
+  fullPaths: '/' | '/prerendered' | '/api/r2'
+  fileRoutesByTo: FileRoutesByTo
+  to: '/' | '/prerendered' | '/api/r2'
+  id: '__root__' | '/' | '/prerendered' | '/api/r2'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  ApiR2Route: typeof ApiR2Route;
+  IndexRoute: typeof IndexRoute
+  PrerenderedRoute: typeof PrerenderedRoute
+  ApiR2Route: typeof ApiR2Route
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/api/r2": {
-      id: "/api/r2";
-      path: "/api/r2";
-      fullPath: "/api/r2";
-      preLoaderRoute: typeof ApiR2RouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prerendered': {
+      id: '/prerendered'
+      path: '/prerendered'
+      fullPath: '/prerendered'
+      preLoaderRoute: typeof PrerenderedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/r2': {
+      id: '/api/r2'
+      path: '/api/r2'
+      fullPath: '/api/r2'
+      preLoaderRoute: typeof ApiR2RouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  PrerenderedRoute: PrerenderedRoute,
   ApiR2Route: ApiR2Route,
-};
+}
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>();
+  ._addFileTypes<FileRouteTypes>()
 
-import type { getRouter } from "./router.tsx";
-import type { createStart } from "@tanstack/react-start";
-declare module "@tanstack/react-start" {
+import type { getRouter } from './router.tsx'
+import type { createStart } from '@tanstack/react-start'
+declare module '@tanstack/react-start' {
   interface Register {
-    ssr: true;
-    router: Awaited<ReturnType<typeof getRouter>>;
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
   }
 }
