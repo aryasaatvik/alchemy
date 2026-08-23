@@ -14,6 +14,7 @@ import { Resource } from "../../Resource.ts";
 import type { RuntimeContext } from "../../RuntimeContext.ts";
 import { effectClass, taggedFunction } from "../../Util/effect.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { generateLocalId } from "../LocalRuntime.ts";
 import {
   Worker,
@@ -1097,7 +1098,7 @@ export const ProviderLocal = () =>
 
 export const WorkflowProvider = () =>
   ProviderLayer.dual(WorkflowResource, {
-    local: () => ProviderLocal(),
+    local: () => provideLocalEnvironment(ProviderLocal()),
     live: () => ProviderLive(),
   });
 

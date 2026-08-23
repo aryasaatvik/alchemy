@@ -5,8 +5,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
-import type { ProviderService } from "../../Provider.ts";
-import type { ResourceLike } from "../../Resource.ts";
+import type { ProviderService } from "../Provider.ts";
+import type { ResourceLike } from "../Resource.ts";
 
 /**
  * Wraps a {@link ProviderService} so that EVERY lifecycle method
@@ -19,7 +19,7 @@ import type { ResourceLike } from "../../Resource.ts";
  * Method identity/shape is preserved exactly — the Provider interface is
  * structural, and the Proxy forwards non-function members (`version`,
  * `stables`, `aliases`, `nuke`, ...) untouched. Modeled on the lifecycle
- * Proxy in [Local/RpcProvider.ts](../../Local/RpcProvider.ts).
+ * Proxy in [RpcProvider.ts](./RpcProvider.ts).
  */
 export const withProviderContext = <R extends ResourceLike>(
   provider: ProviderService<R>,
@@ -48,9 +48,9 @@ const isProviderService = (value: unknown): value is ProviderService<any> =>
 
 /**
  * Layer-level companion to {@link withProviderContext}: given a provider
- * layer (e.g. `S3.BucketProvider()`) and a layer of override services,
- * returns a layer that builds both and re-registers every provider service
- * with its lifecycle methods wrapped in the override context.
+ * layer and a layer of override services, returns a layer that builds both and
+ * re-registers every provider service with its lifecycle methods wrapped in
+ * the override context.
  *
  * Built with `Layer.fromBuildMemo` (like `ProviderLayer.dual`) so the
  * `services` layer is built through the ambient `MemoMap`: pass a

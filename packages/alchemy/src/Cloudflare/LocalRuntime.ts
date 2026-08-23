@@ -7,7 +7,7 @@ import * as Path from "effect/Path";
 import { AlchemyContext } from "../AlchemyContext.ts";
 import * as RpcProvider from "../Local/RpcProvider.ts";
 import { LOCAL_ID_PREFIX } from "../ProviderMode.ts";
-import { CloudflareEnvironment } from "./CloudflareEnvironment.ts";
+import { LiveCloudflareEnvironment } from "./LocalEnvironment.ts";
 import type { Queue } from "./Queues/Queue.ts";
 import type { Consumer } from "./Queues/Consumer.ts";
 
@@ -75,12 +75,17 @@ export const localStorageDirectory = Effect.gen(function* () {
 const makeLocalRuntimeServices = () =>
   RpcProvider.providerServicesEffect(
     Effect.gen(function* () {
-      const getEnv = yield* CloudflareEnvironment;
+      const liveEnvironment = yield* LiveCloudflareEnvironment;
       return Layer.merge(
         LocalRuntimeStateLive,
         layerRuntime({
           api: {
-            accountId: getEnv.pipe(Effect.map((env) => env.accountId)),
+            // The remote-binding bridge owns the only live Cloudflare API
+            // path in the local runtime. Its account resolver stays lazy, so
+            // fully emulated Workers never authenticate merely by starting.
+            accountId: liveEnvironment.pipe(
+              Effect.map((environment) => environment.accountId),
+            ),
           },
           storage: {
             directory: yield* localStorageDirectory,

@@ -8,13 +8,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
+import { provideProviderContext } from "../../Local/ProviderContext.ts";
 import type { Platform } from "../../Platform.ts";
 import type { ResourceClassLike, ResourceLike } from "../../Resource.ts";
 import { DEFAULT_LOCAL_ENDPOINT } from "../LocalEmulator.ts";
 import * as Endpoint from "../Endpoint.ts";
 import { AWSEnvironment } from "../Environment.ts";
 import * as Region from "../Region.ts";
-import { provideProviderContext } from "./ProviderContext.ts";
 
 /**
  * Fixed dummy account used for every floci-emulated resource. Attributes

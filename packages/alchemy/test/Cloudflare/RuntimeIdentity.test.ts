@@ -87,7 +87,7 @@ describe("Cloudflare runtime identity", () => {
   it.effect("rejects a missing local Worker account identity", () =>
     Effect.gen(function* () {
       const error = yield* makeLocalWorkerStandardBindings({
-        accountId: undefined as unknown as string,
+        accountId: "",
         workerName: "worker",
         stackName: "stack",
         stage: "dev",

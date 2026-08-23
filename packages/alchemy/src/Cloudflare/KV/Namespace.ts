@@ -8,6 +8,7 @@ import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { generateLocalId } from "../LocalRuntime.ts";
 import type { Providers } from "../Providers.ts";
 
@@ -265,7 +266,7 @@ export const ProviderLocal = () =>
 
 export const NamespaceProvider = () =>
   ProviderLayer.dual(Namespace, {
-    local: () => ProviderLocal(),
+    local: () => provideLocalEnvironment(ProviderLocal()),
     live: () => ProviderLive(),
   });
 

@@ -41,12 +41,12 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import { havePropsChanged, isResolved, stripEffects } from "../../Diff.ts";
 import { canonicalHash } from "../../Local/LocalProvider.ts";
+import { withProviderContext } from "../../Local/ProviderContext.ts";
 import * as RpcProvider from "../../Local/RpcProvider.ts";
 import type { Platform } from "../../Platform.ts";
 import type { ProviderService } from "../../Provider.ts";
 import type { ResourceClassLike, ResourceLike } from "../../Resource.ts";
 import { flociServices } from "./FlociServices.ts";
-import { withProviderContext } from "./ProviderContext.ts";
 
 /**
  * The AWS dev sidecar entry URL ([Local.ts](./Local.ts)) — every

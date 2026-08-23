@@ -12,6 +12,7 @@ import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as pathe from "pathe";
 import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment.ts";
+import { LOCAL_CLOUDFLARE_ACCOUNT_ID } from "@/Cloudflare/LocalEnvironment.ts";
 
 // `dev: true` runs local providers behind the RPC sidecar proxy by default,
 // matching the process topology of the real `alchemy dev` command (see
@@ -85,6 +86,8 @@ test.provider(
       // The local provider fabricates a `dev:` id — proof no cloud call ran
       // — and the worker serves from the local dev proxy.
       expect(deployed.kv.namespaceId).toMatch(/^dev:/);
+      expect(deployed.kv.accountId).toBe(LOCAL_CLOUDFLARE_ACCOUNT_ID);
+      expect(deployed.worker.accountId).toBe(LOCAL_CLOUDFLARE_ACCOUNT_ID);
       expect(deployed.worker.url).toMatch(/^http:\/\/localhost:\d+$/);
 
       const body = (yield* getJsonReady(

@@ -9,6 +9,7 @@ import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { generateLocalId } from "../LocalRuntime.ts";
 import type * as Cloudflare from "../Providers.ts";
 import * as Zone from "../Zone/index.ts";
@@ -1264,7 +1265,7 @@ export const ProviderLocal = () =>
 
 export const BucketProvider = () =>
   ProviderLayer.dual(Bucket, {
-    local: () => ProviderLocal(),
+    local: () => provideLocalEnvironment(ProviderLocal()),
     live: () => ProviderLive(),
   });
 
