@@ -11,6 +11,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Redacted from "effect/Redacted";
@@ -18,6 +19,7 @@ import * as Stream from "effect/Stream";
 import { AlchemyContext } from "../../AlchemyContext.ts";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import type { ScopedPlanStatusSession } from "../../Cli/Cli.ts";
+import { localEnvironment as localCloudflareEnvironment } from "../../Cloudflare/LocalEnvironment.ts";
 import * as LocalProvider from "../../Local/LocalProvider.ts";
 import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as Provider from "../../Provider.ts";
@@ -98,7 +100,14 @@ export interface FunctionProviderModeOptions {
 export const FunctionProvider = (options: FunctionProviderModeOptions = {}) =>
   ProviderLayer.dual(Function, {
     live: () => LiveFunctionProvider(),
-    local: () => LocalEmulatorFunctionProvider(options.local),
+    local: () =>
+      LocalEmulatorFunctionProvider(options.local).pipe(
+        // A local Lambda replays Alchemy's runtime platform graph against the
+        // emulated provider identity. Do not let an unrelated live
+        // Cloudflare provider collection replace that identity and force
+        // profile authentication during Lambda precreate.
+        Layer.provide(localCloudflareEnvironment),
+      ),
     modeTransition: "in-place",
   });
 
