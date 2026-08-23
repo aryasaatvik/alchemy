@@ -52,6 +52,47 @@ export class WorkerValidationError extends Schema.TaggedError<WorkerValidationEr
   },
 ) {}
 
+/** Whether a descriptor crosses from the local runtime into Cloudflare. */
+export const isRemoteRuntimeBinding = (
+  binding: WorkerBinding,
+  devRemote?: Record<string, boolean>,
+): boolean => {
+  switch (binding.type) {
+    case "ai":
+    case "ai_search":
+    case "ai_search_namespace":
+    case "artifacts":
+    case "dispatch_namespace":
+    case "flagship":
+    case "mtls_certificate":
+    case "pipelines":
+    case "vectorize":
+    case "vpc_service":
+      return true;
+    case "browser":
+    case "images":
+    case "send_email":
+    case "stream":
+      return devRemote?.[binding.name] === true;
+    case "d1":
+      return !isLocalId(binding.databaseId);
+    case "kv_namespace":
+      return !isLocalId(binding.namespaceId);
+    case "r2_bucket":
+      return !isLocalId(binding.bucketName);
+    case "secrets_store_secret":
+      return !isLocalId(binding.storeId);
+    default:
+      return false;
+  }
+};
+
+export const hasRemoteRuntimeBindings = (
+  bindings: readonly WorkerBinding[],
+  devRemote?: Record<string, boolean>,
+): boolean =>
+  bindings.some((binding) => isRemoteRuntimeBinding(binding, devRemote));
+
 /**
  * Env keys that the local runtime always supplies itself. A user-supplied
  * `env` entry with the same name must not be emitted a second time — workerd

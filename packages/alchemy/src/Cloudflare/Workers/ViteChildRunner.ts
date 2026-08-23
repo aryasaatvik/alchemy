@@ -11,11 +11,17 @@ import {
   makeScopedArtifacts,
 } from "../../Artifacts.ts";
 import { CloudflareAuth } from "../Auth/AuthProvider.ts";
-import * as CloudflareEnvironment from "../CloudflareEnvironment.ts";
 import * as Credentials from "../Credentials.ts";
 import * as RpcServerEnvironment from "../../Local/RpcServerEnvironment.ts";
 import { PlatformServices, runMain } from "../../Util/PlatformServices.ts";
-import { materializeRuntimeBindings } from "./RuntimeBindings.ts";
+import {
+  LiveCloudflareEnvironment,
+  retainedLiveEnvironment,
+} from "../LocalEnvironment.ts";
+import {
+  hasRemoteRuntimeBindings,
+  materializeRuntimeBindings,
+} from "./RuntimeBindings.ts";
 import { loadSource, SourceProviderError } from "./Source.ts";
 import * as Vite from "./Sources/Vite.ts";
 import {
@@ -36,12 +42,18 @@ const program = Effect.scoped(
     const credentials = Credentials.fromAuthProvider().pipe(
       Layer.provide(CloudflareAuth),
     );
-    const liveEnvironment = yield* CloudflareEnvironment.CloudflareEnvironment;
+    const liveEnvironment = yield* LiveCloudflareEnvironment;
+    const usesRemoteBindings = hasRemoteRuntimeBindings(
+      config.worker.bindingDescriptors,
+      config.worker.devRemote,
+    );
     const runtimeContext = yield* layerRuntime({
       api: {
-        accountId: liveEnvironment.pipe(
-          Effect.map((environment) => environment.accountId),
-        ),
+        accountId: usesRemoteBindings
+          ? liveEnvironment.pipe(
+              Effect.map((environment) => environment.accountId),
+            )
+          : config.accountId,
       },
       storage: { directory: config.storageDirectory },
     }).pipe(
@@ -162,9 +174,7 @@ const program = Effect.scoped(
 
 runMain(
   program.pipe(
-    Effect.provide(
-      CloudflareEnvironment.fromProfile().pipe(Layer.provide(CloudflareAuth)),
-    ),
+    Effect.provide(retainedLiveEnvironment),
     Effect.provide(RpcServerEnvironment.fromEnv()),
     Effect.provide(PlatformServices),
   ),

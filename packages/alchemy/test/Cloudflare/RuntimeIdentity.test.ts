@@ -3,8 +3,13 @@ import {
   fromEnv,
   runtimeIdentity,
 } from "@/Cloudflare/CloudflareEnvironment.ts";
+import {
+  LiveCloudflareEnvironment,
+  retainedLiveEnvironment,
+} from "@/Cloudflare/LocalEnvironment.ts";
 import { makeR2HttpScope } from "@/Cloudflare/R2/BucketHttp.ts";
 import { makeLocalWorkerStandardBindings } from "@/Cloudflare/Workers/LocalWorkerProvider.ts";
+import { hasRemoteRuntimeBindings } from "@/Cloudflare/Workers/RuntimeBindings.ts";
 import * as PluginContext from "@alchemy.run/cloudflare-runtime/core/PluginContext";
 import { describe, expect, it } from "alchemy-test";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -40,6 +45,35 @@ describe("Cloudflare runtime identity", () => {
       ),
     ),
   );
+
+  it.effect(
+    "retains live profile identity without resolving authentication",
+    () =>
+      Effect.gen(function* () {
+        const environment = yield* LiveCloudflareEnvironment;
+
+        expect(Effect.isEffect(environment)).toBe(true);
+      }).pipe(Effect.provide(retainedLiveEnvironment)),
+  );
+
+  it("classifies local and remote runtime binding plans", () => {
+    expect(
+      hasRemoteRuntimeBindings([
+        { type: "plain_text", name: "VALUE", text: "local" },
+        { type: "kv_namespace", name: "KV", namespaceId: "dev:kv" },
+      ]),
+    ).toBe(false);
+    expect(
+      hasRemoteRuntimeBindings([{ type: "browser", name: "BROWSER" }], {
+        BROWSER: true,
+      }),
+    ).toBe(true);
+    expect(
+      hasRemoteRuntimeBindings([
+        { type: "kv_namespace", name: "KV", namespaceId: "live-kv" },
+      ]),
+    ).toBe(true);
+  });
 
   it.effect(
     "emits one concrete account binding and ignores undefined or reserved env entries",
