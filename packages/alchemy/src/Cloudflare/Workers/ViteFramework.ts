@@ -12,4 +12,4 @@ export {
   type ViteFrameworkContribution,
   type ViteFrameworkDurableObject,
   type ViteFrameworkWorkerCustomizer,
-} from "@alchemy.run/cloudflare-runtime/vite";
+} from "@alchemy.run/cloudflare-runtime/vite/framework";

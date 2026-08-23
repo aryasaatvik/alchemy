@@ -774,6 +774,12 @@
       "worker": "./src/vite/plugin.ts",
       "import": "./dist/vite/node/plugin.mjs"
     },
+    "./vite/framework": {
+      "types": "./dist/vite/node/framework.d.mts",
+      "bun": "./src/vite/framework.ts",
+      "worker": "./src/vite/framework.ts",
+      "import": "./dist/vite/node/framework.mjs"
+    },
     "./package.json": "./package.json"
   },
   "inlinedDependencies": {

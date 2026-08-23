@@ -247,9 +247,9 @@ describe("local Lambda package cache", () => {
     expect(JSON.parse(result.stdout.trim())).toEqual({
       before: [0, 0],
       afterCache: [0, 0],
-      // The existing Function provider graph owns one shutdown handler. The
-      // package cache must not import the lockfile helper that added a second.
-      afterProvider: [1, 1],
+      // The Function provider graph no longer installs shutdown handlers at
+      // import time; the package cache must preserve that lifecycle boundary.
+      afterProvider: [0, 0],
     });
   });
 });
