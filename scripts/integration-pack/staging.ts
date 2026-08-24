@@ -31,6 +31,7 @@ const knownMissingExports: Readonly<Record<string, ReadonlyArray<string>>> = {
     "./Cli/InkCLI",
     "./Cloudflare/Live",
     "./Endpoint",
+    "./Neon/*",
     "./Process",
     "./TUI",
   ],
@@ -245,7 +246,10 @@ const makeBundledPackagesSelfContained = async (
   const localNames = new Set(bundled.map((packed) => packed.name));
   for (const packed of bundled) {
     const packageDirectory = join(directory, "node_modules", packed.name);
-    const manifest = await readManifest(join(packageDirectory, "package.json"));
+    const manifest = await patchIntegrationManifest(
+      packageDirectory,
+      await readManifest(join(packageDirectory, "package.json")),
+    );
     for (const section of dependencySections) {
       for (const name of localNames) delete manifest[section]?.[name];
     }
