@@ -9,9 +9,11 @@ import {
   CommandExecutor,
   UnexpectedExit,
   makeCommandError,
+  terminateProcessGroup,
   type CommandProps,
 } from "./Command.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
+import { startDevProcessGuardian } from "../Util/DevProcessGuardian.ts";
 
 export interface DevProps extends CommandProps {}
 
@@ -115,9 +117,21 @@ export const DevProviderLocal = () =>
       return {
         // The dev process is spawned into the instance scope the helper
         // provides: it keeps running after `start` returns (readiness) and
-        // is killed when the helper closes the scope on restart/delete.
+        // receives a graceful group shutdown when the helper closes its scope
+        // on POSIX. Effect's Windows process-group primitive is explicitly
+        // forceful because Windows has no portable SIGTERM tree equivalent.
+        // A detached guardian separately owns abrupt sidecar loss, because
+        // synchronous exit cleanup cannot await SIGTERM -> SIGKILL escalation.
         start: Effect.fn(function* ({ news: props, invalidate }) {
           const child = yield* spawn(props);
+          const guardian = yield* Effect.sync(() =>
+            startDevProcessGuardian(child.pid),
+          );
+          yield* Effect.addFinalizer(() =>
+            terminateProcessGroup(child).pipe(
+              Effect.ensuring(Effect.sync(guardian.stop)),
+            ),
+          );
           const redactor = makeCommandRedactor(props.env);
 
           let buffer = "";
@@ -184,6 +198,7 @@ export const DevProviderLocal = () =>
           // reports `update` and restarts it.
           yield* child.exitCode.pipe(
             Effect.exit,
+            Effect.tap(() => Effect.sync(guardian.stop)),
             Effect.flatMap(() => invalidate),
             Effect.forkScoped,
           );
