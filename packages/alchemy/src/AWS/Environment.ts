@@ -2,6 +2,8 @@ import type {
   CredentialsError,
   ResolvedCredentials,
 } from "@distilled.cloud/aws/Credentials";
+import { Credentials } from "@distilled.cloud/aws/Credentials";
+import { Region } from "@distilled.cloud/aws/Region";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -127,6 +129,35 @@ export class AWSEnvironment extends Context.Service<
 
 /** @see {@link AWSEnvironment.isLocalEmulator} */
 export const isLocalEmulator = AWSEnvironment.isLocalEmulator;
+
+/**
+ * Runtime-only AWS environment for generated Lambda entrypoints. It uses the
+ * process credentials and Region already installed by the bootstrap and never
+ * loads a profile, contacts metadata, or starts an emulator.
+ */
+export const Runtime = Layer.effect(
+  AWSEnvironment,
+  Effect.all({
+    accountId: Config.string("ALCHEMY_AWS_ACCOUNT_ID"),
+    credentials: Credentials,
+    endpoint: AWS_ENDPOINT_URL,
+    region: Region,
+    serviceEndpoints: AWS_SERVICE_ENDPOINTS,
+  }).pipe(
+    Effect.map(
+      ({ accountId, credentials, endpoint, region, serviceEndpoints }) =>
+        region.pipe(
+          Effect.map((region) => ({
+            accountId,
+            credentials,
+            endpoint,
+            region,
+            serviceEndpoints,
+          })),
+        ),
+    ),
+  ),
+);
 
 export const Default = Layer.effect(
   AWSEnvironment,
