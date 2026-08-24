@@ -1,16 +1,62 @@
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import { fromEnvironmentWithServiceEndpoints } from "@/AWS/Endpoint.ts";
 import {
+  AWS_ENDPOINT_URL,
+  AWS_SERVICE_ENDPOINTS,
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
   AWSEnvironment,
 } from "@/AWS/Environment.ts";
 import { localEmulatorFunctionEnvironment } from "@/AWS/Lambda/FlociFunctionProvider.ts";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
 
 describe("AWS provider options", () => {
+  it.effect("decodes runtime endpoint policy from the environment", () =>
+    Effect.gen(function* () {
+      expect(yield* AWS_ENDPOINT_URL).toBe("http://global.local");
+      expect(yield* AWS_SERVICE_ENDPOINTS).toEqual({
+        ses: "http://ses.local",
+        sqs: "http://sqs.local",
+      });
+    }).pipe(
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromEnv({
+          env: {
+            AWS_ENDPOINT_URL: "http://global.local",
+            [AWS_SERVICE_ENDPOINTS_ENV_VAR]: JSON.stringify({
+              ses: "http://ses.local",
+              sqs: "http://sqs.local",
+            }),
+          },
+        }),
+      ),
+    ),
+  );
+
+  it.effect("rejects malformed runtime service endpoint policy", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(AWS_SERVICE_ENDPOINTS);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe(
+          "AWS::Environment::InvalidServiceEndpoints",
+        );
+      }
+    }).pipe(
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromEnv({
+          env: { [AWS_SERVICE_ENDPOINTS_ENV_VAR]: '{"sqs":""}' },
+        }),
+      ),
+    ),
+  );
+
   it.effect("routes configured services before the environment fallback", () =>
     Effect.gen(function* () {
       const resolver = yield* Endpoint.ServiceEndpoint;

@@ -30,6 +30,54 @@ export const AWS_SECRET_ACCESS_KEY = Config.redacted("AWS_SECRET_ACCESS_KEY");
 export const AWS_SESSION_TOKEN = Config.redacted("AWS_SESSION_TOKEN");
 export const AWS_SERVICE_ENDPOINTS_ENV_VAR = "ALCHEMY_AWS_SERVICE_ENDPOINTS";
 
+/** Global AWS endpoint visible inside an application runtime. */
+export const AWS_ENDPOINT_URL = Config.string("AWS_ENDPOINT_URL").pipe(
+  Config.option,
+  Effect.map(Option.getOrUndefined),
+);
+
+export class InvalidAWSServiceEndpoints extends Data.TaggedError(
+  "AWS::Environment::InvalidServiceEndpoints",
+)<{ readonly message: string }> {}
+
+const decodeServiceEndpoints = (raw: string) =>
+  Effect.try({
+    try: () => {
+      const value: unknown = JSON.parse(raw);
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        Array.isArray(value) ||
+        Object.entries(value).some(
+          ([service, endpoint]) =>
+            service.length === 0 ||
+            typeof endpoint !== "string" ||
+            endpoint.length === 0,
+        )
+      ) {
+        throw new TypeError("expected a non-empty string endpoint record");
+      }
+      return value as Readonly<Record<string, string>>;
+    },
+    catch: () =>
+      new InvalidAWSServiceEndpoints({
+        message: `${AWS_SERVICE_ENDPOINTS_ENV_VAR} must contain a JSON object of non-empty service endpoints`,
+      }),
+  });
+
+/** Service-specific AWS endpoints visible inside an application runtime. */
+export const AWS_SERVICE_ENDPOINTS = Config.string(
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+).pipe(
+  Config.option,
+  Effect.flatMap(
+    Option.match({
+      onNone: () => Effect.succeed(undefined),
+      onSome: decodeServiceEndpoints,
+    }),
+  ),
+);
+
 export type AccountID = string;
 export type RegionID = string;
 
