@@ -1196,7 +1196,13 @@ export const Function: Platform<
   },
 });
 
-export const FunctionProvider = () =>
+export interface FunctionProviderOptions {
+  readonly transformEnvironment?: (
+    environment: Record<string, string>,
+  ) => Effect.Effect<Record<string, string>, any, any>;
+}
+
+export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
   Provider.effect(
     Function,
     Effect.gen(function* () {
@@ -1783,9 +1789,14 @@ export const FunctionProvider = () =>
             S3Key: key,
           } as const;
         });
-        const runtimeEnv = isFunctionImageProps(news)
+        const resolvedRuntimeEnv = isFunctionImageProps(news)
           ? env
           : withNodeSourceMaps(env, news);
+        const runtimeEnv =
+          resolvedRuntimeEnv === undefined ||
+          options.transformEnvironment === undefined
+            ? resolvedRuntimeEnv
+            : yield* options.transformEnvironment(resolvedRuntimeEnv);
 
         const createFunctionRequest: CreateFunctionRequest = {
           FunctionName: functionName,
