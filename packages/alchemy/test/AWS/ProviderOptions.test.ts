@@ -38,6 +38,37 @@ describe("AWS provider options", () => {
     ),
   );
 
+  it.effect(
+    "accepts service endpoints reified by the runtime Config provider",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* AWS_SERVICE_ENDPOINTS).toEqual({
+          servicequotas: "http://host.docker.internal:8800/service-quotas",
+          ses: "http://host.docker.internal:8800/ses",
+          sesv2: "http://host.docker.internal:8800/ses",
+        });
+      }).pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.make((path) =>
+            Effect.succeed(
+              path[0] === AWS_SERVICE_ENDPOINTS_ENV_VAR
+                ? ({
+                    _tag: "Value",
+                    value: {
+                      servicequotas:
+                        "http://host.docker.internal:8800/service-quotas",
+                      ses: "http://host.docker.internal:8800/ses",
+                      sesv2: "http://host.docker.internal:8800/ses",
+                    },
+                  } as unknown as ConfigProvider.Node)
+                : undefined,
+            ),
+          ),
+        ),
+      ),
+  );
+
   it.effect("rejects malformed runtime service endpoint policy", () =>
     Effect.gen(function* () {
       const result = yield* Effect.result(AWS_SERVICE_ENDPOINTS);
