@@ -425,6 +425,7 @@
     "@distilled.cloud/fly-io": "workspace:*",
     "@distilled.cloud/hetzner": "workspace:*",
     "@distilled.cloud/neon": "workspace:*",
+    "@distilled.cloud/otel-collector": "workspace:*",
     "@distilled.cloud/planetscale": "workspace:*",
     "@distilled.cloud/railway": "workspace:*",
     "@effect/sql-d1": "catalog:effect",
