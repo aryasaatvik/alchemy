@@ -6,6 +6,7 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Region } from "@distilled.cloud/aws/Region";
 import type * as lambda from "aws-lambda";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -21,6 +22,7 @@ import type { HttpClient } from "effect/unstable/http/HttpClient";
 import type * as rolldown from "rolldown";
 import { Unowned } from "../../AdoptPolicy.ts";
 import type * as Bundle from "../../Bundle/Bundle.ts";
+import { CloudflareEnvironment } from "../../Cloudflare/CloudflareEnvironment.ts";
 import type { PackageInstall } from "../../Bundle/InstalledPackages.ts";
 import { deepEqual, havePropsChanged, isResolved } from "../../Diff.ts";
 import { isScopeEjected, type HttpEffect } from "../../Http.ts";
@@ -49,7 +51,11 @@ import {
 import { sha256 } from "../../Util/sha256.ts";
 import { zipCode } from "../../Util/zip.ts";
 import { Assets } from "../Assets.ts";
-import { AWSEnvironment } from "../Environment.ts";
+import {
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  AWSEnvironment,
+} from "../Environment.ts";
+import { ConfiguredServiceEndpoints } from "../Endpoint.ts";
 import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import type { Providers } from "../Providers.ts";
@@ -618,6 +624,24 @@ const withNodeSourceMaps = (
       ? `${current} --enable-source-maps`
       : "--enable-source-maps",
   };
+};
+
+/** Explicit Function env values override same-named binding values. */
+export const mergeFunctionEnvironment = (
+  bindingEnvironment: LambdaEnvironment | undefined,
+  props: Pick<FunctionProps, "env">,
+): LambdaEnvironment => ({ ...bindingEnvironment, ...props.env });
+
+/** Resolve the exact environment sent to AWS, including runtime identity. */
+export const resolveFunctionEnvironment = (
+  environment: LambdaEnvironment | undefined,
+  props: FunctionProps,
+  alchemyEnvironment: Record<string, string>,
+): LambdaEnvironment => {
+  const runtimeEnvironment = isFunctionImageProps(props)
+    ? environment
+    : withNodeSourceMaps(environment, props);
+  return { ...runtimeEnvironment, ...alchemyEnvironment };
 };
 
 export interface Function extends Resource<
@@ -1307,6 +1331,46 @@ export interface FunctionProviderOptions {
   ) => Effect.Effect<Record<string, string>, any, any>;
 }
 
+/** Internal identity required when an Effect Function init graph replays. */
+export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
+  const stack = yield* Stack;
+  const { accountId } = yield* AWSEnvironment.current;
+  const configuredServiceEndpoints = yield* Effect.serviceOption(
+    ConfiguredServiceEndpoints,
+  );
+  const serviceEndpoints = Option.isSome(configuredServiceEndpoints)
+    ? Object.fromEntries(
+        Object.entries(configuredServiceEndpoints.value).sort(([a], [b]) =>
+          a.localeCompare(b),
+        ),
+      )
+    : {};
+  const cloudflareEnvironment = yield* Effect.serviceOption(
+    CloudflareEnvironment,
+  );
+  const configuredCloudflareAccountId = yield* Config.string(
+    "ALCHEMY_CLOUDFLARE_ACCOUNT_ID",
+  ).pipe(Config.option, Effect.orDie);
+  const cloudflareAccountId = Option.isSome(cloudflareEnvironment)
+    ? (yield* cloudflareEnvironment.value).accountId
+    : Option.getOrUndefined(configuredCloudflareAccountId);
+
+  return {
+    ALCHEMY_AWS_ACCOUNT_ID: accountId,
+    ...(Object.keys(serviceEndpoints).length === 0
+      ? {}
+      : {
+          [AWS_SERVICE_ENDPOINTS_ENV_VAR]: JSON.stringify(serviceEndpoints),
+        }),
+    ...(cloudflareAccountId === undefined
+      ? {}
+      : { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId }),
+    ALCHEMY_STACK_NAME: stack.name,
+    ALCHEMY_STAGE: stack.stage,
+    ALCHEMY_PHASE: "runtime",
+  };
+});
+
 export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
   Provider.effect(
     Function,
@@ -1317,11 +1381,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
       // provider's watch loop can rebuild the identical artifact.
       const { bundleCode } = yield* makeFunctionBundler;
       const functionImage = yield* makeFunctionImage;
-      const alchemyEnv = {
-        ALCHEMY_STACK_NAME: stack.name,
-        ALCHEMY_STAGE: stack.stage,
-        ALCHEMY_PHASE: "runtime",
-      };
+      const alchemyEnv = yield* Effect.cached(resolveFunctionRuntimeEnv);
 
       const createFunctionName = (
         id: string,
@@ -1867,9 +1927,11 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             S3Key: key,
           } as const;
         });
-        const resolvedRuntimeEnv = isFunctionImageProps(news)
-          ? env
-          : withNodeSourceMaps(env, news);
+        const resolvedRuntimeEnv = resolveFunctionEnvironment(
+          env,
+          news,
+          yield* alchemyEnv,
+        );
         const runtimeEnv =
           resolvedRuntimeEnv === undefined ||
           options.transformEnvironment === undefined
@@ -1907,14 +1969,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           // sending `[]` there would detach the layers a previous reconcile
           // attached, only for this reconcile to re-attach them.
           Layers: layers?.map(layerVersionArnOf),
-          Environment: runtimeEnv
-            ? {
-                Variables: {
-                  ...runtimeEnv,
-                  ...alchemyEnv,
-                },
-              }
-            : undefined,
+          Environment: { Variables: runtimeEnv },
           Tags: tags,
           Timeout: toTimeoutSeconds(news.timeout),
           // Always explicit so removing the `tracing` prop converges back to
@@ -2496,7 +2551,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             roleArn: role.Role.Arn,
             code: prepared.deployment,
             functionName,
-            env: alchemyEnv,
+            env: undefined,
             session,
           });
 

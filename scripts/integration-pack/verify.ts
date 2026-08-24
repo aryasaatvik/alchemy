@@ -160,9 +160,15 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || 
     );
     await writeFile(
       join(consumer, "consumer-node.mjs"),
-      `const [Alchemy, AWS, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
+      `import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+
+const [Alchemy, AWS, AwsEnvironmentModule, LambdaBootstrap, ProcessBootstrap, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
   import("alchemy"),
   import("alchemy/AWS"),
+  import("alchemy/AWS/Environment"),
+  import("alchemy/Runtime/Bootstrap/Lambda"),
+  import("alchemy/Runtime/Bootstrap/Process"),
   import("alchemy/Cloudflare"),
   import("alchemy/Cloudflare/CloudflareEnvironment"),
   import("alchemy/Fly"),
@@ -170,9 +176,38 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || 
 if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || !CloudflareEnvironmentModule.CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Node runtime surfaces did not load");
 }
-console.log("compiled Alchemy Node runtime imports passed");
+
+Object.assign(process.env, {
+  ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+  ALCHEMY_STACK_NAME: "samva",
+  ALCHEMY_STAGE: "production",
+  AWS_ACCESS_KEY_ID: "checkpoint-test",
+  AWS_SECRET_ACCESS_KEY: "checkpoint-test",
+  AWS_SESSION_TOKEN: "checkpoint-test",
+  AWS_REGION: "us-east-1",
+});
+const entrypoint = Layer.succeed(ProcessBootstrap.entrypointTag, {
+  RuntimeContext: {
+    exports: Effect.succeed({
+      handler: Effect.gen(function* () {
+        const environment = yield* AwsEnvironmentModule.AWSEnvironment.current;
+        return async () => ({
+          accountId: environment.accountId,
+          region: environment.region,
+        });
+      }),
+    }),
+  },
+});
+const handler = await LambdaBootstrap.bootstrap(entrypoint);
+const identity = await handler({}, {});
+if (identity.accountId !== "654654387918" || identity.region !== "us-east-1") {
+  throw new Error(\`packaged Lambda runtime resolved \${JSON.stringify(identity)}\`);
+}
+console.log("compiled Alchemy Node runtime and packaged Lambda bootstrap passed");
 `,
     );
+    await writeFile(join(consumer, ".env"), "AWS_REGION=ap-south-1\n");
     await run(["bun", "install", "--ignore-scripts", "--backend=copyfile"], {
       cwd: consumer,
     });

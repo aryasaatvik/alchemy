@@ -1,12 +1,77 @@
 import {
   LambdaEnvironmentMaxBytes,
   lambdaEnvironmentSize,
+  resolveFunctionEnvironment,
+  resolveFunctionRuntimeEnv,
   validateLambdaEnvironment,
 } from "@/AWS/Lambda/Function.ts";
+import { ConfiguredServiceEndpoints } from "@/AWS/Endpoint.ts";
+import { AWSEnvironment } from "@/AWS/Environment.ts";
+import { Stack, type StackSpec } from "@/Stack.ts";
 import { expect, it } from "alchemy-test";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
+
+it.effect("serializes AWS runtime identity for packaged Lambdas", () =>
+  resolveFunctionRuntimeEnv.pipe(
+    Effect.tap((environment) =>
+      Effect.sync(() => {
+        expect(environment).toEqual({
+          ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+          ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+            ses: "http://emulate.samva:4300/ses",
+            sesv2: "http://emulate.samva:4300/ses",
+          }),
+          ALCHEMY_STACK_NAME: "samva",
+          ALCHEMY_STAGE: "production",
+          ALCHEMY_PHASE: "runtime",
+        });
+      }),
+    ),
+    Effect.provideService(ConfiguredServiceEndpoints, {
+      sesv2: "http://emulate.samva:4300/ses",
+      ses: "http://emulate.samva:4300/ses",
+    }),
+    Effect.provideService(
+      AWSEnvironment,
+      Effect.succeed({
+        accountId: "654654387918",
+        region: "us-east-1",
+        credentials: Effect.die("not used"),
+      }),
+    ),
+    Effect.provideService(Stack, {
+      name: "samva",
+      stage: "production",
+      resources: {},
+      bindings: {},
+      actions: {},
+    } satisfies Omit<StackSpec, "output">),
+    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+  ),
+);
+
+it("always includes Alchemy runtime identity", () => {
+  expect(
+    resolveFunctionEnvironment(
+      undefined,
+      {
+        main: "handler.ts",
+        build: { output: { sourcemap: false } },
+        uploadSourceMap: false,
+      },
+      {
+        ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+        ALCHEMY_STAGE: "production",
+      },
+    ),
+  ).toEqual({
+    ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+    ALCHEMY_STAGE: "production",
+  });
+});
 
 it("measures the serialized UTF-8 Lambda environment", () => {
   expect(
