@@ -19,6 +19,7 @@ import { registerLambdaExtension } from "../../AWS/Lambda/RuntimeExtension.ts";
 import { Runtime as AwsRuntimeEnvironment } from "../../AWS/Environment.ts";
 import * as AwsEndpoint from "../../AWS/Endpoint.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
+import { RuntimeContext } from "../../RuntimeContext.ts";
 import { entrypointLayer, entrypointTag, stackFromEnv } from "./Process.ts";
 
 /**
@@ -79,8 +80,12 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
   ).pipe(
     Effect.flatMap((context) =>
       entrypointTag.pipe(
-        Effect.flatMap((func) => func.RuntimeContext.exports),
-        Effect.flatMap((exports: any) => exports.handler),
+        Effect.flatMap((func) =>
+          func.RuntimeContext.exports.pipe(
+            Effect.flatMap((exports: any) => exports.handler),
+            Effect.provide(Layer.succeed(RuntimeContext, func.RuntimeContext)),
+          ),
+        ),
         Effect.provideContext(context),
       ),
     ),
