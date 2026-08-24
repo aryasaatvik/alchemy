@@ -161,6 +161,12 @@
       "worker": "./src/Cloudflare/Bridge.ts",
       "import": "./lib/Cloudflare/Bridge.js"
     },
+    "./Cloudflare/CloudflareEnvironment": {
+      "types": "./lib/Cloudflare/CloudflareEnvironment.d.ts",
+      "bun": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "worker": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "import": "./lib/Cloudflare/CloudflareEnvironment.js"
+    },
     "./Cloudflare/Live": {
       "types": "./lib/Cloudflare/Live.d.ts",
       "bun": "./src/Cloudflare/Live.ts",

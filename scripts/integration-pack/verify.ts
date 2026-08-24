@@ -146,9 +146,10 @@ export const verifyFreshConsumer = async (artifact: string): Promise<void> => {
       join(consumer, "consumer.ts"),
       `import * as AWS from "alchemy/AWS";
 import * as Cloudflare from "alchemy/Cloudflare";
+import { CloudflareEnvironment } from "alchemy/Cloudflare/CloudflareEnvironment";
 import * as Fly from "alchemy/Fly";
 
-if (!AWS.Lambda || !Cloudflare.Worker || !Fly.Machine) {
+if (!AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Bun runtime surfaces did not load");
 }
 `,
@@ -159,13 +160,14 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Fly.Machine) {
     );
     await writeFile(
       join(consumer, "consumer-node.mjs"),
-      `const [Alchemy, AWS, Cloudflare, Fly] = await Promise.all([
+      `const [Alchemy, AWS, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
   import("alchemy"),
   import("alchemy/AWS"),
   import("alchemy/Cloudflare"),
+  import("alchemy/Cloudflare/CloudflareEnvironment"),
   import("alchemy/Fly"),
 ]);
-if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !Fly.Machine) {
+if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironmentModule.CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Node runtime surfaces did not load");
 }
 console.log("compiled Alchemy Node runtime imports passed");
