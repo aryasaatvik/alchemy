@@ -163,12 +163,13 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || 
       `import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-const [Alchemy, AWS, AwsEnvironmentModule, LambdaBootstrap, ProcessBootstrap, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
+const [Alchemy, AWS, AwsEnvironmentModule, LambdaBootstrap, ProcessBootstrap, RuntimeContextModule, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
   import("alchemy"),
   import("alchemy/AWS"),
   import("alchemy/AWS/Environment"),
   import("alchemy/Runtime/Bootstrap/Lambda"),
   import("alchemy/Runtime/Bootstrap/Process"),
+  import("alchemy/RuntimeContext"),
   import("alchemy/Cloudflare"),
   import("alchemy/Cloudflare/CloudflareEnvironment"),
   import("alchemy/Fly"),
@@ -186,22 +187,30 @@ Object.assign(process.env, {
   AWS_SESSION_TOKEN: "checkpoint-test",
   AWS_REGION: "us-east-1",
 });
-const entrypoint = Layer.succeed(ProcessBootstrap.entrypointTag, {
-  RuntimeContext: {
-    exports: Effect.succeed({
-      handler: Effect.gen(function* () {
-        const environment = yield* AwsEnvironmentModule.AWSEnvironment.current;
-        return async () => ({
-          accountId: environment.accountId,
-          region: environment.region,
-        });
-      }),
+const runtimeContext = {
+  Type: "AWS.Lambda.Function",
+  id: "SamvaApi",
+  env: {},
+  get: () => Effect.succeed(undefined),
+  set: (key) => Effect.succeed(key),
+  exports: Effect.succeed({
+    handler: Effect.gen(function* () {
+      const environment = yield* AwsEnvironmentModule.AWSEnvironment.current;
+      const context = yield* RuntimeContextModule.RuntimeContext;
+      return async () => ({
+        accountId: environment.accountId,
+        region: environment.region,
+        runtimeContextId: context.id,
+      });
     }),
-  },
+  }),
+};
+const entrypoint = Layer.succeed(ProcessBootstrap.entrypointTag, {
+  RuntimeContext: runtimeContext,
 });
 const handler = await LambdaBootstrap.bootstrap(entrypoint);
 const identity = await handler({}, {});
-if (identity.accountId !== "654654387918" || identity.region !== "us-east-1") {
+if (identity.accountId !== "654654387918" || identity.region !== "us-east-1" || identity.runtimeContextId !== "SamvaApi") {
   throw new Error(\`packaged Lambda runtime resolved \${JSON.stringify(identity)}\`);
 }
 console.log("compiled Alchemy Node runtime and packaged Lambda bootstrap passed");
