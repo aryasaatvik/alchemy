@@ -75,6 +75,22 @@ describe(`Local.RpcSpawner (runtime=${typeof globalThis.Bun !== "undefined" ? "b
   );
 
   it.live(
+    "passes provider configuration through the RPC call without putting it in the session URL",
+    () =>
+      Effect.gen(function* () {
+        const url = yield* RpcSpawner.useSync((spawner) => spawner.url);
+        const wsUrl = yield* post(url, samplePayload(FIXTURE_TS_URL));
+        const config = yield* providerConfigWebSocket(wsUrl, {
+          environment: { REDIS_URL: "redis://redis:6379/2" },
+        });
+        expect(config).toEqual({
+          environment: { REDIS_URL: "redis://redis:6379/2" },
+        });
+      }).pipe(Effect.provide(services)),
+    { timeout: 60_000 },
+  );
+
+  it.live(
     "caches the child by entry url: a second POST returns the same url",
     () =>
       Effect.gen(function* () {
@@ -226,5 +242,35 @@ const echoWebSocket = (
         echo: (m: string) => Effect.Effect<string>;
       };
       return await Effect.runPromise(handlers.echo(msg));
+    });
+  }).pipe(Effect.scoped);
+
+const providerConfigWebSocket = (
+  rpcUrl: string,
+  config: unknown,
+): Effect.Effect<unknown, Error> =>
+  Effect.gen(function* () {
+    yield* openWebSocket(new URL("/parent", rpcUrl));
+    const sessionUrl = new URL(rpcUrl);
+    sessionUrl.searchParams.set(
+      SESSION_ENV_PARAM,
+      encodeSessionEnvironment({
+        alchemyContext: {
+          dotAlchemy: "/tmp/.alchemy",
+          dev: true,
+          adopt: false,
+        },
+        stack: { name: "test", stage: "dev" },
+      }),
+    );
+    return yield* Effect.promise(async () => {
+      const stub = newWebSocketRpcSession(
+        sessionUrl.toString(),
+      ) as unknown as RpcStub<RpcProxyApi>;
+      const provider = await stub.getProvider("Test.Echo", config);
+      const handlers = unwrapRpcHandlers(provider as any) as {
+        config: () => Effect.Effect<unknown>;
+      };
+      return await Effect.runPromise(handlers.config());
     });
   }).pipe(Effect.scoped);

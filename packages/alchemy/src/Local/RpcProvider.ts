@@ -156,6 +156,7 @@ const withDefaultList = <
 export const effect = <
   R extends ResourceLike,
   Req = never,
+  SessionConfigReq = never,
   ReadReq = never,
   DiffReq = never,
   PrecreateReq = never,
@@ -182,6 +183,9 @@ export const effect = <
     never,
     Req
   >,
+  options: {
+    readonly sessionConfig?: Effect.Effect<unknown, never, SessionConfigReq>;
+  } = {},
 ) =>
   Provider.effect(
     cls,
@@ -223,7 +227,13 @@ export const effect = <
           },
         });
       }
-      return withDefaultList(yield* client.value.get(serverEntryUrl, cls.Type));
+      const sessionConfig =
+        options.sessionConfig === undefined
+          ? undefined
+          : yield* options.sessionConfig;
+      return withDefaultList(
+        yield* client.value.get(serverEntryUrl, cls.Type, sessionConfig),
+      );
     }),
   );
 
