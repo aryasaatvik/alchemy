@@ -21,7 +21,7 @@ export const withProviderContext = <R extends ResourceLike>(
       const value = (target as any)[prop];
       if (!Predicate.isFunction(value)) return value;
       return (...args: any[]) => {
-        const result: unknown = value(...args);
+        const result: unknown = Reflect.apply(value, target, args);
         if (Stream.isStream(result)) {
           return Stream.provide(result, services);
         }
