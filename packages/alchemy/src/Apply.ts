@@ -29,7 +29,7 @@ import {
   Cli,
 } from "./Cli/Cli.ts";
 import type { ApplyStatus } from "./Cli/Event.ts";
-import { havePropsChanged, stripUnresolved } from "./Diff.ts";
+import { dedupeBindings, havePropsChanged, stripUnresolved } from "./Diff.ts";
 import type { Input } from "./Input.ts";
 import { generateInstanceId, InstanceId } from "./InstanceId.ts";
 import * as Output from "./Output.ts";
@@ -620,9 +620,97 @@ const executeNode = (
         yield* signalReady;
       });
 
+    const allUpstreamFqns = () => {
+      const propDeps = Object.keys(Output.resolveUpstream(node.props));
+      const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
+      return [...new Set([...propDeps, ...bindingDeps])];
+    };
+
     // ── noop ──
 
     if (node.action === "noop") {
+      // A plan-time noop is provisional: its diff-facing inputs may contain
+      // only an updating upstream's stable attributes. Wait for upstream
+      // reconciliation, then evaluate the raw inputs before exposing this
+      // node as ready. Cycle members publish their previous output first to
+      // break the SCC; Phase 3 finishes convergence after the initial pass.
+      if (inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
+
+      yield* report("pending");
+      yield* waitForDeps(allUpstreamFqns());
+
+      const outputs = getOutputs();
+      const news = (yield* Output.evaluate(node.props, outputs)) as Record<
+        string,
+        any
+      >;
+      const bindingOutputs = excludeDeletedBindings(
+        yield* Output.evaluate(node.bindings, outputs),
+      );
+      const inputsChanged =
+        havePropsChanged(node.state.props, news) ||
+        havePropsChanged(
+          dedupeBindings(node.state.bindings ?? []),
+          dedupeBindings(bindingOutputs),
+        );
+
+      if (inputsChanged) {
+        yield* report("updating");
+        const attr = yield* node.provider
+          .reconcile({
+            id: logicalId,
+            fqn,
+            news,
+            instanceId: node.state.instanceId,
+            bindings: bindingOutputs,
+            session: scopedSession,
+            olds: node.state.props,
+            output: node.state.attr,
+          })
+          .pipe(
+            instrumentLifecycle(
+              "update",
+              fqn,
+              node.resource.Type,
+              logicalId,
+              node.state.instanceId,
+            ),
+          );
+
+        yield* commit<UpdatedResourceState>({
+          status: "updated",
+          fqn,
+          logicalId,
+          instanceId: node.state.instanceId,
+          resourceType: node.resource.Type,
+          props: news,
+          attr,
+          bindings: bindingOutputs,
+          providerVersion: node.provider.version ?? 0,
+          downstream: node.downstream,
+          removalPolicy: node.resource.RemovalPolicy,
+          providerMode: node.mode ?? node.state.providerMode,
+        });
+
+        tracker[fqn] = {
+          output: attr,
+          props: news,
+          bindings: bindingOutputs,
+          instanceId: node.state.instanceId,
+        };
+        yield* signalReady;
+        yield* signalReadyStable;
+        yield* markTerminal("updated");
+        return;
+      }
+
       // No work to do on the cloud resource — the persisted attr is already
       // stable. Two pieces of row METADATA can still have drifted from the
       // declaration, and this is the only pass that will ever see them:
@@ -654,21 +742,17 @@ const executeNode = (
           `removal policy ${node.state.removalPolicy} → ${node.resource.RemovalPolicy}`,
         );
       }
+      if (!inCycle) {
+        yield* storeAndSignal({
+          output: node.state.attr,
+          props: node.state.props,
+          bindings: node.state.bindings ?? [],
+          instanceId: node.state.instanceId,
+        });
+      }
       yield* signalReadyStable;
-      yield* storeAndSignal({
-        output: node.state.attr,
-        props: node.state.props,
-        bindings: node.state.bindings ?? [],
-        instanceId: node.state.instanceId,
-      });
       return;
     }
-
-    const allUpstreamFqns = () => {
-      const propDeps = Object.keys(Output.resolveUpstream(node.props));
-      const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
-      return [...new Set([...propDeps, ...bindingDeps])];
-    };
 
     // ── instance ID ──
 
@@ -1559,7 +1643,6 @@ const converge = Effect.fn(function* (
     let anyUpdated = false;
 
     for (const [fqn, node] of Object.entries(plan.resources)) {
-      if (node.action === "noop") continue;
       if (!tracker[fqn]) continue;
 
       const outputs = Object.fromEntries(
@@ -1579,8 +1662,10 @@ const converge = Effect.fn(function* (
       const oldBindings = tracker[fqn].bindings;
 
       const propsChanged = havePropsChanged(oldProps, newProps);
-      const bindingsChanged =
-        JSON.stringify(oldBindings) !== JSON.stringify(newBindings);
+      const bindingsChanged = havePropsChanged(
+        dedupeBindings(oldBindings ?? []),
+        dedupeBindings(newBindings),
+      );
 
       if (!propsChanged && !bindingsChanged) continue;
 
@@ -1648,7 +1733,7 @@ const converge = Effect.fn(function* (
           downstream: node.downstream,
           namespace,
           removalPolicy: node.resource.RemovalPolicy,
-          providerMode: node.mode,
+          providerMode: node.mode ?? node.state?.providerMode,
         } as UpdatedResourceState,
       });
 
@@ -1656,7 +1741,7 @@ const converge = Effect.fn(function* (
         id: logicalId,
         type: node.resource.Type,
         status: "updated",
-        providerMode: node.mode,
+        providerMode: node.mode ?? node.state?.providerMode,
       });
     }
 

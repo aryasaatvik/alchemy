@@ -669,6 +669,63 @@ export const overrideStablesResourceProvider = () =>
     delete: Effect.fn(function* () {}),
   });
 
+/** Models a version resource whose version changes while its identity stays stable. */
+export interface VersionedTarget extends Resource<
+  "Test.VersionedTarget",
+  { code: string },
+  {
+    name: string;
+    arn: string;
+    version: string;
+  }
+> {}
+
+export const VersionedTarget = Resource<VersionedTarget>(
+  "Test.VersionedTarget",
+);
+
+export const versionedTargetProvider = () =>
+  Provider.succeed(VersionedTarget, {
+    list: () => Effect.succeed([]),
+    stables: ["name", "arn"],
+    reconcile: Effect.fn(function* ({ id, output }) {
+      return {
+        name: id,
+        arn: `arn:test:versioned:${id}`,
+        version: String(Number(output?.version ?? "0") + 1),
+      };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
+/** Models a consumer that reads a non-stable attribute from a whole resource. */
+export interface AliasTarget extends Resource<
+  "Test.AliasTarget",
+  {
+    target: VersionedTarget;
+    aliasName: string;
+  },
+  {
+    aliasName: string;
+    observedVersion: string;
+  }
+> {}
+
+export const AliasTarget = Resource<AliasTarget>("Test.AliasTarget");
+
+export const aliasTargetProvider = () =>
+  Provider.succeed(AliasTarget, {
+    list: () => Effect.succeed([]),
+    reconcile: Effect.fn(function* ({ news }) {
+      const target = news.target as unknown as VersionedTarget["Attributes"];
+      return {
+        aliasName: news.aliasName,
+        observedVersion: target.version,
+      };
+    }),
+    delete: Effect.fn(function* () {}),
+  });
+
 export type PhasedTargetProps = {
   desired: string;
   replaceKey?: string;
@@ -1303,6 +1360,8 @@ export const TestLayers = () =>
     staticStablesResourceProvider(),
     kindStablesResourceProvider(),
     overrideStablesResourceProvider(),
+    versionedTargetProvider(),
+    aliasTargetProvider(),
     phasedTargetProvider(),
     noPrecreateBindingTargetProvider(),
     durationResourceProvider(),
