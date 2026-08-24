@@ -11,7 +11,7 @@ import * as Flag from "effect/unstable/cli/Flag";
 import * as GlobalFlag from "effect/unstable/cli/GlobalFlag";
 
 import { AdoptPolicy } from "../../AdoptPolicy.ts";
-import { AlchemyContext } from "../../AlchemyContext.ts";
+import { AlchemyContext, makeAlchemyContext } from "../../AlchemyContext.ts";
 import { apply } from "../../Apply.ts";
 import { ArtifactStore, createArtifactStore } from "../../Artifacts.ts";
 import { AuthProviders } from "../../Auth/AuthProvider.ts";
@@ -24,6 +24,7 @@ import { loadConfigProvider } from "../../Util/ConfigProvider.ts";
 import { fileLogger } from "../../Util/FileLogger.ts";
 
 import {
+  dataDir,
   dryRun as dryRunFlag,
   envFile,
   force,
@@ -39,6 +40,7 @@ export const ExecStackOptions = Schema.Struct({
   main: Schema.String,
   stage: Schema.String,
   envFile: Schema.OptionFromOptional(Schema.String),
+  dataDir: Schema.OptionFromOptional(Schema.String),
   profile: Schema.optional(Schema.String),
   dryRun: Schema.optional(Schema.Boolean),
   force: Schema.optional(Schema.Boolean),
@@ -73,6 +75,7 @@ const runStack = Effect.fn(function* ({
   main,
   stage,
   envFile,
+  dataDir,
   profile,
   dryRun = false,
   force = false,
@@ -99,20 +102,21 @@ const runStack = Effect.fn(function* ({
       ? [Logger.consolePretty()]
       : [];
 
-  const services = Layer.mergeAll(
-    Layer.effect(
-      AlchemyContext,
-      AlchemyContext.pipe(
-        Effect.map((ctx) => ({
-          ...ctx,
-          dev,
-          adopt,
-          // `--yes` also auto-accepts (and performs) an out-of-date state
-          // store upgrade, instead of prompting.
-          updateStateStore: yes,
-        })),
-      ),
+  const alchemyContext = Layer.effect(
+    AlchemyContext,
+    makeAlchemyContext({ dataDir: Option.getOrUndefined(dataDir) }).pipe(
+      Effect.map((ctx) => ({
+        ...ctx,
+        dev,
+        adopt,
+        // `--yes` also auto-accepts (and performs) an out-of-date state
+        // store upgrade, instead of prompting.
+        updateStateStore: yes,
+      })),
     ),
+  );
+  const services = Layer.mergeAll(
+    alchemyContext,
     // `--adopt` opts the entire deploy in to adoption-on-conflict.
     // Resource providers that wire `AdoptPolicy` (Worker domains,
     // Cloudflare.SecretsStore, etc.) will reconcile against
@@ -132,7 +136,9 @@ const runStack = Effect.fn(function* ({
     ),
     Logger.layer([fileLogger("out"), ...consoleSink], {
       mergeWithExisting: true,
-    }),
+    }).pipe(
+      Layer.provide(alchemyContext),
+    ),
     Layer.succeed(Stage, stage),
   );
 
@@ -237,6 +243,7 @@ export const deployCommand = Command.make(
     force,
     main: script,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -251,6 +258,7 @@ export const destroyCommand = Command.make(
     dryRun: dryRunFlag,
     main: script,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -271,6 +279,7 @@ export const planCommand = Command.make(
   {
     main: script,
     envFile,
+    dataDir,
     stage,
     profile,
   },
