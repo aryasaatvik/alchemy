@@ -131,11 +131,32 @@ export const isLocalEmulator = AWSEnvironment.isLocalEmulator;
 export const Default = Layer.effect(
   AWSEnvironment,
   Effect.gen(function* () {
-    const profile = yield* AlchemyProfile;
     const auth = yield* getAuthProvider<AwsAuthConfig, AwsResolvedCredentials>(
       AWS_AUTH_PROVIDER_NAME,
     );
     const profileName = yield* ALCHEMY_PROFILE;
+    const endpoint = yield* AWS_ENDPOINT_URL;
+
+    // An explicit endpoint selects the local provider target. Supervisors use
+    // this seam to bind each evaluation to its own emulator account without
+    // rewriting the developer's shared Alchemy profile. The selected endpoint
+    // therefore has to win even when that profile contains valid live-cloud
+    // credentials.
+    if (endpoint !== undefined) {
+      const accountId = yield* AWS_ACCOUNT_ID;
+      const region = yield* AWS_REGION;
+      return yield* auth
+        .read(profileName, {
+          method: "local",
+          endpoint,
+          accountId,
+          region,
+          autoStart: false,
+        })
+        .pipe(Effect.orDie, Effect.cached);
+    }
+
+    const profile = yield* AlchemyProfile;
     const ci = yield* Config.boolean("CI").pipe(Config.withDefault(false));
     const dev = Option.match(yield* Effect.serviceOption(AlchemyContext), {
       onNone: () => false,
