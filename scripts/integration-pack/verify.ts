@@ -149,7 +149,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import { CloudflareEnvironment } from "alchemy/Cloudflare/CloudflareEnvironment";
 import * as Fly from "alchemy/Fly";
 
-if (!AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironment || !Fly.Machine) {
+if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || !CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Bun runtime surfaces did not load");
 }
 `,
@@ -167,7 +167,7 @@ if (!AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironment || !Fly.Machine)
   import("alchemy/Cloudflare/CloudflareEnvironment"),
   import("alchemy/Fly"),
 ]);
-if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironmentModule.CloudflareEnvironment || !Fly.Machine) {
+if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || !CloudflareEnvironmentModule.CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Node runtime surfaces did not load");
 }
 console.log("compiled Alchemy Node runtime imports passed");

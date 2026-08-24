@@ -136,7 +136,10 @@ export default defineConfig([
   },
   {
     cwd: ".",
-    entry: ["src/vite/plugin.ts"],
+    entry: {
+      plugin: "src/vite/plugin.ts",
+      framework: "src/vite/framework.ts",
+    },
     exports: false,
     outDir: "dist/vite/node",
     tsconfig: "tsconfig.json",
