@@ -223,7 +223,9 @@ const parseExecutionTimeout = (
   return Effect.succeed(decoded.value);
 };
 
-const terminateProcessGroup = (child: ChildProcessSpawner.ChildProcessHandle) =>
+export const terminateProcessGroup = (
+  child: ChildProcessSpawner.ChildProcessHandle,
+) =>
   Effect.gen(function* () {
     // Dispatch SIGTERM without waiting indefinitely for the root process. The
     // Effect process runtime targets the detached process group on POSIX and
