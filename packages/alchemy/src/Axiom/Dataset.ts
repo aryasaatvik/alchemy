@@ -165,25 +165,33 @@ const buildOtelAttrs = (apiBaseUrl: string, name: string) => {
   };
 };
 
+const datasetAttributes = (apiBaseUrl: string, dataset: Axiom.Dataset) => ({
+  id: dataset.id,
+  name: dataset.name,
+  kind: dataset.kind,
+  description: stripMarker(dataset.description),
+  created: dataset.created,
+  ...buildOtelAttrs(apiBaseUrl, dataset.name),
+});
+
 export const DatasetProvider = () =>
   Provider.effect(
     Dataset,
     Effect.gen(function* () {
-      const { apiBaseUrl } = yield* yield* Credentials;
+      const credentials = yield* Credentials;
       const create = yield* Axiom.createDataset;
       const update = yield* Axiom.updateDataset;
       const get = yield* Axiom.getDataset;
       const listDatasets = yield* Axiom.getDatasets;
       const del = yield* Axiom.deleteDataset;
 
-      const toAttrs = (dataset: Axiom.Dataset) => ({
-        id: dataset.id,
-        name: dataset.name,
-        kind: dataset.kind,
-        description: stripMarker(dataset.description),
-        created: dataset.created,
-        ...buildOtelAttrs(apiBaseUrl, dataset.name),
-      });
+      const resolveAttributes = credentials.pipe(
+        Effect.map(
+          ({ apiBaseUrl }) =>
+            (dataset: Axiom.Dataset) =>
+              datasetAttributes(apiBaseUrl, dataset),
+        ),
+      );
 
       return {
         stables: ["id", "name", "kind"],
@@ -194,7 +202,8 @@ export const DatasetProvider = () =>
         list: () =>
           Effect.gen(function* () {
             const datasets = yield* listDatasets({});
-            return datasets.map(toAttrs);
+            const toAttributes = yield* resolveAttributes;
+            return datasets.map(toAttributes);
           }),
         diff: Effect.fn(function* ({ olds, news, output }) {
           if (!isResolved(news)) return undefined;
@@ -260,7 +269,8 @@ export const DatasetProvider = () =>
                   }),
               ),
             );
-            return toAttrs(current);
+            const toAttributes = yield* resolveAttributes;
+            return toAttributes(current);
           }
 
           // Sync — the dataset exists. Apply mutable aspects (description,
@@ -275,7 +285,8 @@ export const DatasetProvider = () =>
             current.retentionDays !== news.retentionDays ||
             current.useRetentionPeriod !== news.useRetentionPeriod;
           if (!needsSync) {
-            return toAttrs(current);
+            const toAttributes = yield* resolveAttributes;
+            return toAttributes(current);
           }
           const updated = yield* update({
             dataset_id: current.id,
@@ -283,7 +294,8 @@ export const DatasetProvider = () =>
             retentionDays: news.retentionDays,
             useRetentionPeriod: news.useRetentionPeriod,
           });
-          return toAttrs(updated);
+          const toAttributes = yield* resolveAttributes;
+          return toAttributes(updated);
         }),
         delete: Effect.fn(function* ({ output }) {
           yield* del({ dataset_id: output.id }).pipe(
@@ -305,7 +317,8 @@ export const DatasetProvider = () =>
             ownership.stack === stack.name &&
             ownership.stage === stage &&
             ownership.id === id;
-          const attrs = toAttrs(existing);
+          const toAttributes = yield* resolveAttributes;
+          const attrs = toAttributes(existing);
           return isOurs ? attrs : Unowned(attrs);
         }),
       };

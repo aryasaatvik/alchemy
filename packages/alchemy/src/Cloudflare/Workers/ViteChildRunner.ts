@@ -12,9 +12,16 @@ import {
 } from "../../Artifacts.ts";
 import { CloudflareAuth } from "../Auth/AuthProvider.ts";
 import * as Credentials from "../Credentials.ts";
+import {
+  LiveCloudflareEnvironment,
+  retainedLiveEnvironment,
+} from "../LocalEnvironment.ts";
 import * as RpcServerEnvironment from "../../Local/RpcServerEnvironment.ts";
 import { PlatformServices, runMain } from "../../Util/PlatformServices.ts";
-import { materializeRuntimeBindings } from "./RuntimeBindings.ts";
+import {
+  hasRemoteRuntimeBindings,
+  materializeRuntimeBindings,
+} from "./RuntimeBindings.ts";
 import { loadSource, SourceProviderError } from "./Source.ts";
 import * as Vite from "./Sources/Vite.ts";
 import {
@@ -45,8 +52,19 @@ const program = Effect.scoped(
     const credentials = Credentials.fromAuthProvider().pipe(
       Layer.provide(CloudflareAuth),
     );
+    const liveEnvironment = yield* LiveCloudflareEnvironment;
+    const usesRemoteBindings = hasRemoteRuntimeBindings(
+      config.worker.bindingDescriptors,
+      config.worker.devRemote,
+    );
     const runtimeContext = yield* layerRuntime({
-      api: { accountId: config.accountId },
+      api: {
+        accountId: usesRemoteBindings
+          ? liveEnvironment.pipe(
+              Effect.map((environment) => environment.accountId),
+            )
+          : config.accountId,
+      },
       storage: { directory: config.storageDirectory },
     }).pipe(
       Layer.provide(Layer.mergeAll(credentials, FetchHttpClient.layer)),
@@ -159,6 +177,7 @@ const program = Effect.scoped(
 
 runMain(
   program.pipe(
+    Effect.provide(retainedLiveEnvironment),
     Effect.provide(
       RpcServerEnvironment.fromEnv().pipe(Layer.provideMerge(PlatformServices)),
     ),

@@ -14,6 +14,10 @@ import { Resource } from "../../Resource.ts";
 import { Stack } from "../../Stack.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
 import {
+  provideLocalEnvironment,
+  resolveLiveEnvironment,
+} from "../LocalEnvironment.ts";
+import {
   isLiveId,
   LOCAL_ENTRY_URL,
   LocalRuntimeState,
@@ -719,7 +723,6 @@ export const ConsumerProviderLocal = () =>
             Array.from(MutableHashMap.values(localRuntimeState.queueConsumers)),
           ),
         diff: Effect.fn(function* ({ news, output }) {
-          const { accountId } = yield* yield* CloudflareEnvironment;
           if (!output) return { action: "update" };
           // A real (non-`dev:`) consumerId on a local-mode row is legacy
           // damage from pre-stamping dev runs — replace so the new
@@ -729,6 +732,10 @@ export const ConsumerProviderLocal = () =>
             return { action: "replace" };
           }
           if (!isResolved(news)) return undefined;
+          const environment = isLiveId(news.queueId)
+            ? resolveLiveEnvironment
+            : yield* CloudflareEnvironment;
+          const { accountId } = yield* environment;
           if (
             output.queueId !== news.queueId ||
             output.accountId !== accountId
@@ -760,7 +767,10 @@ export const ConsumerProviderLocal = () =>
           ).pipe(Option.getOrUndefined);
         }),
         reconcile: Effect.fn(function* ({ news, output }) {
-          const { accountId } = yield* yield* CloudflareEnvironment;
+          const environment = isLiveId(news.queueId)
+            ? resolveLiveEnvironment
+            : yield* CloudflareEnvironment;
+          const { accountId } = yield* environment;
           // A LIVE queue (`Alchemy.remote()`) consumed by a LOCAL worker:
           // Cloudflare only pushes to deployed consumers, so the local
           // runtime drains the real queue via the HTTP pull API instead.
@@ -879,6 +889,8 @@ export const ConsumerProviderLocal = () =>
 export const ConsumerProvider = () =>
   ProviderLayer.dual(Consumer, {
     local: () =>
-      ConsumerProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      provideLocalEnvironment(
+        ConsumerProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      ),
     live: () => ConsumerProviderLive(),
   });

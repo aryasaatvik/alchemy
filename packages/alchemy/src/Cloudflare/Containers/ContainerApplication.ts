@@ -9,6 +9,7 @@ import {
 } from "../../Platform.ts";
 import { Resource } from "../../Resource.ts";
 import * as Server from "../../Server/index.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import type { Providers } from "../Providers.ts";
 import type { InlineDockerfile } from "../../Docker/Dockerfile.ts";
 import { ContainerTypeId } from "./Container.ts";
@@ -794,6 +795,6 @@ export const ContainerProvider = () =>
     { Type: ContainerTypeId },
     {
       live: () => LiveContainerProvider(),
-      local: () => LocalContainerProvider(),
+      local: () => provideLocalEnvironment(LocalContainerProvider()),
     },
   );
