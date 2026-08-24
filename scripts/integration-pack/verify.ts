@@ -227,8 +227,8 @@ if (identity.serviceEndpoints?.servicequotas !== "http://host.docker.internal:88
 const localEnvironment = await Effect.runPromise(
   FlociFunctionProvider.localEmulatorFunctionEnvironment(
     {
-      DATABASE_URL: "postgres://127.0.0.1:54329/samva",
-      REDIS_URL: "redis://127.0.0.1:56379/2",
+      DATABASE_URL: RuntimeContextModule.packEnvValue(Redacted.make("postgres://127.0.0.1:54329/samva")),
+      REDIS_URL: RuntimeContextModule.packEnvValue(Redacted.make("redis://127.0.0.1:56379/2")),
     },
     {
       environment: Effect.succeed({
@@ -238,7 +238,9 @@ const localEnvironment = await Effect.runPromise(
     },
   ),
 );
-if (localEnvironment.DATABASE_URL !== "postgres://postgres:5432/samva" || localEnvironment.REDIS_URL !== "redis://redis:6379/2") {
+const localDatabaseUrl = Redacted.value(RuntimeContextModule.unpackEnvValue(localEnvironment.DATABASE_URL));
+const localRedisUrl = Redacted.value(RuntimeContextModule.unpackEnvValue(localEnvironment.REDIS_URL));
+if (localDatabaseUrl !== "postgres://postgres:5432/samva" || localRedisUrl !== "redis://redis:6379/2") {
   throw new Error(\`packaged local Lambda environment resolved \${JSON.stringify(localEnvironment)}\`);
 }
 console.log("compiled Alchemy Node runtime, packaged Lambda bootstrap, and local environment passed");

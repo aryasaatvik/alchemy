@@ -40,6 +40,7 @@ import * as Stream from "effect/Stream";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
 import { ProviderSessionConfig } from "../../Local/RpcServerEnvironment.ts";
+import { packEnvValue, unpackEnvValue } from "../../RuntimeContext.ts";
 import { Assets, AssetsLive } from "../Assets.ts";
 import { AWS_SERVICE_ENDPOINTS_ENV_VAR } from "../Environment.ts";
 import {
@@ -146,6 +147,16 @@ export class LocalEmulatorFunctionEnvironmentError extends Data.TaggedError(
   "LocalEmulatorFunctionEnvironmentError",
 )<{ readonly message: string }> {}
 
+const placeEnvironmentValue = (
+  current: string | undefined,
+  placed: string,
+): string => {
+  const decoded = unpackEnvValue<unknown>(current);
+  return Redacted.isRedacted(decoded)
+    ? packEnvValue(Redacted.make(placed))
+    : placed;
+};
+
 const reservedEnvironmentKeys = new Set([
   "AWS_ENDPOINT_URL",
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
@@ -174,9 +185,10 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
             "Local emulator Lambda environment must contain non-reserved, non-empty keys with string or Redacted<string> values",
         });
       }
-      runtimeEnvironment[key] = Redacted.isRedacted(value)
-        ? Redacted.value(value)
-        : value;
+      runtimeEnvironment[key] = placeEnvironmentValue(
+        environment[key],
+        Redacted.isRedacted(value) ? Redacted.value(value) : value,
+      );
     }
   }
 
