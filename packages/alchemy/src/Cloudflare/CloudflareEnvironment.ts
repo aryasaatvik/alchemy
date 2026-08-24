@@ -2,7 +2,6 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { getAuthProvider } from "../Auth/AuthProvider.ts";
 import { ALCHEMY_PROFILE, AlchemyProfile } from "../Auth/Profile.ts";
 import {
@@ -42,13 +41,11 @@ const CLOUDFLARE_ACCOUNT_ID = Config.string("CLOUDFLARE_ACCOUNT_ID");
 export const fromEnv = () =>
   Layer.effect(
     CloudflareEnvironment,
-    Effect.gen(function* () {
-      const accountId = yield* CLOUDFLARE_ACCOUNT_ID.pipe(
-        Config.option,
-        Config.map(Option.getOrUndefined),
-      );
-      return { account: accountId } as any;
-    }),
+    CLOUDFLARE_ACCOUNT_ID.pipe(
+      Effect.map(runtimeIdentity),
+      Effect.orDie,
+      Effect.cached,
+    ),
   );
 
 export const fromProfile = () =>
