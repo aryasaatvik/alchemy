@@ -244,13 +244,21 @@ export class Providers extends Provider.ProviderCollection<Providers>()(
   "AWS",
 ) {}
 
-/** Provider-wide configuration for local AWS emulation. */
-export interface ProvidersOptions {
+/** Provider-wide configuration for AWS providers and local emulation. */
+export interface ProvidersOptions<E = never, R = never> {
   /** Identity, endpoint, and lifecycle settings for the Floci local mode. */
   readonly local?: FlociProfile;
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    E,
+    R
+  >;
+  readonly lambda?: Lambda.FunctionProviderModeOptions;
 }
 
-export const providers = (options: ProvidersOptions = {}) =>
+export const providers = <E = never, R = never>(
+  options: ProvidersOptions<E, R> = {},
+) =>
   Layer.effect(
     Providers,
     // Providers are PINNED to the environment they are registered with (the
@@ -1463,7 +1471,7 @@ export const providers = (options: ProvidersOptions = {}) =>
           // hot-reloading) Lambda in dev — see FlociFunctionProvider.
           ProviderLayer.dual(Lambda.Function, {
             live: () => Lambda.FunctionProvider(),
-            local: () => Lambda.FlociFunctionProvider(),
+            local: () => Lambda.FlociFunctionProvider(options.lambda?.local),
             dataPlane: flociServices,
           }),
           flociDual(Lambda.LayerVersion, () => Lambda.LayerVersionProvider()),
@@ -1965,7 +1973,13 @@ export const providers = (options: ProvidersOptions = {}) =>
     Layer.provideMerge(EC2.GetAmiHttp),
     Layer.provideMerge(Region.fromEnvironment),
     Layer.provideMerge(Credentials.fromEnvironment),
-    Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(
+      options.serviceEndpoints === undefined
+        ? Endpoint.fromEnvironment
+        : Endpoint.fromEnvironmentWithServiceEndpoints(
+            options.serviceEndpoints,
+          ),
+    ),
     Layer.provideMerge(DefaultEnvironment),
     Layer.provideMerge(Layer.succeed(FlociProfileService, options.local ?? {})),
     Layer.provideMerge(AwsAuth),

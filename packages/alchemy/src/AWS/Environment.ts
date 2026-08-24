@@ -28,6 +28,7 @@ export const AWS_ACCOUNT_ID = Config.string("AWS_ACCOUNT_ID");
 export const AWS_ACCESS_KEY_ID = Config.string("AWS_ACCESS_KEY_ID");
 export const AWS_SECRET_ACCESS_KEY = Config.redacted("AWS_SECRET_ACCESS_KEY");
 export const AWS_SESSION_TOKEN = Config.redacted("AWS_SESSION_TOKEN");
+export const AWS_SERVICE_ENDPOINTS_ENV_VAR = "ALCHEMY_AWS_SERVICE_ENDPOINTS";
 
 export type AccountID = string;
 export type RegionID = string;
@@ -54,6 +55,7 @@ export interface AWSEnvironmentShape {
   region: RegionID;
   credentials: Effect.Effect<ResolvedCredentials, CredentialsError>;
   endpoint?: string;
+  serviceEndpoints?: Readonly<Record<string, string>>;
   profile?: string;
 }
 
