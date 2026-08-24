@@ -12,7 +12,10 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import { MinimumLogLevel } from "effect/References";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
-import { CloudflareEnvironment } from "../../Cloudflare/CloudflareEnvironment.ts";
+import {
+  CloudflareEnvironment,
+  runtimeIdentity,
+} from "../../Cloudflare/CloudflareEnvironment.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
 import {
   entrypointLayer,
@@ -39,6 +42,13 @@ export const bootstrapContainer = (
   entrypoint: unknown,
   options: ContainerBootstrapOptions,
 ): Promise<void> => {
+  const cloudflareAccountId = process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID;
+  if (cloudflareAccountId === undefined) {
+    throw new Error(
+      "Missing ALCHEMY_CLOUDFLARE_ACCOUNT_ID in container runtime",
+    );
+  }
+
   const platform = Layer.mergeAll(
     runtime.services,
     FetchHttpClient.layer,
@@ -63,9 +73,7 @@ export const bootstrapContainer = (
         Layer.provideMerge(
           Layer.succeed(
             CloudflareEnvironment,
-            Effect.succeed({
-              account: process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
-            }) as any,
+            Effect.succeed(runtimeIdentity(cloudflareAccountId)),
           ),
         ),
         Layer.provideMerge(platform),
