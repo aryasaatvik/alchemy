@@ -1,5 +1,6 @@
 import { GetSecretValue } from "@/AWS/SecretsManager/GetSecretValue.ts";
 import { GetSecretValueHttp } from "@/AWS/SecretsManager/GetSecretValueHttp.ts";
+import { external } from "@/AWS/SecretsManager/Secret.ts";
 import * as Output from "@/Output.ts";
 import { RuntimeContext } from "@/RuntimeContext.ts";
 import { Self } from "@/Self.ts";
@@ -54,5 +55,51 @@ it.effect("binds GetSecretValue through the production layer", () => {
     Effect.provide(FetchHttpClient.layer),
     Effect.provide(Layer.succeed(Self, host)),
     Effect.provide(Layer.succeed(RuntimeContext, runtime)),
+  );
+});
+
+it.effect("binds an operator-owned secret without managing it", () => {
+  let captured: any;
+  const stored: Record<string, Output.Output> = {};
+  const runtime = {
+    Type: "AWS.Lambda.Function",
+    id: "Host",
+    env: {},
+    set: (id: string, output: Output.Output) =>
+      Effect.sync(() => {
+        stored[id] = output;
+        return id;
+      }),
+    get: <T>(id: string) => Output.evaluate(stored[id], {}) as Effect.Effect<T>,
+  };
+  const host = {
+    Type: "AWS.Lambda.Function",
+    LogicalId: "Host",
+    FQN: "Host",
+    bind: (...args: unknown[]) =>
+      args[0] instanceof Array
+        ? (binding: unknown) => Effect.sync(() => (captured = binding))
+        : Effect.void,
+  };
+  const secret = external("ExternalSecret", {
+    secretId: "samva-api-test",
+    secretArn: "arn:aws:secretsmanager:us-east-1:123:secret:samva-api-test-*",
+  });
+
+  return Effect.gen(function* () {
+    const bind = yield* GetSecretValue;
+    yield* bind(secret);
+    expect(yield* Output.evaluate(secret.secretId, {})).toBe("samva-api-test");
+    expect(yield* Output.evaluate(secret.secretArn, {})).toBe(
+      "arn:aws:secretsmanager:us-east-1:123:secret:samva-api-test-*",
+    );
+    expect(captured.policyStatements[0].Resource).toEqual([secret.secretArn]);
+  }).pipe(
+    Effect.provide(GetSecretValueHttp),
+    Effect.provide(Credentials.mock),
+    Effect.provide(Region.of("us-east-1")),
+    Effect.provide(FetchHttpClient.layer),
+    Effect.provide(Layer.succeed(Self, host)),
+    Effect.provide(Layer.succeed(RuntimeContext, runtime as any)),
   );
 });
