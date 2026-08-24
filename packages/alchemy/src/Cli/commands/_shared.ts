@@ -138,6 +138,13 @@ export const envFile = Flag.file("env-file").pipe(
   ),
 );
 
+export const dataDir = Flag.directory("data-dir").pipe(
+  Flag.optional,
+  Flag.withDescription(
+    "Root for this evaluation's state, logs, local-provider data, and build artifacts. Defaults to <cwd>/.alchemy.",
+  ),
+);
+
 export const dryRun = Flag.boolean("dry-run").pipe(
   Flag.withDescription("Dry run the deployment, do not actually deploy"),
   Flag.withDefault(false),
