@@ -5,6 +5,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { isResolved } from "../../Diff.ts";
+import * as Output from "../../Output.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
@@ -102,6 +103,26 @@ export interface Secret extends Resource<
   never,
   Providers
 > {}
+
+/** An operator-owned Secrets Manager secret that Alchemy may bind but never manages. */
+export interface SecretReference {
+  readonly LogicalId: string;
+  readonly secretId: Output.Output<string, never>;
+  readonly secretArn: Output.Output<string, never>;
+}
+
+/**
+ * Reference an existing secret by its runtime id and IAM resource ARN/pattern.
+ * This creates no state row and never reads or writes its value.
+ */
+export const external = (
+  logicalId: string,
+  input: { readonly secretId: string; readonly secretArn: string },
+): SecretReference => ({
+  LogicalId: logicalId,
+  secretId: Output.literal(input.secretId),
+  secretArn: Output.literal(input.secretArn),
+});
 
 /**
  * An AWS Secrets Manager secret.
