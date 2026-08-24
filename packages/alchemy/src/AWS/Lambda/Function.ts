@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -513,6 +514,110 @@ export const toTimeoutSeconds = (
       : timeout;
   const seconds = Duration.toSeconds(input);
   return Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : undefined;
+};
+
+/** AWS Lambda's aggregate limit for configured environment variables. */
+export const LambdaEnvironmentMaxBytes = 4 * 1024;
+
+export interface LambdaEnvironmentEntrySize {
+  readonly key: string;
+  readonly bytes: number;
+}
+
+/** Raised before a Lambda mutation when its environment exceeds AWS's 4 KiB limit. */
+export class LambdaEnvironmentTooLarge extends Data.TaggedError(
+  "LambdaEnvironmentTooLarge",
+)<{
+  readonly message: string;
+  readonly sizeBytes: number;
+  readonly limitBytes: number;
+  readonly entryCount: number;
+  readonly largestEntries: ReadonlyArray<LambdaEnvironmentEntrySize>;
+}> {}
+
+export type LambdaEnvironment = Record<string, any>;
+
+const resolveLambdaEnvironmentValue = (value: unknown): unknown =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value;
+
+const serializeLambdaEnvironment = (
+  environment: LambdaEnvironment | undefined,
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(environment ?? {}).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : [[key, resolveLambdaEnvironmentValue(value)] as const],
+    ),
+  );
+
+const encodedSize = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+/** Returns the UTF-8 size of the compact environment map sent to Lambda. */
+export const lambdaEnvironmentSize = (
+  environment: LambdaEnvironment | undefined,
+): number => encodedSize(serializeLambdaEnvironment(environment));
+
+const lambdaEnvironmentLargestEntries = (
+  environment: LambdaEnvironment | undefined,
+): ReadonlyArray<LambdaEnvironmentEntrySize> =>
+  Object.entries(serializeLambdaEnvironment(environment))
+    .map(([key, value]) => ({
+      key,
+      bytes: encodedSize({ [key]: value }) - 2,
+    }))
+    .sort(
+      (left, right) =>
+        right.bytes - left.bytes || left.key.localeCompare(right.key),
+    )
+    .slice(0, 20);
+
+/** Fails before an AWS mutation when the final Lambda environment is too large. */
+export const validateLambdaEnvironment = (
+  environment: LambdaEnvironment | undefined,
+): Effect.Effect<void, LambdaEnvironmentTooLarge> => {
+  const sizeBytes = lambdaEnvironmentSize(environment);
+  if (sizeBytes <= LambdaEnvironmentMaxBytes) return Effect.void;
+
+  const entryCount = Object.keys(
+    serializeLambdaEnvironment(environment),
+  ).length;
+  const largestEntries = lambdaEnvironmentLargestEntries(environment);
+  return Effect.fail(
+    new LambdaEnvironmentTooLarge({
+      sizeBytes,
+      limitBytes: LambdaEnvironmentMaxBytes,
+      entryCount,
+      largestEntries,
+      message:
+        `Lambda environment has ${entryCount} entries totaling ${sizeBytes} bytes; AWS limits the aggregate to ${LambdaEnvironmentMaxBytes} bytes. ` +
+        `Largest entries: ${largestEntries.map(({ key, bytes }) => `${key} (${bytes} bytes)`).join(", ")}.`,
+    }),
+  );
+};
+
+const withNodeSourceMaps = (
+  env: Record<string, string> | undefined,
+  props: FunctionZipProps,
+) => {
+  const sourcemap = props.build?.output?.sourcemap ?? true;
+  const uploadSourceMap = props.uploadSourceMap ?? true;
+  const shouldEnableSourceMaps =
+    sourcemap === "inline" ||
+    (uploadSourceMap && (sourcemap === true || sourcemap === "hidden"));
+
+  if (!shouldEnableSourceMaps) return env;
+
+  const current = env?.NODE_OPTIONS;
+  if (current?.split(/\s+/).includes("--enable-source-maps")) return env;
+
+  return {
+    ...env,
+    NODE_OPTIONS: current
+      ? `${current} --enable-source-maps`
+      : "--enable-source-maps",
+  };
 };
 
 export interface Function extends Resource<
@@ -1451,33 +1556,6 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         return role;
       });
 
-      const withNodeSourceMaps = (
-        env: Record<string, string> | undefined,
-        props: FunctionZipProps,
-      ) => {
-        const sourcemap = props.build?.output?.sourcemap ?? true;
-        const uploadSourceMap = props.uploadSourceMap ?? true;
-        const shouldEnableSourceMaps =
-          sourcemap === "inline" ||
-          (uploadSourceMap && (sourcemap === true || sourcemap === "hidden"));
-
-        if (!shouldEnableSourceMaps) {
-          return env;
-        }
-
-        const current = env?.NODE_OPTIONS;
-        if (current?.split(/\s+/).includes("--enable-source-maps")) {
-          return env;
-        }
-
-        return {
-          ...env,
-          NODE_OPTIONS: current
-            ? `${current} --enable-source-maps`
-            : "--enable-source-maps",
-        };
-      };
-
       const retryFunctionMutation = Effect.retry({
         while: (e: any) =>
           e._tag === "ResourceConflictException" ||
@@ -1797,6 +1875,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           options.transformEnvironment === undefined
             ? resolvedRuntimeEnv
             : yield* options.transformEnvironment(resolvedRuntimeEnv);
+        yield* validateLambdaEnvironment(runtimeEnv);
 
         const createFunctionRequest: CreateFunctionRequest = {
           FunctionName: functionName,
