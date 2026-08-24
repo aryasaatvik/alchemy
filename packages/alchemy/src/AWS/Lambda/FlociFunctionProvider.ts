@@ -31,12 +31,13 @@ import * as s3 from "@distilled.cloud/aws/s3";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
-import { packEnvValue } from "../../RuntimeContext.ts";
+import { ProviderSessionConfig } from "../../Local/RpcServerEnvironment.ts";
 import { Assets, AssetsLive } from "../Assets.ts";
 import { AWS_SERVICE_ENDPOINTS_ENV_VAR } from "../Environment.ts";
 import {
@@ -77,6 +78,68 @@ export interface FunctionProviderModeOptions {
   readonly local?: LocalEmulatorFunctionProviderOptions;
 }
 
+interface LocalEmulatorFunctionProviderSessionConfig {
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly endpoint?: string;
+  readonly serviceEndpoints?: Readonly<Record<string, string>>;
+}
+
+const materializeLocalEmulatorFunctionProviderOptions = Effect.fn(function* (
+  options: LocalEmulatorFunctionProviderOptions,
+): Effect.fn.Return<LocalEmulatorFunctionProviderSessionConfig> {
+  const configuredEnvironment =
+    options.environment === undefined ? undefined : yield* options.environment;
+  return {
+    environment:
+      configuredEnvironment === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.entries(configuredEnvironment).map(([key, value]) => [
+              key,
+              Redacted.isRedacted(value) ? Redacted.value(value) : value,
+            ]),
+          ),
+    endpoint:
+      options.endpoint === undefined ? undefined : yield* options.endpoint,
+    serviceEndpoints:
+      options.serviceEndpoints === undefined
+        ? undefined
+        : yield* options.serviceEndpoints,
+  };
+});
+
+const effectOptions = (
+  config: LocalEmulatorFunctionProviderSessionConfig,
+): LocalEmulatorFunctionProviderOptions => ({
+  environment:
+    config.environment === undefined
+      ? undefined
+      : Effect.succeed(config.environment),
+  endpoint:
+    config.endpoint === undefined ? undefined : Effect.succeed(config.endpoint),
+  serviceEndpoints:
+    config.serviceEndpoints === undefined
+      ? undefined
+      : Effect.succeed(config.serviceEndpoints),
+});
+
+const resolveLocalEmulatorFunctionProviderOptions = (
+  fallback: LocalEmulatorFunctionProviderOptions,
+) =>
+  Effect.gen(function* () {
+    const session = yield* Effect.serviceOption(ProviderSessionConfig);
+    if (
+      Option.isNone(session) ||
+      session.value.type !== Function.Type ||
+      session.value.value === undefined
+    ) {
+      return fallback;
+    }
+    return effectOptions(
+      session.value.value as LocalEmulatorFunctionProviderSessionConfig,
+    );
+  });
+
 export class LocalEmulatorFunctionEnvironmentError extends Data.TaggedError(
   "LocalEmulatorFunctionEnvironmentError",
 )<{ readonly message: string }> {}
@@ -110,7 +173,7 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
         });
       }
       runtimeEnvironment[key] = Redacted.isRedacted(value)
-        ? packEnvValue(value)
+        ? Redacted.value(value)
         : value;
     }
   }
@@ -160,10 +223,15 @@ export const FlociFunctionProvider = (
     Function,
     flociSidecarEntry(),
     {
+      sessionConfig: materializeLocalEmulatorFunctionProviderOptions(options),
       liveProvider: () =>
         FunctionProvider({
           transformEnvironment: (environment) =>
-            localEmulatorFunctionEnvironment(environment, options),
+            resolveLocalEmulatorFunctionProviderOptions(options).pipe(
+              Effect.flatMap((resolved) =>
+                localEmulatorFunctionEnvironment(environment, resolved),
+              ),
+            ),
         }),
       // A FRESH `Assets` instance: its cached bucket lookup must resolve
       // against the emulator (auto-bootstrapped there) and can never share a

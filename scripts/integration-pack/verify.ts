@@ -162,11 +162,13 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || 
       join(consumer, "consumer-node.mjs"),
       `import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 
-const [Alchemy, AWS, AwsEnvironmentModule, LambdaBootstrap, ProcessBootstrap, RuntimeContextModule, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
+const [Alchemy, AWS, AwsEnvironmentModule, FlociFunctionProvider, LambdaBootstrap, ProcessBootstrap, RuntimeContextModule, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
   import("alchemy"),
   import("alchemy/AWS"),
   import("alchemy/AWS/Environment"),
+  import("alchemy/AWS/Lambda/FlociFunctionProvider"),
   import("alchemy/Runtime/Bootstrap/Lambda"),
   import("alchemy/Runtime/Bootstrap/Process"),
   import("alchemy/RuntimeContext"),
@@ -213,7 +215,24 @@ const identity = await handler({}, {});
 if (identity.accountId !== "654654387918" || identity.region !== "us-east-1" || identity.runtimeContextId !== "SamvaApi") {
   throw new Error(\`packaged Lambda runtime resolved \${JSON.stringify(identity)}\`);
 }
-console.log("compiled Alchemy Node runtime and packaged Lambda bootstrap passed");
+const localEnvironment = await Effect.runPromise(
+  FlociFunctionProvider.localEmulatorFunctionEnvironment(
+    {
+      DATABASE_URL: "postgres://127.0.0.1:54329/samva",
+      REDIS_URL: "redis://127.0.0.1:56379/2",
+    },
+    {
+      environment: Effect.succeed({
+        DATABASE_URL: Redacted.make("postgres://postgres:5432/samva"),
+        REDIS_URL: Redacted.make("redis://redis:6379/2"),
+      }),
+    },
+  ),
+);
+if (localEnvironment.DATABASE_URL !== "postgres://postgres:5432/samva" || localEnvironment.REDIS_URL !== "redis://redis:6379/2") {
+  throw new Error(\`packaged local Lambda environment resolved \${JSON.stringify(localEnvironment)}\`);
+}
+console.log("compiled Alchemy Node runtime, packaged Lambda bootstrap, and local environment passed");
 `,
     );
     await writeFile(join(consumer, ".env"), "AWS_REGION=ap-south-1\n");

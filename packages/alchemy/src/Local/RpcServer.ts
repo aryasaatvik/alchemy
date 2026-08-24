@@ -52,6 +52,7 @@ export interface RpcProxyApi {
    */
   readonly getProvider: <R extends ResourceLike>(
     type: R["Type"],
+    providerSessionConfig?: unknown,
   ) => Promise<RpcSerialization.RpcWrapped<RpcProviderService<R>>>;
 }
 
@@ -80,6 +81,7 @@ export class SessionProviders extends Context.Service<
     readonly get: (
       sessionEnv: string | undefined,
       type: string,
+      providerSessionConfig: unknown,
     ) => Promise<RpcSerialization.RpcWrapped<RpcProviderService<any>>>;
   }
 >()("alchemy/Local/SessionProviders") {}
@@ -108,10 +110,18 @@ const sessionProviders = <ROut, E>(
       );
       const builds = new Map<string, Promise<Context.Context<ROut>>>();
 
-      const contextFor = (
+      const contextFor = async (
         sessionEnv: string | undefined,
+        type: string,
+        providerSessionConfig: unknown,
       ): Promise<Context.Context<ROut>> => {
-        const key = sessionEnv ?? "";
+        const keyBytes = new TextEncoder().encode(
+          JSON.stringify([sessionEnv ?? "", type, providerSessionConfig]),
+        );
+        const key = Array.from(
+          new Uint8Array(await crypto.subtle.digest("SHA-256", keyBytes)),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
         const existing = builds.get(key);
         if (existing !== undefined) {
           return existing;
@@ -137,6 +147,10 @@ const sessionProviders = <ROut, E>(
                   profile: base.profile,
                   envFile: base.envFile,
                   ...resolved,
+                  providerSessionConfig: {
+                    type,
+                    value: providerSessionConfig,
+                  },
                 }),
               ),
             ),
@@ -157,8 +171,12 @@ const sessionProviders = <ROut, E>(
       };
 
       return SessionProviders.of({
-        get: async (sessionEnv, type) => {
-          const context = await contextFor(sessionEnv);
+        get: async (sessionEnv, type, providerSessionConfig) => {
+          const context = await contextFor(
+            sessionEnv,
+            type,
+            providerSessionConfig,
+          );
           const provider = context.mapUnsafe.get(type) as
             | ProviderService<any>
             | undefined;
@@ -250,8 +268,15 @@ export const layerServer = (
       const { url } = yield* serve({
         createRpcSession: (ws, sessionEnv) =>
           makeServerRpcSession<RpcProxyApi>(ws, {
-            getProvider: (<R extends ResourceLike>(type: R["Type"]) =>
-              providers.get(sessionEnv, type)) as RpcProxyApi["getProvider"],
+            getProvider: (<R extends ResourceLike>(
+              type: R["Type"],
+              providerSessionConfig?: unknown,
+            ) =>
+              providers.get(
+                sessionEnv,
+                type,
+                providerSessionConfig,
+              )) as RpcProxyApi["getProvider"],
           }),
         parentConnected: () => Deferred.doneUnsafe(connected, Effect.void),
         parentDisconnected: () =>

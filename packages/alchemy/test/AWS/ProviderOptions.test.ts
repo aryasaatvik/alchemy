@@ -87,11 +87,17 @@ describe("AWS provider options", () => {
   it.effect("materializes the container-specific Lambda environment", () =>
     Effect.gen(function* () {
       const environment = yield* localEmulatorFunctionEnvironment(
-        { AWS_ENDPOINT_URL: "http://host-only", PRESERVED: "value" },
+        {
+          AWS_ENDPOINT_URL: "http://host-only",
+          DATABASE_URL: "postgres://127.0.0.1:54329/database",
+          REDIS_URL: "redis://127.0.0.1:56379/2",
+          PRESERVED: "value",
+        },
         {
           endpoint: Effect.succeed("http://floci:4566"),
           environment: Effect.succeed({
-            DATABASE_URL: Redacted.make("postgres://database"),
+            DATABASE_URL: Redacted.make("postgres://postgres:5432/database"),
+            REDIS_URL: Redacted.make("redis://redis:6379/2"),
           }),
           serviceEndpoints: Effect.succeed({
             ses: "http://host.docker.internal:4123/ses",
@@ -101,7 +107,10 @@ describe("AWS provider options", () => {
 
       expect(environment.AWS_ENDPOINT_URL).toBe("http://floci:4566");
       expect(environment.PRESERVED).toBe("value");
-      expect(environment.DATABASE_URL).not.toBe("postgres://database");
+      expect(environment.DATABASE_URL).toBe(
+        "postgres://postgres:5432/database",
+      );
+      expect(environment.REDIS_URL).toBe("redis://redis:6379/2");
       expect(JSON.parse(environment[AWS_SERVICE_ENDPOINTS_ENV_VAR]!)).toEqual({
         ses: "http://host.docker.internal:4123/ses",
       });

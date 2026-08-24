@@ -24,6 +24,7 @@ export class RpcProviderProxy extends Context.Service<
     readonly get: <R extends ResourceLike>(
       serverEntryUrl: string,
       providerName: R["Type"],
+      providerSessionConfig?: unknown,
     ) => Effect.Effect<ProviderService<R>, never, AlchemyContext | Stack>;
   }
 >()("alchemy/Local/RpcProviderProxy") {}
@@ -87,7 +88,7 @@ const make = Effect.fn(function* (spawnerUrl: string) {
   evictBrokenSession = (key) => Effect.runFork(Cache.invalidate(cache, key));
 
   return RpcProviderProxy.of({
-    get: Effect.fn(function* (mainUrl, providerName) {
+    get: Effect.fn(function* (mainUrl, providerName, providerSessionConfig) {
       const alchemyContext = yield* AlchemyContext;
       const stack = yield* Stack;
       const sessionEnv = encodeSessionEnvironment({
@@ -99,9 +100,10 @@ const make = Effect.fn(function* (spawnerUrl: string) {
         const session = yield* Cache.get(cache, key);
         return yield* Effect.tryPromise(
           () =>
-            session.getProvider(providerName) as ReturnType<
-              RpcProxyApi["getProvider"]
-            >,
+            session.getProvider(
+              providerName,
+              providerSessionConfig,
+            ) as ReturnType<RpcProxyApi["getProvider"]>,
         );
       });
       // One in-place reconnect: if the session broke mid-call (the broken

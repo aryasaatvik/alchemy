@@ -92,6 +92,8 @@ export interface DevWatchContext<Props, Attrs> {
  * shared skeleton cannot know about the resource.
  */
 export interface DevWatchSpec<Props, Attrs> {
+  /** Serializable provider configuration resolved in the stack process. */
+  readonly sessionConfig?: Effect.Effect<unknown>;
   /**
    * The LIVE provider layer (e.g. `() => FunctionProvider()`). Built inside
    * the floci override context and endpoint-wrapped, exactly like the plain
@@ -400,4 +402,5 @@ export const makeDevWatchProvider = <
       }
       return provider;
     }),
+    { sessionConfig: spec.sessionConfig },
   );
