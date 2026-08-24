@@ -28,6 +28,7 @@ smoke
 .wrangler
 
 *.tgz
+artifacts/.integration-pack-cache/
 *.js
 *.d.ts
 !examples/prisma-tanstack-start/migrations/**/start-contract.d.ts
