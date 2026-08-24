@@ -182,6 +182,11 @@ if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflar
 
 Object.assign(process.env, {
   ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+  ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify({
+    servicequotas: "http://host.docker.internal:8800/service-quotas",
+    ses: "http://host.docker.internal:8800/ses",
+    sesv2: "http://host.docker.internal:8800/ses",
+  }),
   ALCHEMY_STACK_NAME: "samva",
   ALCHEMY_STAGE: "production",
   AWS_ACCESS_KEY_ID: "checkpoint-test",
@@ -203,6 +208,7 @@ const runtimeContext = {
         accountId: environment.accountId,
         region: environment.region,
         runtimeContextId: context.id,
+        serviceEndpoints: environment.serviceEndpoints,
       });
     }),
   }),
@@ -214,6 +220,9 @@ const handler = await LambdaBootstrap.bootstrap(entrypoint);
 const identity = await handler({}, {});
 if (identity.accountId !== "654654387918" || identity.region !== "us-east-1" || identity.runtimeContextId !== "SamvaApi") {
   throw new Error(\`packaged Lambda runtime resolved \${JSON.stringify(identity)}\`);
+}
+if (identity.serviceEndpoints?.servicequotas !== "http://host.docker.internal:8800/service-quotas" || identity.serviceEndpoints?.ses !== "http://host.docker.internal:8800/ses" || identity.serviceEndpoints?.sesv2 !== "http://host.docker.internal:8800/ses") {
+  throw new Error(\`packaged Lambda runtime service endpoints resolved \${JSON.stringify(identity.serviceEndpoints)}\`);
 }
 const localEnvironment = await Effect.runPromise(
   FlociFunctionProvider.localEmulatorFunctionEnvironment(

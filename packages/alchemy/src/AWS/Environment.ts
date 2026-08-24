@@ -5,6 +5,7 @@ import type {
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Region } from "@distilled.cloud/aws/Region";
 import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -42,10 +43,10 @@ export class InvalidAWSServiceEndpoints extends Data.TaggedError(
   "AWS::Environment::InvalidServiceEndpoints",
 )<{ readonly message: string }> {}
 
-const decodeServiceEndpoints = (raw: string) =>
+const decodeServiceEndpoints = (raw: unknown) =>
   Effect.try({
     try: () => {
-      const value: unknown = JSON.parse(raw);
+      const value: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (
         typeof value !== "object" ||
         value === null ||
@@ -68,16 +69,20 @@ const decodeServiceEndpoints = (raw: string) =>
   });
 
 /** Service-specific AWS endpoints visible inside an application runtime. */
-export const AWS_SERVICE_ENDPOINTS = Config.string(
-  AWS_SERVICE_ENDPOINTS_ENV_VAR,
-).pipe(
-  Config.option,
-  Effect.flatMap(
-    Option.match({
-      onNone: () => Effect.succeed(undefined),
-      onSome: decodeServiceEndpoints,
-    }),
-  ),
+export const AWS_SERVICE_ENDPOINTS = ConfigProvider.ConfigProvider.pipe(
+  Effect.flatMap((provider) => provider.load([AWS_SERVICE_ENDPOINTS_ENV_VAR])),
+  Effect.flatMap((node) => {
+    if (node === undefined) {
+      return Effect.succeed(undefined);
+    }
+    return node._tag === "Value"
+      ? decodeServiceEndpoints(node.value)
+      : Effect.fail(
+          new InvalidAWSServiceEndpoints({
+            message: `${AWS_SERVICE_ENDPOINTS_ENV_VAR} must contain a JSON object of non-empty service endpoints`,
+          }),
+        );
+  }),
 );
 
 export type AccountID = string;
