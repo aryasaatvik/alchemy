@@ -230,7 +230,18 @@ export class Providers extends Provider.ProviderCollection<Providers>()(
   "AWS",
 ) {}
 
-export const providers = () =>
+export interface ProvidersOptions<E = never, R = never> {
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    E,
+    R
+  >;
+  readonly lambda?: Lambda.FunctionProviderModeOptions;
+}
+
+export const providers = <E = never, R = never>(
+  options: ProvidersOptions<E, R> = {},
+) =>
   Layer.effect(
     Providers,
     Provider.collection([
@@ -1431,7 +1442,7 @@ export const providers = () =>
           // hot-reloading) Lambda in dev — see FlociFunctionProvider.
           ProviderLayer.dual(Lambda.Function, {
             live: () => Lambda.FunctionProvider(),
-            local: () => Lambda.FlociFunctionProvider(),
+            local: () => Lambda.FlociFunctionProvider(options.lambda?.local),
             dataPlane: flociServices,
           }),
           flociDual(Lambda.LayerVersion, () => Lambda.LayerVersionProvider()),
@@ -1925,7 +1936,13 @@ export const providers = () =>
     Layer.provideMerge(EC2.GetAmiHttp),
     Layer.provideMerge(Region.fromEnvironment),
     Layer.provideMerge(Credentials.fromEnvironment),
-    Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(
+      options.serviceEndpoints === undefined
+        ? Endpoint.fromEnvironment
+        : Endpoint.fromEnvironmentWithServiceEndpoints(
+            options.serviceEndpoints,
+          ),
+    ),
     Layer.provideMerge(DefaultEnvironment),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),
