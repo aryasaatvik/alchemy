@@ -182,6 +182,7 @@ describe("integration package staging", () => {
       "./Cli/InkCLI",
       "./Cloudflare/Live",
       "./Endpoint",
+      "./Neon/*",
       "./Process",
       "./TUI",
     ]) {
