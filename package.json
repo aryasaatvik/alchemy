@@ -53,6 +53,7 @@
     "nuke": "bash scripts/nuke.sh",
     "nuke:local": "bash scripts/nuke-local.sh",
     "opencode": "OPENCODE_EXPERIMENTAL_OXFMT=true opencode",
+    "checkpoint:integration": "bun scripts/integration-pack/checkpoint.ts",
     "pack:integration": "bun scripts/integration-pack/cli.ts",
     "prepare": "husky && effect-tsgo patch && bun build:cloudflare-packages",
     "publish:packages": "pnpm publish --recursive --filter './packages/*' --access public",

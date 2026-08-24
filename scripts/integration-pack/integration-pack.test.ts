@@ -8,6 +8,11 @@ import { integrationClosure } from "./graph.ts";
 import { readManifest } from "./io.ts";
 import { pnpmInstallCommand, pnpmPackCommand } from "./pack.ts";
 import {
+  findExistingUpload,
+  parsePackResult,
+  parseUploadResult,
+} from "./checkpoint.ts";
+import {
   assertPublishableManifest,
   assertExportTargets,
   assertSafeArchiveEntries,
@@ -191,5 +196,93 @@ describe("integration package staging", () => {
     expect(exports["./AWS"]).toEqual(
       (source.exports as Record<string, unknown>)["./AWS"],
     );
+  });
+});
+
+describe("integration checkpoint", () => {
+  const result = {
+    artifact: "/tmp/alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+    sha256: "a".repeat(64),
+    version: "2.0.0-samva.abc123.fingerprint",
+  };
+
+  test("parses the exact artifact identity reported by the packer", () => {
+    expect(
+      parsePackResult(
+        `Created ${result.artifact}\nVersion ${result.version}\nSHA256 ${result.sha256}\nConsumer dependency: ignored`,
+      ),
+    ).toEqual(result);
+  });
+
+  test("rejects incomplete packer output", () => {
+    expect(() => parsePackResult(`Created ${result.artifact}`)).toThrow(
+      "did not report one artifact, version, and SHA-256 digest",
+    );
+  });
+
+  test("reuses the newest upload with the same filename and digest", () => {
+    expect(
+      findExistingUpload(
+        [
+          {
+            id: "older",
+            filename: "alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+            contentHash: result.sha256,
+            url: "https://scratchpad.example/older",
+            createdAt: "2026-08-20T00:00:00.000Z",
+          },
+          {
+            id: "different-content",
+            filename: "alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+            contentHash: "b".repeat(64),
+            url: "https://scratchpad.example/different",
+            createdAt: "2026-08-22T00:00:00.000Z",
+          },
+          {
+            id: "newer",
+            filename: "alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+            contentHash: result.sha256,
+            url: "https://scratchpad.example/newer",
+            createdAt: "2026-08-21T00:00:00.000Z",
+          },
+        ],
+        result,
+      )?.url,
+    ).toBe("https://scratchpad.example/newer");
+  });
+
+  test("validates Scratchpad's upload response envelope", () => {
+    expect(
+      parseUploadResult(
+        JSON.stringify({
+          target: { profile: "production" },
+          uploads: [
+            {
+              filename: "alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+              sha256: result.sha256,
+              url: "https://scratchpad.example/checkpoint",
+            },
+          ],
+        }),
+        result,
+      ).url,
+    ).toBe("https://scratchpad.example/checkpoint");
+  });
+
+  test("rejects a Scratchpad response for different content", () => {
+    expect(() =>
+      parseUploadResult(
+        JSON.stringify({
+          uploads: [
+            {
+              filename: "alchemy-2.0.0-samva.abc123.fingerprint.tgz",
+              sha256: "b".repeat(64),
+              url: "https://scratchpad.example/checkpoint",
+            },
+          ],
+        }),
+        result,
+      ),
+    ).toThrow("did not match the verified integration artifact");
   });
 });
