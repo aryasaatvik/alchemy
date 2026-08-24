@@ -11,9 +11,28 @@ import {
   type CloudflareResolvedCredentials,
 } from "./Auth/AuthProvider.ts";
 
+/** Account-only identity used by local and deployed application runtimes. */
+export interface CloudflareRuntimeIdentity {
+  readonly type: "runtime";
+  readonly accountId: string;
+  readonly source: { readonly type: "runtime" };
+}
+
+export const runtimeIdentity = (
+  accountId: string,
+): CloudflareRuntimeIdentity => ({
+  type: "runtime",
+  accountId,
+  source: { type: "runtime" },
+});
+
+export type CloudflareEnvironmentShape =
+  | CloudflareResolvedCredentials
+  | CloudflareRuntimeIdentity;
+
 export class CloudflareEnvironment extends Context.Service<
   CloudflareEnvironment,
-  Effect.Effect<CloudflareResolvedCredentials>
+  Effect.Effect<CloudflareEnvironmentShape>
 >()("Cloudflare::CloudflareEnvironment") {
   readonly kind = "Environment" as const;
 }

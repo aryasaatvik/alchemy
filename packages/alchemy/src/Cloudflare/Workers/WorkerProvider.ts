@@ -27,6 +27,7 @@ import { cachedFunction } from "../../Util/cached-function.ts";
 import { initialCwd } from "../../Util/Node.ts";
 import { sha256Object } from "../../Util/sha256.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { localRuntimeServices } from "../LocalRuntime.ts";
 import { detachQueueConsumersOfScript } from "../Queues/Consumer.ts";
 import { CloudflareLogs } from "../Logs.ts";
@@ -1151,7 +1152,9 @@ export const WorkerProvider = () =>
     // if the local provider is actually demanded (e.g. deleting a local
     // dev worker's state row). See ProviderLayer.dual.
     local: () =>
-      LocalWorkerProvider().pipe(Layer.provide(localRuntimeServices())),
+      provideLocalEnvironment(
+        LocalWorkerProvider().pipe(Layer.provide(localRuntimeServices())),
+      ),
   });
 
 export const LiveWorkerProvider = () =>
