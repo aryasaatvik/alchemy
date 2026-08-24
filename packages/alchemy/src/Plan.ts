@@ -180,6 +180,12 @@ export interface NoopUpdate<
   R extends ResourceLike = ResourceLike,
 > extends ApplyNodeBase<R> {
   action: "noop";
+  /**
+   * Desired inputs retained so apply can re-evaluate a planned noop against
+   * fresh upstream outputs. This is the evaluable resolution, never the
+   * materialized diff-facing view.
+   */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1584,6 +1590,7 @@ export const make = <A>(
             } else {
               return Node<NoopUpdate>({
                 action: "noop",
+                props: applyProps,
                 state: oldState,
               });
             }
