@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { render } from "ink";
+import { render, renderToString } from "ink";
 import type { Plan } from "../../Plan.ts";
 import { type PlanStatusSession, Cli } from "../Cli.ts";
 import type { ApplyEvent } from "../Event.ts";
@@ -30,8 +30,13 @@ const approvePlan = Effect.fn(function* <P extends Plan>(plan: P) {
 
 const displayPlan = <P extends Plan>(plan: P): Effect.Effect<void> =>
   Effect.sync(() => {
-    const { unmount } = render(<PlanComponent plan={plan} />);
-    unmount();
+    // This is permanent history, not an interactive frame. Mounting and
+    // immediately unmounting an over-height Ink tree invokes Ink 6's
+    // fullscreen clear path and erases the plan from scrollback.
+    const output = renderToString(<PlanComponent plan={plan} />, {
+      columns: process.stdout.columns,
+    });
+    process.stdout.write(`${output}\n`);
   });
 
 const startApplySession = Effect.fn(function* <P extends Plan>(plan: P) {
@@ -39,10 +44,8 @@ const startApplySession = Effect.fn(function* <P extends Plan>(plan: P) {
   // animated progress region (mirrors LoggingCli, which prints the plan
   // lines at session start — `alchemy dev`/`--yes` runs never call
   // displayPlan/approvePlan, so without this the TTY path shows no plan at
-  // all). Rendering + immediately unmounting leaves the frame behind and
-  // releases the Ink instance for PlanProgress; forwarded runtime logs then
-  // insert BETWEEN the preview and the live region instead of piling above
-  // the entire transcript.
+  // all). The preview is a plain write, so forwarded runtime logs insert
+  // between that permanent history and the bounded live progress region.
   yield* displayPlan(plan);
   const listeners = new Set<(event: ApplyEvent) => void>();
   const { unmount } = render(
