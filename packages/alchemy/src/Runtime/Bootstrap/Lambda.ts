@@ -18,9 +18,23 @@ import { layer as fetchHttpClientLayer } from "effect/unstable/http/FetchHttpCli
 import { registerLambdaExtension } from "../../AWS/Lambda/RuntimeExtension.ts";
 import { Runtime as AwsRuntimeEnvironment } from "../../AWS/Environment.ts";
 import * as AwsEndpoint from "../../AWS/Endpoint.ts";
+import {
+  CloudflareEnvironment,
+  runtimeIdentity,
+} from "../../Cloudflare/CloudflareEnvironment.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
 import { RuntimeContext } from "../../RuntimeContext.ts";
 import { entrypointLayer, entrypointTag, stackFromEnv } from "./Process.ts";
+
+export const cloudflareRuntimeIdentityLayer = (
+  accountId: string | undefined,
+) =>
+  accountId === undefined
+    ? Layer.empty
+    : Layer.succeed(
+        CloudflareEnvironment,
+        Effect.succeed(runtimeIdentity(accountId)),
+      );
 
 /**
  * Build the sandbox-lifetime layer stack and return the Lambda handler the
@@ -52,6 +66,9 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
     Layer.provideMerge(stackFromEnv),
     Layer.provideMerge(awsRuntime),
     Layer.provideMerge(awsEnvironment),
+    Layer.provideMerge(
+      cloudflareRuntimeIdentityLayer(process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID),
+    ),
     // AWS_ENDPOINT_URL is the LocalStack-standard override injected by local
     // emulators (floci) into the Lambda container — without it, runtime
     // bindings in `alchemy dev` would call REAL AWS with dummy credentials.
