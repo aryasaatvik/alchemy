@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -16,7 +16,9 @@ import {
   assertPublishableManifest,
   assertExportTargets,
   assertSafeArchiveEntries,
+  makeBundledPackagesSelfContained,
   patchIntegrationManifest,
+  stageAndPack,
 } from "./staging.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
@@ -197,6 +199,94 @@ describe("integration package staging", () => {
     expect(exports["./AWS"]).toEqual(
       (source.exports as Record<string, unknown>)["./AWS"],
     );
+  });
+
+  test("sanitizes devDependencies from cached bundled package manifests", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "integration-bundled-manifest-"),
+    );
+    try {
+      const packageDirectory = join(
+        directory,
+        "node_modules",
+        "@fixture",
+        "local",
+      );
+      await mkdir(packageDirectory, { recursive: true });
+      await writeFile(
+        join(packageDirectory, "package.json"),
+        `${JSON.stringify({
+          name: "@fixture/local",
+          version: "1.0.0",
+          devDependencies: { typescript: "^7.0.0" },
+        })}\n`,
+      );
+      await makeBundledPackagesSelfContained(directory, [
+        {
+          name: "@fixture/local",
+          version: "1.0.0",
+          tarball: "/tmp/fixture.tgz",
+          fingerprint: "fixture",
+        },
+      ]);
+
+      const manifest = await readManifest(
+        join(packageDirectory, "package.json"),
+      );
+      expect(manifest.devDependencies).toBeUndefined();
+      expect(manifest.dependencies).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("produces byte-identical archives across repeated stage builds", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "integration-repeat-stage-"),
+    );
+    const output = await mkdtemp(join(tmpdir(), "integration-repeat-output-"));
+    try {
+      await mkdir(join(directory, "src"));
+      await writeFile(
+        join(directory, "src", "index.js"),
+        "export const value = 1;\n",
+      );
+      await writeFile(
+        join(directory, "package.json"),
+        `${JSON.stringify({
+          name: "fixture",
+          version: "1.0.0",
+          type: "module",
+          files: ["src"],
+          devDependencies: { typescript: "^7.0.0" },
+        })}\n`,
+      );
+      const input = {
+        repositoryRoot,
+        workspace: {
+          name: "fixture",
+          directory,
+          manifest: { name: "fixture" },
+          localDependencies: [],
+        },
+        localPackages: [],
+        version: "1.0.0-samva.test",
+        outputDir: output,
+        bundleLocalPackages: false,
+      } as const;
+
+      const firstPath = await stageAndPack(input);
+      const first = await readFile(firstPath);
+      const secondPath = await stageAndPack(input);
+      const second = await readFile(secondPath);
+
+      expect(second).toEqual(first);
+    } finally {
+      await Promise.all([
+        rm(directory, { recursive: true, force: true }),
+        rm(output, { recursive: true, force: true }),
+      ]);
+    }
   });
 });
 

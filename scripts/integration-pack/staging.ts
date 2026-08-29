@@ -239,7 +239,7 @@ const promoteBundledRuntimeDependencies = async (
 };
 
 /** Remove local edges and nested installs from bundled workspace packages. */
-const makeBundledPackagesSelfContained = async (
+export const makeBundledPackagesSelfContained = async (
   directory: string,
   bundled: ReadonlyArray<PackedPackage>,
 ): Promise<void> => {
@@ -250,8 +250,14 @@ const makeBundledPackagesSelfContained = async (
       packageDirectory,
       await readManifest(join(packageDirectory, "package.json")),
     );
+    // Cached local archives may predate the install-manifest sanitization
+    // below. Bundled packages are published from this disposable tree, so
+    // enforce the same publish boundary here before they enter the artifact.
+    delete manifest.devDependencies;
     for (const section of dependencySections) {
       for (const name of localNames) delete manifest[section]?.[name];
+      if (Object.keys(manifest[section] ?? {}).length === 0)
+        delete manifest[section];
     }
     await writeManifest(packageDirectory, manifest);
     await rm(join(packageDirectory, "node_modules"), {
