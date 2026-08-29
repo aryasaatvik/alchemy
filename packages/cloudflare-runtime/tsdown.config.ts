@@ -48,6 +48,7 @@ const workerConfig = (
     alwaysBundle: [/.+/],
   },
   outputOptions: {
+    codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
     entryFileNames: "[name].mjs",
   },
 });
@@ -144,6 +145,7 @@ export default defineConfig([
     },
     dts: false,
     outputOptions: {
+      codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
       entryFileNames: "[name].mjs",
     },
   },
