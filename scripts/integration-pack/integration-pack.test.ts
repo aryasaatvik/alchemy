@@ -41,6 +41,7 @@ describe("integration package graph", () => {
         "@distilled.cloud/neon",
         "@distilled.cloud/otel-collector",
         "@distilled.cloud/planetscale",
+        "@distilled.cloud/railway",
         "alchemy",
       ]),
     );
