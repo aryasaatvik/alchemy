@@ -160,14 +160,17 @@ if (!AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || 
     );
     await writeFile(
       join(consumer, "consumer-node.mjs"),
-      `import * as Effect from "effect/Effect";
+      `import { createServer } from "node:http";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
-const [Alchemy, AWS, AwsEnvironmentModule, FlociFunctionProvider, LambdaBootstrap, ProcessBootstrap, RuntimeContextModule, Cloudflare, CloudflareEnvironmentModule, Fly] = await Promise.all([
+const [Alchemy, AWS, AwsEnvironmentModule, AwsEndpointModule, AwsCredentialsModule, FlociFunctionProvider, LambdaBootstrap, ProcessBootstrap, RuntimeContextModule, Cloudflare, CloudflareEnvironmentModule, Fly, FetchHttpClientModule] = await Promise.all([
   import("alchemy"),
   import("alchemy/AWS"),
   import("alchemy/AWS/Environment"),
+  import("alchemy/AWS/Endpoint"),
+  import("alchemy/AWS/Credentials"),
   import("alchemy/AWS/Lambda/FlociFunctionProvider"),
   import("alchemy/Runtime/Bootstrap/Lambda"),
   import("alchemy/Runtime/Bootstrap/Process"),
@@ -175,6 +178,7 @@ const [Alchemy, AWS, AwsEnvironmentModule, FlociFunctionProvider, LambdaBootstra
   import("alchemy/Cloudflare"),
   import("alchemy/Cloudflare/CloudflareEnvironment"),
   import("alchemy/Fly"),
+  import("effect/unstable/http/FetchHttpClient"),
 ]);
 if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !Cloudflare.cloudflareViteFramework || !CloudflareEnvironmentModule.CloudflareEnvironment || !Fly.Machine) {
   throw new Error("packed Node runtime surfaces did not load");
@@ -243,7 +247,50 @@ const localRedisUrl = Redacted.value(RuntimeContextModule.unpackEnvValue(localEn
 if (localDatabaseUrl !== "postgres://postgres:5432/samva" || localRedisUrl !== "redis://redis:6379/2") {
   throw new Error(\`packaged local Lambda environment resolved \${JSON.stringify(localEnvironment)}\`);
 }
-console.log("compiled Alchemy Node runtime, packaged Lambda bootstrap, and local environment passed");
+const requests = [];
+const server = createServer((request, response) => {
+  requests.push({ method: request.method, url: request.url, target: request.headers["x-amz-target"] });
+  request.resume();
+  response.writeHead(200, { "content-type": "application/x-amz-json-1.1" });
+  response.end(JSON.stringify({ Services: [] }));
+});
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+});
+try {
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("loopback endpoint server did not expose a port");
+  }
+  const endpoint = \`http://127.0.0.1:\${address.port}\`;
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const listServices = yield* AWS.ServiceQuotas.ListServices();
+      return yield* listServices({});
+    }).pipe(
+      Effect.provide(AWS.ServiceQuotas.ListServicesHttp),
+      Effect.provide(
+        AwsCredentialsModule.fromCredentials({
+          accessKeyId: "checkpoint-test",
+          secretAccessKey: "checkpoint-test",
+        }, "us-east-1"),
+      ),
+      Effect.provide(
+        AwsEndpointModule.fromEnvironmentWithServiceEndpoints(
+          Effect.succeed({ servicequotas: endpoint }),
+        ),
+      ),
+      Effect.provide(FetchHttpClientModule.layer),
+    ),
+  );
+  if (requests.length !== 1 || requests[0]?.method !== "POST" || requests[0]?.url !== "/") {
+    throw new Error(\`packaged service endpoint request was \${JSON.stringify(requests)}\`);
+  }
+} finally {
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+console.log("compiled Alchemy Node runtime, packaged Lambda bootstrap, local environment, and service endpoint request routing passed");
 `,
     );
     await writeFile(join(consumer, ".env"), "AWS_REGION=ap-south-1\n");
