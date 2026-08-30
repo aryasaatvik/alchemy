@@ -61,7 +61,7 @@ describe("InternalWorkerExportPlugin", () => {
     expect(first["entry.mjs"]).toContain('import worker1 from "./z.mjs";');
   });
 
-  it("repeats generated worker chunks byte-for-byte with module-id ordering", async () => {
+  it("repeats generated worker chunks byte-for-byte with execution ordering", async () => {
     const fixture = new URL(
       "./fixtures/internal-worker-repeat/index.ts",
       import.meta.url,
@@ -77,7 +77,7 @@ describe("InternalWorkerExportPlugin", () => {
           second: secondFixture,
         },
         experimental: {
-          chunkModulesOrder: "module-id",
+          chunkModulesOrder: "exec-order",
         },
         plugins: [InternalWorkerExportPlugin()],
       });

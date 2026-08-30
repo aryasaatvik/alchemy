@@ -38,10 +38,10 @@ const workerConfig = (
   ] as unknown as UserConfig["plugins"],
   inputOptions: {
     experimental: {
-      // Scope-hoisted worker chunks must render their module bodies in a
-      // stable order. Rolldown keeps this ordering only when it can prove
-      // that module-id order preserves runtime behavior.
-      chunkModulesOrder: "module-id",
+      // Preserve dependency execution order inside scope-hoisted worker
+      // chunks. Alphabetical module-id ordering can invoke bundled CommonJS
+      // initializers before their declarations.
+      chunkModulesOrder: "exec-order",
     },
   },
   deps: {
@@ -137,7 +137,7 @@ export default defineConfig([
     ],
     inputOptions: {
       experimental: {
-        chunkModulesOrder: "module-id",
+        chunkModulesOrder: "exec-order",
       },
     },
     deps: {
