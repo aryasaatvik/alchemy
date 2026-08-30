@@ -658,32 +658,8 @@ export const layerOtlp = (options: OtlpOptions): Layer.Layer<never> =>
     }),
   );
 
-/**
- * Build the configured {@link Telemetry} Layer into an event's request
- * scope, returning the Context of telemetry services to provide to the
- * event's handler effect.
- *
- * Called by the runtime bridges (Worker, Durable Object, Workflow, Lambda)
- * once per event. Building into the *request* scope — not the
- * never-finalized isolate scope — is what makes export work on workerd:
- * the batching fiber lives inside the event's I/O context and the final
- * flush runs from the scope's finalizer, which the bridges register with
- * `ctx.waitUntil`.
- *
- * A failed build (bad user Layer, config error) degrades to an empty
- * Context with a warning instead of failing the event.
- *
- * `override` is the (possibly merged) custom Layer registered on the
- * runtime context by {@link layer} during init. It composes with
- * — rather than replaces — the bound OTLP destinations: loggers and metric
- * exporters merge, and a custom `Tracer` (a single Effect service) wins
- * over the built-in one.
- *
- * Declared `R = never`: the Layer's actual requirements (`HttpClient`,
- * `ConfigProvider`, …) are satisfied at runtime by the bridge's surrounding
- * `Effect.provide` of the built runtime context.
- */
-export const buildEventTelemetry = (
+/** Build one telemetry layer into an explicitly owned scope. */
+const buildTelemetry = (
   context: Context.Context<never>,
   scope: Scope.Scope,
   override?: TelemetryLayer | undefined,
@@ -702,6 +678,44 @@ export const buildEventTelemetry = (
       ),
     ),
   ) as Effect.Effect<Context.Context<never>>;
+
+/**
+ * Build the configured {@link Telemetry} Layer into an event's request
+ * scope, returning the Context of telemetry services to provide to the
+ * event's handler effect.
+ *
+ * Called by the runtime bridges (Worker, Durable Object, Workflow, Lambda)
+ * once per event. Building into the *request* scope — not the
+ * never-finalized isolate scope — is what makes export work on workerd:
+ * the batching fiber lives inside the event's I/O context and the final
+ * flush runs from the scope's finalizer, which the bridges register with
+ * `ctx.waitUntil`.
+ *
+ * Hosts that install their own process-lifetime telemetry can set
+ * `ALCHEMY_EVENT_TELEMETRY_DISABLED=true` to skip this outer event layer
+ * without disabling the host's tracer or logger providers. Process-lifetime
+ * telemetry configured through {@link provideProcessTelemetry} is unaffected.
+ *
+ * A failed build degrades to an empty Context with a warning instead of
+ * failing the event. The optional override composes with bound destinations;
+ * custom tracers win while loggers and metric exporters merge.
+ */
+export const buildEventTelemetry = (
+  context: Context.Context<never>,
+  scope: Scope.Scope,
+  override?: TelemetryLayer | undefined,
+  base?: TelemetryLayer | undefined,
+): Effect.Effect<Context.Context<never>> =>
+  Effect.gen(function* () {
+    const disabled = yield* Config.boolean(
+      "ALCHEMY_EVENT_TELEMETRY_DISABLED",
+    ).pipe(
+      Config.withDefault(false),
+      Effect.orElseSucceed(() => false),
+    );
+    if (disabled) return Context.empty();
+    return yield* buildTelemetry(context, scope, override, base);
+  });
 
 /**
  * Provide telemetry to a long-running server process (Cloudflare Container,
@@ -726,7 +740,7 @@ export const provideProcessTelemetry =
     Effect.gen(function* () {
       const context = yield* Effect.context<never>();
       const scope = yield* Effect.scope;
-      const telemetry = yield* buildEventTelemetry(
+      const telemetry = yield* buildTelemetry(
         context,
         scope,
         runtimeContext?.telemetry,
