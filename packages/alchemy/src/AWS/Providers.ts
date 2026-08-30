@@ -2006,7 +2006,9 @@ export const providers = <E = never, R = never>(
       Layer.unwrap(
         Effect.gen(function* () {
           const mode = yield* defaultProviderMode;
-          return mode === "local" ? Layer.merge(base, flociServices()) : base;
+          return mode === "local"
+            ? Layer.merge(base, flociServices(options.local))
+            : base;
         }),
       ),
     Layer.orDie,
