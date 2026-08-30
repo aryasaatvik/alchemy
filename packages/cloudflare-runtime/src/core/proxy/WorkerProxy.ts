@@ -86,7 +86,7 @@ export const WorkerProxyLive = Layer.effect(
       return {
         port:
           options.port && options.strictPort
-            ? yield* ports.check(options.port)
+            ? yield* ports.waitFor(options.port)
             : options.port
               ? // A configured (non-strict) port: a dev-session restart races
                 // the previous session's teardown, and an instant fallback
@@ -181,6 +181,7 @@ export const WorkerProxyLive = Layer.effect(
       attempt = 1,
     ): ReturnType<typeof serve> =>
       serve(options).pipe(
+        Effect.onError(() => ports.release(options.port)),
         Effect.catchIf(
           (error) =>
             Workerd.isAddressInUseError(error) &&
@@ -198,6 +199,7 @@ export const WorkerProxyLive = Layer.effect(
       serve: Effect.fn("WorkerProxy.serve")(function* (options = {}) {
         const resolved = yield* normalizeOptions(options);
         const url = yield* serveWithRetry(resolved);
+        yield* Effect.addFinalizer(() => ports.release(Number(url.port)));
         if (
           options.port !== undefined &&
           options.port !== 0 &&

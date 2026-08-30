@@ -409,6 +409,30 @@ layer(services, { excludeTestServices: true })((it) => {
   );
 
   it.effect(
+    "reuses a strict port immediately after the previous proxy scope closes",
+    () =>
+      Effect.gen(function* () {
+        const proxy = yield* WorkerProxy.WorkerProxy;
+        const port = yield* PortHelpers.find(0);
+        const firstScope = yield* Scope.make();
+
+        const first = yield* proxy
+          .serve({ port, strictPort: true })
+          .pipe(Scope.provide(firstScope));
+        expect(first.url.port).toBe(String(port));
+
+        yield* Scope.close(firstScope, Exit.void);
+
+        const secondScope = yield* Scope.make();
+        const second = yield* proxy
+          .serve({ port, strictPort: true })
+          .pipe(Scope.provide(secondScope));
+        expect(second.url.port).toBe(String(port));
+        yield* Scope.close(secondScope, Exit.void);
+      }),
+  );
+
+  it.effect(
     "fails when strictPort is set and the requested port is in use",
     () =>
       Effect.gen(function* () {
