@@ -10,12 +10,24 @@ import {
   UnexpectedExit,
   makeCommandError,
   terminateProcessGroup,
+  type CommandRunProps,
   type CommandProps,
 } from "./Command.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
 import { startDevProcessGuardian } from "../Util/DevProcessGuardian.ts";
 
-export interface DevProps extends CommandProps {}
+export interface DevProps extends CommandProps {
+  /**
+   * An idempotent finite command that releases external state owned by the
+   * dev process. It runs after the process group is stopped on restart or
+   * delete, and is reconstructed from persisted props when a sidecar dies
+   * before its scope finalizers can run.
+   *
+   * Cleanup commands must succeed when the external state is already absent:
+   * recovery may run the command more than once.
+   */
+  cleanup?: CommandRunProps;
+}
 
 export interface Dev extends Resource<
   "Command.Dev",
@@ -112,7 +124,7 @@ export const DevProviderLocal = () =>
       import.meta.url,
     ),
     Effect.gen(function* () {
-      const { spawn } = yield* CommandExecutor;
+      const { run, spawn } = yield* CommandExecutor;
 
       return {
         // The dev process is spawned into the instance scope the helper
@@ -122,8 +134,20 @@ export const DevProviderLocal = () =>
         // forceful because Windows has no portable SIGTERM tree equivalent.
         // A detached guardian separately owns abrupt sidecar loss, because
         // synchronous exit cleanup cannot await SIGTERM -> SIGKILL escalation.
-        start: Effect.fn(function* ({ news: props, invalidate }) {
-          const child = yield* spawn(props);
+        start: Effect.fn(function* ({ news: props, invalidate, session }) {
+          // Register before spawning so the instance scope closes the child
+          // process first and then releases external state. The latter does
+          // not depend on the child receiving or handling SIGTERM.
+          if (props.cleanup !== undefined) {
+            const cleanup = props.cleanup;
+            yield* Effect.addFinalizer(() =>
+              run(cleanup, session).pipe(Effect.orDie, Effect.asVoid),
+            );
+          }
+          const child = yield* spawn(props, {
+            killSignal: "SIGTERM",
+            forceKillAfter: "1 second",
+          });
           const guardian = yield* Effect.sync(() =>
             startDevProcessGuardian(child.pid),
           );
@@ -204,6 +228,14 @@ export const DevProviderLocal = () =>
           );
 
           return { url };
+        }),
+        // A force-killed sidecar cannot execute instance finalizers. The
+        // delete request carries persisted `olds`, so recovery can run the
+        // idempotent cleanup even when this provider has no live instance.
+        stop: Effect.fn(function* ({ olds: props, session }) {
+          if (props.cleanup !== undefined) {
+            yield* run(props.cleanup, session).pipe(Effect.asVoid);
+          }
         }),
       } satisfies LocalProvider.LocalProviderSpec<Dev>;
     }),

@@ -84,6 +84,7 @@ export class CommandExecutor extends Context.Service<
      */
     readonly spawn: (
       props: CommandProps,
+      options?: ChildProcess.KillOptions,
     ) => Effect.Effect<
       ChildProcessSpawner.ChildProcessHandle,
       CommandError,
@@ -310,7 +311,7 @@ export const CommandExecutorLive = () =>
       };
 
       /** Spawns a command, returning the child process handle. */
-      const spawn = (props: CommandProps) =>
+      const spawn = (props: CommandProps, options?: ChildProcess.KillOptions) =>
         parseCommand(props).pipe(
           Effect.flatMap(({ bin, args }) =>
             spawner.spawn(
@@ -341,7 +342,8 @@ export const CommandExecutorLive = () =>
                 // The Effect process runtime creates a detached process group
                 // by default on POSIX. Preserve that default so timeouts and
                 // scoped interruption can terminate every descendant.
-                killSignal: "SIGKILL",
+                killSignal: options?.killSignal ?? "SIGKILL",
+                forceKillAfter: options?.forceKillAfter,
               }),
             ),
           ),

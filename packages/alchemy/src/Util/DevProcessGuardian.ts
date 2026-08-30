@@ -35,6 +35,7 @@ const ownerPid = Number(process.argv[2]);
 const expectedIdentity = Buffer.from(process.argv[3], "base64").toString("utf8");
 let stopped = false;
 let ended = false;
+const knownMembers = new Map();
 const identity = () => {
   try {
     if (process.platform === "linux" && require("node:fs").existsSync("/proc/" + pid + "/stat")) {
@@ -48,8 +49,47 @@ const identity = () => {
   } catch { return ""; }
 };
 const ownsTarget = () => identity() === expectedIdentity;
+const groupMembers = () => {
+  try {
+    return require("node:child_process")
+      .execFileSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" })
+      .trim()
+      .split(/\r?\n/)
+      .flatMap((line) => {
+        const [member, group] = line.trim().split(/\s+/);
+        return group === String(pid) && member ? [Number(member)] : [];
+      });
+  } catch { return []; }
+};
+const rememberGroup = () => {
+  for (const member of groupMembers()) {
+    const memberIdentity = member === pid ? expectedIdentity : identityFor(member);
+    if (memberIdentity) knownMembers.set(member, memberIdentity);
+  }
+};
+const identityFor = (member) => {
+  try {
+    if (process.platform === "linux" && require("node:fs").existsSync("/proc/" + member + "/stat")) {
+      const stat = require("node:fs").readFileSync("/proc/" + member + "/stat", "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || "";
+    }
+    if (process.platform === "win32") {
+      return require("node:child_process").execFileSync("powershell.exe", ["-NoProfile", "-Command", "$p=Get-Process -Id $args[0] -ErrorAction Stop; $p.StartTime.ToUniversalTime().Ticks", String(member)], { encoding: "utf8" }).trim();
+    }
+    return require("node:child_process").execFileSync("ps", ["-o", "lstart=", "-o", "command=", "-p", String(member)], { encoding: "utf8" }).trim();
+  } catch { return ""; }
+};
+const ownsDescendant = () => groupMembers().some((member) => {
+  if (process.platform === "win32") return false;
+  if (member === pid) return false;
+  const expected = knownMembers.get(member);
+  return expected !== undefined && identityFor(member) === expected;
+});
 const killTree = (signal) => {
-  if (!ownsTarget()) return false;
+  // If the group leader was force-killed, keep supervising known descendants
+  // and use the still-owned process group to reap them. A PID-reused group
+  // with no matching remembered member is deliberately left alone.
+  if (!ownsTarget() && !ownsDescendant()) return false;
   try {
     if (process.platform === "win32") {
       require("node:child_process").execFileSync("taskkill", ["/pid", String(pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], { stdio: "ignore" });
@@ -69,17 +109,33 @@ const finish = () => {
   }, ${GRACE_PERIOD_MILLIS});
 };
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { if (chunk.includes("stop")) stopped = true; });
+process.stdin.on("data", (chunk) => {
+  if (chunk.includes("stop")) {
+    // Normal scope cleanup explicitly disarms the guardian. Exit here rather
+    // than waiting for stdin EOF: detached Bun children can keep the pipe
+    // open, which would otherwise leak one guardian per Dev resource.
+    stopped = true;
+    process.exit(0);
+  }
+});
 process.stdin.on("end", finish);
 process.stdin.on("close", finish);
 process.stdin.on("error", finish);
 process.stdin.resume();
+rememberGroup();
 // Some detached Bun children keep the stdin descriptor open after their
 // owner is hard-killed. The PID probe is the independent owner-death signal;
 // stdin still carries the explicit normal-stop marker below.
 setInterval(() => {
   if (stopped || ended) return;
-  if (!ownsTarget()) return process.exit(0);
+  if (ownsTarget()) rememberGroup();
+  else if (!ownsDescendant()) return process.exit(0);
+  else {
+    // The group leader exited while a remembered descendant remains. Reap
+    // the rest even when the sidecar owner itself is still healthy.
+    finish();
+    return;
+  }
   if (process.ppid !== ownerPid) {
     finish();
     return;

@@ -14,7 +14,11 @@ const descendant = spawn(
 );
 fs.writeFileSync(
   pidFile,
-  JSON.stringify({ pid: process.pid, descendantPid: descendant.pid }),
+  JSON.stringify({
+    pid: process.pid,
+    descendantPid: descendant.pid,
+    marker: process.env.MARKER ?? "tree",
+  }),
 );
 console.log("http://localhost:65535/");
 setInterval(() => {}, 60_000);
