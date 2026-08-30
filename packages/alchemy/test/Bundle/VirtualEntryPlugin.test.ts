@@ -1,4 +1,7 @@
 import * as Bundle from "@/Bundle/Bundle";
+import { stackConstant } from "@/Runtime/Bootstrap/Process";
+import { Stack } from "@/Stack";
+import { Stage } from "@/Stage";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, layer } from "alchemy-test";
 import * as Effect from "effect/Effect";
@@ -37,6 +40,15 @@ const BOOTSTRAP_MODULES = [
 ] as const;
 
 layer(NodeServices.layer)("generated entry bootstraps", (it) => {
+  it.effect("a process stack also provides its Stage service", () =>
+    Effect.gen(function* () {
+      const stack = yield* Stack;
+      const stage = yield* Stage;
+      expect(stack.stage).toBe("local");
+      expect(stage).toBe("local");
+    }).pipe(Effect.provide(stackConstant("samva", "local"))),
+  );
+
   // The contract every platform's generated entry relies on: a consumer
   // project that has `alchemy` installed and NOTHING else reachable (bun's
   // isolated linker / pnpm) must be able to bundle

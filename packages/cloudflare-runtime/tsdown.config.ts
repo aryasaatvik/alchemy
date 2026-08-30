@@ -36,10 +36,19 @@ const workerConfig = (
     }),
     InternalWorkerExportPlugin(),
   ] as unknown as UserConfig["plugins"],
+  inputOptions: {
+    experimental: {
+      // Scope-hoisted worker chunks must render their module bodies in a
+      // stable order. Rolldown keeps this ordering only when it can prove
+      // that module-id order preserves runtime behavior.
+      chunkModulesOrder: "module-id",
+    },
+  },
   deps: {
     alwaysBundle: [/.+/],
   },
   outputOptions: {
+    codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
     entryFileNames: "[name].mjs",
   },
 });
@@ -126,17 +135,26 @@ export default defineConfig([
       cloudflare({ compatibilityDate: "2026-03-10" }),
       InternalWorkerExportPlugin(),
     ],
+    inputOptions: {
+      experimental: {
+        chunkModulesOrder: "module-id",
+      },
+    },
     deps: {
       alwaysBundle: [/.+/],
     },
     dts: false,
     outputOptions: {
+      codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
       entryFileNames: "[name].mjs",
     },
   },
   {
     cwd: ".",
-    entry: ["src/vite/plugin.ts"],
+    entry: {
+      plugin: "src/vite/plugin.ts",
+      framework: "src/vite/framework.ts",
+    },
     exports: false,
     outDir: "dist/vite/node",
     tsconfig: "tsconfig.json",

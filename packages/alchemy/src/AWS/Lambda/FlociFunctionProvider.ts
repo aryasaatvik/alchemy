@@ -30,13 +30,19 @@
 
 import * as Lambda from "@distilled.cloud/aws/lambda";
 import * as s3 from "@distilled.cloud/aws/s3";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
+import { ProviderSessionConfig } from "../../Local/RpcServerEnvironment.ts";
+import { packEnvValue, unpackEnvValue } from "../../RuntimeContext.ts";
 import { Assets, AssetsLive } from "../Assets.ts";
+import { AWS_SERVICE_ENDPOINTS_ENV_VAR } from "../Environment.ts";
 import {
   flociSidecarEntry,
   makeDevWatchProvider,
@@ -57,12 +63,190 @@ const isFunctionImageProps = (
   props: FunctionProps,
 ): props is FunctionImageProps => props.image !== undefined;
 
-export const FlociFunctionProvider = () =>
+export interface LocalEmulatorFunctionProviderOptions {
+  readonly environment?: Effect.Effect<
+    Readonly<Record<string, string | Redacted.Redacted<string>>>,
+    never,
+    never
+  >;
+  readonly endpoint?: Effect.Effect<string | undefined, never, never>;
+  readonly serviceEndpoints?: Effect.Effect<
+    Readonly<Record<string, string>>,
+    never,
+    never
+  >;
+}
+
+export interface FunctionProviderModeOptions {
+  readonly local?: LocalEmulatorFunctionProviderOptions;
+}
+
+interface LocalEmulatorFunctionProviderSessionConfig {
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly endpoint?: string;
+  readonly serviceEndpoints?: Readonly<Record<string, string>>;
+}
+
+const materializeLocalEmulatorFunctionProviderOptions = Effect.fn(function* (
+  options: LocalEmulatorFunctionProviderOptions,
+): Effect.fn.Return<LocalEmulatorFunctionProviderSessionConfig> {
+  const configuredEnvironment =
+    options.environment === undefined ? undefined : yield* options.environment;
+  return {
+    environment:
+      configuredEnvironment === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.entries(configuredEnvironment).map(([key, value]) => [
+              key,
+              Redacted.isRedacted(value) ? Redacted.value(value) : value,
+            ]),
+          ),
+    endpoint:
+      options.endpoint === undefined ? undefined : yield* options.endpoint,
+    serviceEndpoints:
+      options.serviceEndpoints === undefined
+        ? undefined
+        : yield* options.serviceEndpoints,
+  };
+});
+
+const effectOptions = (
+  config: LocalEmulatorFunctionProviderSessionConfig,
+): LocalEmulatorFunctionProviderOptions => ({
+  environment:
+    config.environment === undefined
+      ? undefined
+      : Effect.succeed(config.environment),
+  endpoint:
+    config.endpoint === undefined ? undefined : Effect.succeed(config.endpoint),
+  serviceEndpoints:
+    config.serviceEndpoints === undefined
+      ? undefined
+      : Effect.succeed(config.serviceEndpoints),
+});
+
+const resolveLocalEmulatorFunctionProviderOptions = (
+  fallback: LocalEmulatorFunctionProviderOptions,
+) =>
+  Effect.gen(function* () {
+    const session = yield* Effect.serviceOption(ProviderSessionConfig);
+    if (
+      Option.isNone(session) ||
+      session.value.type !== Function.Type ||
+      session.value.value === undefined
+    ) {
+      return fallback;
+    }
+    return effectOptions(
+      session.value.value as LocalEmulatorFunctionProviderSessionConfig,
+    );
+  });
+
+export class LocalEmulatorFunctionEnvironmentError extends Data.TaggedError(
+  "LocalEmulatorFunctionEnvironmentError",
+)<{ readonly message: string }> {}
+
+const placeEnvironmentValue = (
+  current: string | undefined,
+  placed: string,
+): string => {
+  const decoded = unpackEnvValue<unknown>(current);
+  return Redacted.isRedacted(decoded)
+    ? packEnvValue(Redacted.make(placed))
+    : placed;
+};
+
+const reservedEnvironmentKeys = new Set([
+  "AWS_ENDPOINT_URL",
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+]);
+
+export const localEmulatorFunctionEnvironment = Effect.fn(function* (
+  environment: Record<string, string>,
+  options: LocalEmulatorFunctionProviderOptions = {},
+) {
+  const runtimeEnvironment = { ...environment };
+  if (options.environment !== undefined) {
+    for (const [key, value] of Object.entries(yield* options.environment).sort(
+      ([left], [right]) => left.localeCompare(right),
+    )) {
+      if (
+        key.length === 0 ||
+        reservedEnvironmentKeys.has(key) ||
+        !(
+          typeof value === "string" ||
+          (Redacted.isRedacted(value) &&
+            typeof Redacted.value(value) === "string")
+        )
+      ) {
+        return yield* new LocalEmulatorFunctionEnvironmentError({
+          message:
+            "Local emulator Lambda environment must contain non-reserved, non-empty keys with string or Redacted<string> values",
+        });
+      }
+      runtimeEnvironment[key] = placeEnvironmentValue(
+        environment[key],
+        Redacted.isRedacted(value) ? Redacted.value(value) : value,
+      );
+    }
+  }
+
+  delete runtimeEnvironment.AWS_ENDPOINT_URL;
+  if (options.endpoint !== undefined) {
+    const endpoint = yield* options.endpoint;
+    if (endpoint !== undefined && endpoint.length === 0) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message:
+          "Local emulator Lambda endpoint must be undefined or a non-empty string",
+      });
+    }
+    if (endpoint !== undefined) runtimeEnvironment.AWS_ENDPOINT_URL = endpoint;
+  }
+
+  if (options.serviceEndpoints !== undefined) {
+    const entries = Object.entries(yield* options.serviceEndpoints).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    if (
+      entries.some(
+        ([service, endpoint]) => service.length === 0 || endpoint.length === 0,
+      )
+    ) {
+      return yield* new LocalEmulatorFunctionEnvironmentError({
+        message:
+          "Local emulator Lambda service endpoints must contain non-empty service names and endpoint strings",
+      });
+    }
+    if (entries.length === 0) {
+      delete runtimeEnvironment[AWS_SERVICE_ENDPOINTS_ENV_VAR];
+    } else {
+      runtimeEnvironment[AWS_SERVICE_ENDPOINTS_ENV_VAR] = JSON.stringify(
+        Object.fromEntries(entries),
+      );
+    }
+  }
+
+  return runtimeEnvironment;
+});
+
+export const FlociFunctionProvider = (
+  options: LocalEmulatorFunctionProviderOptions = {},
+) =>
   makeDevWatchProvider<Function, FunctionProps, Function["Attributes"]>(
     Function,
     flociSidecarEntry(),
     {
-      liveProvider: () => FunctionProvider(),
+      sessionConfig: materializeLocalEmulatorFunctionProviderOptions(options),
+      liveProvider: () =>
+        FunctionProvider({
+          transformEnvironment: (environment) =>
+            resolveLocalEmulatorFunctionProviderOptions(options).pipe(
+              Effect.flatMap((resolved) =>
+                localEmulatorFunctionEnvironment(environment, resolved),
+              ),
+            ),
+        }),
       // A FRESH `Assets` instance: its cached bucket lookup must resolve
       // against the emulator (auto-bootstrapped there) and can never share a
       // cache with the live arm's instance.

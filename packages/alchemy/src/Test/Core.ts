@@ -213,9 +213,9 @@ export const makeSidecarHandle = <ROut = any>(
           Effect.orDie,
         );
         return RpcProviderProxy.RpcProviderProxy.of({
-          get: (serverEntryUrl, providerName) =>
+          get: (serverEntryUrl, providerName, providerSessionConfig) =>
             Effect.flatMap(realProxy, (proxy) =>
-              proxy.get(serverEntryUrl, providerName),
+              proxy.get(serverEntryUrl, providerName, providerSessionConfig),
             ),
         });
       }),
@@ -533,7 +533,13 @@ export const scratchStack = <ROut>(
   const stateLayer: Layer.Layer<State.State> =
     file === undefined
       ? Layer.succeed(State.State, State.InMemoryService({}))
-      : Layer.provide(State.localState(), PlatformServices);
+      : Layer.provide(
+          State.localState(),
+          Layer.provideMerge(
+            AlchemyContextLive.pipe(Layer.orDie),
+            PlatformServices,
+          ),
+        );
 
   // `withProviders` already pins the test body to Floci, but the stack program
   // and its later plan/apply phase run under `AWS.providers()`'s live services.

@@ -15,6 +15,7 @@ import * as RpcProvider from "../../Local/RpcProvider.ts";
 import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import {
   generateLocalId,
   LOCAL_ENTRY_URL,
@@ -470,7 +471,9 @@ export const StoreSecretProvider = () =>
     // supplies the real runtime; without the proxy the provider builds
     // in-process and this layer is real.
     local: () =>
-      SecretProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      provideLocalEnvironment(
+        SecretProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      ),
     live: () => SecretProviderLive(),
   });
 

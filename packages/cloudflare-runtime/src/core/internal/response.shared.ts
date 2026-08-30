@@ -2,16 +2,16 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { RuntimeError, SystemError } from "../RuntimeError.shared.ts";
 
-const ErrorEnvelope = Schema.Struct({
+const ErrorEnvelopeSchema = Schema.Struct({
   ok: Schema.Literal(false),
   error: RuntimeError,
 });
-type ErrorEnvelope = typeof ErrorEnvelope.Type;
+type EncodedErrorEnvelope = Schema.Codec.Encoded<typeof ErrorEnvelopeSchema>;
 
-const encodeErrorResponse = Schema.encodeSync(ErrorEnvelope);
-const decodeErrorResponse = Schema.decodeUnknownResult(ErrorEnvelope);
+const encodeErrorResponse = Schema.encodeSync(ErrorEnvelopeSchema);
+const decodeErrorResponse = Schema.decodeUnknownResult(ErrorEnvelopeSchema);
 
-export const makeErrorEnvelope = (error: RuntimeError) =>
+export const makeErrorEnvelope = (error: RuntimeError): EncodedErrorEnvelope =>
   encodeErrorResponse({ ok: false, error });
 
 export const makeErrorResponse = (
@@ -25,7 +25,7 @@ export const makeErrorResponse = (
 
 export const decodeResponse = async <T>(response: Response) => {
   const text = await response.text().catch(() => "");
-  let json: { ok: true; result: T } | ErrorEnvelope;
+  let json: { ok: true; result: T } | EncodedErrorEnvelope;
   try {
     json = JSON.parse(text);
   } catch {

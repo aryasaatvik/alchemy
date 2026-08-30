@@ -200,7 +200,27 @@ export const GetVersion = HttpApiEndpoint.get("getVersion", "/version", {
   success: VersionResponse,
 });
 
-export class StateGroup extends HttpApiGroup.make("state")
+type StateEndpoints =
+  | typeof ListStacks
+  | typeof ListStages
+  | typeof ListResources
+  | typeof GetState
+  | typeof SetState
+  | typeof DeleteState
+  | typeof GetReplacedResources
+  | typeof DeleteStack
+  | typeof GetStackOutput
+  | typeof SetStackOutput;
+
+type StateEndpointsWithAuth = HttpApiEndpoint.AddMiddleware<
+  StateEndpoints,
+  StateAuth
+>;
+
+const StateGroupBase: HttpApiGroup.HttpApiGroup<
+  "state",
+  StateEndpointsWithAuth
+> = HttpApiGroup.make("state")
   .add(ListStacks)
   .add(ListStages)
   .add(ListResources)
@@ -211,7 +231,9 @@ export class StateGroup extends HttpApiGroup.make("state")
   .add(DeleteStack)
   .add(GetStackOutput)
   .add(SetStackOutput)
-  .middleware(StateAuth) {}
+  .middleware(StateAuth);
+
+export class StateGroup extends StateGroupBase {}
 
 export class VersionGroup extends HttpApiGroup.make("version").add(
   GetVersion,

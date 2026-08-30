@@ -43,6 +43,12 @@ export interface PlatformProps {
   isExternal?: boolean;
 }
 
+/** Synthetic Config nodes such as an absent `Config.option` have nothing to bind. */
+const isBindableRuntimeConfigNode = (
+  path: ReadonlyArray<unknown>,
+  value: unknown,
+): boolean => path.length > 0 && value !== undefined;
+
 /**
  * Provide the platform class's layer (`cls.make(props, impl)`) with a
  * lifetime that matches the phase.
@@ -196,7 +202,7 @@ export interface Platform<
       const Id extends string,
       Shape extends MainShape,
       PropsReq = never,
-      InitReq extends Services | PlatformServices | Resource = never,
+      InitReq = never,
     >(
       id: Id,
       props:
@@ -224,10 +230,7 @@ export interface Platform<
       id: Id,
     ): Effect.Effect<Resource & Rpc<Self>, never, Resource["Providers"]> &
       Named<Id> & {
-        make<
-          PropsReq = never,
-          InitReq extends Services | PlatformServices | Resource = never,
-        >(
+        make<PropsReq = never, InitReq = never>(
           props:
             | InputProps<InlineProps>
             | Effect.Effect<
@@ -245,7 +248,7 @@ export interface Platform<
         new (_: never): BaseShape & Named<Id> & Tag<Resource["Type"]>;
       };
   };
-  <PropsReq = never, InitReq extends Services | PlatformServices = never>(
+  <PropsReq = never, InitReq = never>(
     id: string,
     props:
       | InputProps<Resource["Props"]>
@@ -261,7 +264,7 @@ export interface Platform<
     const Id extends string,
     Shape extends MainShape,
     PropsReq = never,
-    InitReq extends Services | PlatformServices = never,
+    InitReq = never,
   >(
     id: Id,
     props:
@@ -569,14 +572,22 @@ export const Platform = <
                             path.map((p) => p.toString()).join("_"),
                           );
                           const node = yield* configProvider.load(path);
-                          if (phase === "plan" && node) {
+                          if (
+                            phase === "plan" &&
+                            node &&
+                            isBindableRuntimeConfigNode(path, node.value)
+                          ) {
                             // bind it to the RuntimeContext if running in plan phase
                             const output = Output.literal(
                               Redacted.make(node.value),
                             );
                             yield* ctx?.set(key, output) ?? Effect.void;
                             return node;
-                          } else if (phase === "runtime" && ctx) {
+                          } else if (
+                            phase === "runtime" &&
+                            ctx &&
+                            key.length > 0
+                          ) {
                             // retrieve from the RuntimeContext if running in runtime phase
                             const value =
                               yield* ctx.get<Redacted.Redacted<string>>(key);

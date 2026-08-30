@@ -14,6 +14,7 @@ import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { Stack } from "../../Stack.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { detachQueueConsumersOfScript } from "./Consumer.ts";
 import {
   generateLocalId,
@@ -485,6 +486,9 @@ export const ProviderLocal = () =>
 
 export const QueueProvider = () =>
   ProviderLayer.dual(Queue, {
-    local: () => ProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+    local: () =>
+      provideLocalEnvironment(
+        ProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      ),
     live: () => ProviderLive(),
   });

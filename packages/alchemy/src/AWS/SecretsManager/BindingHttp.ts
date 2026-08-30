@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Binding from "../../Binding.ts";
 import { isBindingHost } from "../Lambda/Function.ts";
-import type { Secret } from "./Secret.ts";
+import type { Secret, SecretReference } from "./Secret.ts";
 
 /**
  * Shared scaffolding for the AWS Secrets Manager HTTP bindings.
@@ -34,8 +34,10 @@ export const makeSecretHttpBinding = <
   Effect.gen(function* () {
     const op = yield* options.operation;
 
-    return Effect.fn(function* (secret: Secret) {
-      const SecretId = yield* secret.secretArn;
+    return Effect.fn(function* (secret: Secret | SecretReference) {
+      const SecretId = yield* "secretId" in secret
+        ? secret.secretId
+        : secret.secretArn;
       if (!globalThis.__ALCHEMY_RUNTIME__) {
         const host = yield* Binding.Host;
         if (isBindingHost(host)) {

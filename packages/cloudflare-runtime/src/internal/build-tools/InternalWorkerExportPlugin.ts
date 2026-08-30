@@ -5,7 +5,9 @@ import { RolldownMagicString } from "rolldown";
 export const InternalWorkerExportPlugin = (): rolldown.Plugin => {
   const getChunks = (bundle: rolldown.OutputBundle) => {
     const chunks = new Map<string, rolldown.OutputChunk>();
-    for (const [fileName, output] of Object.entries(bundle)) {
+    for (const [fileName, output] of Object.entries(bundle).sort(
+      ([left], [right]) => left.localeCompare(right),
+    )) {
       if (output.type === "chunk") {
         chunks.set(fileName, output);
       }
@@ -21,7 +23,9 @@ export const InternalWorkerExportPlugin = (): rolldown.Plugin => {
     const seen = new Set<string>();
 
     const visit = (module: rolldown.OutputChunk) => {
-      for (const fileName of module.imports) {
+      for (const fileName of [...module.imports].sort((left, right) =>
+        left.localeCompare(right),
+      )) {
         const imported = chunks.get(fileName);
         if (!imported || seen.has(fileName)) {
           continue;

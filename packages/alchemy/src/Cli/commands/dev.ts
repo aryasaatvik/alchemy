@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { transformTypesFlags } from "../../Util/Node.ts";
 import { SPAWNER_URL_ENV_KEY } from "../../Local/RpcProviderProxy.ts";
 import * as RpcSpawner from "../../Local/RpcSpawner.ts";
-import { envFile, force, profile, script, stage } from "./_shared.ts";
+import { dataDir, envFile, force, profile, script, stage } from "./_shared.ts";
 import { ExecStackOptions } from "./deploy.ts";
 
 /**
@@ -29,6 +29,7 @@ export const devCommand = Command.make(
     force,
     main: script,
     envFile,
+    dataDir,
     stage,
     profile,
   },

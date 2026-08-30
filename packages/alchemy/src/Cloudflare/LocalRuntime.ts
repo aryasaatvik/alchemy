@@ -7,7 +7,7 @@ import * as Path from "effect/Path";
 import { AlchemyContext } from "../AlchemyContext.ts";
 import * as RpcProvider from "../Local/RpcProvider.ts";
 import { LOCAL_ID_PREFIX } from "../ProviderMode.ts";
-import { CloudflareEnvironment } from "./CloudflareEnvironment.ts";
+import { resolveLiveEnvironment } from "./LocalEnvironment.ts";
 import type { Queue } from "./Queues/Queue.ts";
 import type { Consumer } from "./Queues/Consumer.ts";
 
@@ -75,12 +75,13 @@ export const localStorageDirectory = Effect.gen(function* () {
 const makeLocalRuntimeServices = () =>
   RpcProvider.providerServicesEffect(
     Effect.gen(function* () {
-      const getEnv = yield* CloudflareEnvironment;
       return Layer.merge(
         LocalRuntimeStateLive,
         layerRuntime({
           api: {
-            accountId: getEnv.pipe(Effect.map((env) => env.accountId)),
+            accountId: resolveLiveEnvironment.pipe(
+              Effect.map((environment) => environment.accountId),
+            ),
           },
           storage: {
             directory: yield* localStorageDirectory,

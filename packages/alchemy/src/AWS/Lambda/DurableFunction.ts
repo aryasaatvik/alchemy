@@ -1,11 +1,14 @@
 import * as Lambda from "@distilled.cloud/aws/lambda";
+import * as Config from "effect/Config";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Effectable from "effect/Effectable";
 import type * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import type { Scope } from "effect/Scope";
 import type { PackageInstall } from "../../Bundle/InstalledPackages.ts";
 import type { InputProps } from "../../Input.ts";
@@ -138,6 +141,21 @@ export interface DurableStartOptions<Input = unknown> {
   qualifier?: string;
 }
 
+/** Options for a named durable start whose execution identity is required. */
+export interface DurableNamedStartOptions<
+  Input = unknown,
+> extends DurableStartOptions<Input> {
+  name: string;
+}
+
+/** Options for an anonymous durable start. */
+export interface DurableAnonymousStartOptions<Input = unknown> extends Omit<
+  DurableStartOptions<Input>,
+  "name"
+> {
+  name?: never;
+}
+
 /**
  * A started durable execution reference.
  */
@@ -146,6 +164,51 @@ export interface DurableExecutionRef {
   executionArn: string | undefined;
   statusCode: number | undefined;
 }
+
+/** A named durable start whose exact execution identity was resolved. */
+export interface DurableNamedExecutionRef extends DurableExecutionRef {
+  executionArn: string;
+}
+
+/**
+ * Lambda accepted a named durable start but its execution identity did not
+ * become observable within Alchemy's bounded exact-name lookup window.
+ */
+export class DurableExecutionIdentityUnavailable extends Data.TaggedError(
+  "DurableExecutionIdentityUnavailable",
+)<{
+  functionName: string;
+  executionName: string;
+}> {
+  override get message() {
+    return (
+      `Durable execution "${this.executionName}" was accepted by ` +
+      `"${this.functionName}", but its ARN did not become observable.`
+    );
+  }
+}
+
+/** Lambda returned more than one execution for one exact durable name. */
+export class AmbiguousDurableExecutionIdentity extends Data.TaggedError(
+  "AmbiguousDurableExecutionIdentity",
+)<{
+  functionName: string;
+  executionName: string;
+  executionArns: string[];
+}> {
+  override get message() {
+    return (
+      `Durable execution "${this.executionName}" on ` +
+      `"${this.functionName}" resolved to multiple ARNs.`
+    );
+  }
+}
+
+export type DurableStartError =
+  | Lambda.InvokeError
+  | Lambda.ListDurableExecutionsByFunctionError
+  | DurableExecutionIdentityUnavailable
+  | AmbiguousDurableExecutionIdentity;
 
 /**
  * The typed durable-execution handle: start, inspect, stop, and complete
@@ -164,8 +227,14 @@ export interface DurableFunctionHandle<Input = unknown, Result = unknown> {
    * checkpointed re-invocations.
    */
   start(
-    options?: DurableStartOptions<Input>,
+    options: DurableNamedStartOptions<Input>,
+  ): Effect.Effect<DurableNamedExecutionRef, DurableStartError>;
+  start(
+    options?: DurableAnonymousStartOptions<Input>,
   ): Effect.Effect<DurableExecutionRef, Lambda.InvokeError>;
+  start(
+    options: DurableStartOptions<Input>,
+  ): Effect.Effect<DurableExecutionRef, DurableStartError>;
   /** Fetch the execution's status/result. */
   get(
     executionArn: string,
@@ -177,6 +246,8 @@ export interface DurableFunctionHandle<Input = unknown, Result = unknown> {
   list(options?: {
     name?: string;
     statuses?: Lambda.ExecutionStatus[];
+    /** Function version or alias whose durable executions should be listed. */
+    qualifier?: string;
   }): Effect.Effect<
     Lambda.ListDurableExecutionsByFunctionResponse,
     Lambda.ListDurableExecutionsByFunctionError
@@ -370,19 +441,287 @@ const mapDurablePropsInput = (props: unknown) =>
     ? Effect.map(props as Effect.Effect<DurableFunctionProps>, mapDurableProps)
     : mapDurableProps(props as DurableFunctionProps);
 
+const durableSelfManagementActions = {
+  list: ["lambda:ListDurableExecutionsByFunction"],
+  execution: [
+    "lambda:GetDurableExecution",
+    "lambda:StopDurableExecution",
+    "lambda:SendDurableExecutionCallbackSuccess",
+    "lambda:SendDurableExecutionCallbackFailure",
+    "lambda:SendDurableExecutionCallbackHeartbeat",
+  ],
+} as const;
+
+const makeDurableSelfManagementPolicyStatements = (
+  functionArn: string | Output.Output<string>,
+  qualifiedFunctionArn: string | Output.Output<string>,
+) => [
+  {
+    Effect: "Allow" as const,
+    Action: [...durableSelfManagementActions.list],
+    Resource: [functionArn, qualifiedFunctionArn],
+  },
+  {
+    Effect: "Allow" as const,
+    Action: [...durableSelfManagementActions.execution],
+    Resource: [qualifiedFunctionArn],
+  },
+];
+
+const makeDurableListRequest = (
+  functionName: string,
+  options?: {
+    name?: string;
+    statuses?: Lambda.ExecutionStatus[];
+    qualifier?: string;
+  },
+): Lambda.ListDurableExecutionsByFunctionRequest => {
+  const name = options?.name;
+  const qualifier = options?.qualifier;
+
+  // Lambda scopes a DurableExecutionName to the function, not one version.
+  // It rejects the exact-name filter when Qualifier is supplied separately.
+  // Preserve the requested version/alias by embedding it in FunctionName.
+  if (name !== undefined && qualifier !== undefined) {
+    return {
+      FunctionName: `${functionName}:${qualifier}`,
+      DurableExecutionName: name,
+      Statuses: options?.statuses,
+    };
+  }
+
+  return {
+    FunctionName: functionName,
+    DurableExecutionName: name,
+    Statuses: options?.statuses,
+    Qualifier: qualifier,
+  };
+};
+
+const makeDurableHandle = (options: {
+  name: string;
+  host: Function;
+  functionName: Effect.Effect<string>;
+}) =>
+  Effect.gen(function* () {
+    const { name, host, functionName } = options;
+    // Resolve the distilled operations once at init — they close over the
+    // ambient Credentials/Region/HttpClient so the handle's runtime
+    // callables need no cloud services of their own.
+    const invoke = yield* Lambda.invoke;
+    const getDurableExecution = yield* Lambda.getDurableExecution;
+    const listDurableExecutionsByFunction =
+      yield* Lambda.listDurableExecutionsByFunction;
+    const stopDurableExecution = yield* Lambda.stopDurableExecution;
+    const sendCallbackSuccess =
+      yield* Lambda.sendDurableExecutionCallbackSuccess;
+    const sendCallbackFailure =
+      yield* Lambda.sendDurableExecutionCallbackFailure;
+    const sendCallbackHeartbeat =
+      yield* Lambda.sendDurableExecutionCallbackHeartbeat;
+
+    function start(
+      options: DurableNamedStartOptions<any>,
+    ): Effect.Effect<DurableNamedExecutionRef, DurableStartError>;
+    function start(
+      options?: DurableAnonymousStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, Lambda.InvokeError>;
+    function start(
+      options: DurableStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, DurableStartError>;
+    function start(
+      options?: DurableStartOptions<any>,
+    ): Effect.Effect<DurableExecutionRef, DurableStartError> {
+      return Effect.gen(function* () {
+        const resolvedFunctionName = yield* functionName;
+        const response = yield* invoke({
+          FunctionName: resolvedFunctionName,
+          InvocationType: "Event",
+          DurableExecutionName: options?.name,
+          Qualifier: options?.qualifier,
+          Payload: encodeDurableEnvelope(name, options?.params),
+        });
+        const executionRef = {
+          executionArn: response.DurableExecutionArn,
+          statusCode: response.StatusCode,
+        };
+
+        if (
+          executionRef.executionArn !== undefined ||
+          options?.name === undefined
+        ) {
+          return executionRef;
+        }
+
+        const executionName = options.name;
+        const executionArn = yield* listDurableExecutionsByFunction(
+          makeDurableListRequest(resolvedFunctionName, {
+            name: executionName,
+            qualifier: options.qualifier,
+          }),
+        ).pipe(
+          Effect.map((response) => {
+            const executionArns = [
+              ...new Set(
+                (response.DurableExecutions ?? [])
+                  .filter(
+                    (execution) =>
+                      execution.DurableExecutionName === executionName,
+                  )
+                  .map((execution) => execution.DurableExecutionArn),
+              ),
+            ];
+            if (executionArns.length > 1) {
+              return Effect.fail(
+                new AmbiguousDurableExecutionIdentity({
+                  functionName: resolvedFunctionName,
+                  executionName,
+                  executionArns,
+                }),
+              );
+            }
+            return Effect.succeed(Option.fromNullishOr(executionArns[0]));
+          }),
+          Effect.flatten,
+          Effect.repeat({
+            schedule: Schedule.spaced("100 millis"),
+            until: Option.isSome,
+            times: 2,
+          }),
+          Effect.flatMap(
+            Option.match({
+              onNone: () =>
+                Effect.fail(
+                  new DurableExecutionIdentityUnavailable({
+                    functionName: resolvedFunctionName,
+                    executionName,
+                  }),
+                ),
+              onSome: Effect.succeed,
+            }),
+          ),
+        );
+
+        return {
+          executionArn,
+          statusCode: response.StatusCode,
+        };
+      });
+    }
+
+    const handle: DurableFunctionHandle<any, any> = {
+      Type: TypeId,
+      name,
+      start,
+      get: (executionArn) =>
+        getDurableExecution({ DurableExecutionArn: executionArn }),
+      list: (options) =>
+        Effect.gen(function* () {
+          const resolvedFunctionName = yield* functionName;
+          return yield* listDurableExecutionsByFunction(
+            makeDurableListRequest(resolvedFunctionName, options),
+          );
+        }),
+      stop: (executionArn, error) =>
+        stopDurableExecution({
+          DurableExecutionArn: executionArn,
+          Error: error,
+        }),
+      sendCallbackSuccess: (callbackId, result) =>
+        sendCallbackSuccess({
+          CallbackId: callbackId,
+          Result: result === undefined ? undefined : JSON.stringify(result),
+        }).pipe(Effect.asVoid),
+      sendCallbackFailure: (callbackId, error) =>
+        sendCallbackFailure({
+          CallbackId: callbackId,
+          Error: error,
+        }).pipe(Effect.asVoid),
+      sendCallbackHeartbeat: (callbackId) =>
+        sendCallbackHeartbeat({ CallbackId: callbackId }).pipe(Effect.asVoid),
+    };
+
+    return {
+      ...handle,
+      function: host,
+      functionName: host.functionName,
+      functionArn: host.functionArn,
+    } satisfies DurableFunction<any, any>;
+  });
+
+const bindDurableReference = (
+  caller: Function,
+  target: Function,
+  name: string,
+) =>
+  globalThis.__ALCHEMY_RUNTIME__
+    ? Effect.void
+    : caller.bind`Allow(${caller}, AWS.Lambda.DurableFunction.Reference(${name}))`(
+        {
+          policyStatements: [
+            {
+              Effect: "Allow",
+              Action: ["lambda:InvokeFunction"],
+              Resource: [
+                target.functionArn,
+                Output.interpolate`${target.functionArn}:*`,
+              ],
+            },
+            ...makeDurableSelfManagementPolicyStatements(
+              target.functionArn,
+              Output.interpolate`${target.functionArn}:*`,
+            ),
+          ],
+        },
+      );
+
+/**
+ * Build a management-plane handle for a Durable Function owned by another
+ * Lambda. Unlike the function's self handle, this binds the target's deployed
+ * physical name into the ambient caller Function.
+ */
+export const reference = <Input = unknown, Result = unknown>(
+  durable: DurableFunction<Input, Result>,
+) =>
+  Effect.gen(function* () {
+    const caller = yield* Function;
+    yield* bindDurableReference(caller, durable.function, durable.name);
+    const functionName = yield* durable.functionName;
+    return yield* makeDurableHandle({
+      name: durable.name,
+      host: durable.function,
+      functionName,
+    });
+  });
+
 const resolveDurableHandle = (id: string) => (instance: unknown) => {
   const handle = (instance as Record<symbol, unknown> | undefined)?.[
     DurableHandleKey
   ];
-  return handle !== undefined
-    ? Effect.succeed(handle as DurableFunction<any, any>)
-    : Effect.die(
-        new Error(
-          `AWS.Lambda.DurableFunction<${id}> has no durable handle — provide ` +
-            `its implementation (\`${id}.make(props, impl)\` or an inline ` +
-            `form) before yielding it.`,
-        ),
-      );
+  if (handle !== undefined) {
+    return Effect.succeed(handle as DurableFunction<any, any>);
+  }
+  if (instance !== undefined) {
+    // A nested DurableFunction is a reference when another platform is
+    // booting at runtime. Its handler init must not run in the parent, but
+    // callers still need the management-plane handle backed by its resource.
+    const host = instance as Function;
+    return Effect.gen(function* () {
+      const caller = yield* Function;
+      yield* bindDurableReference(caller, host, id);
+      // A nested handle crosses a Lambda boundary, so bind the child's
+      // deployed name into the parent while its init graph is being built.
+      const functionName = yield* host.functionName;
+      return yield* makeDurableHandle({ name: id, host, functionName });
+    });
+  }
+  return Effect.die(
+    new Error(
+      `AWS.Lambda.DurableFunction<${id}> has no durable handle — provide ` +
+        `its implementation (\`${id}.make(props, impl)\` or an inline ` +
+        `form) before yielding it.`,
+    ),
+  );
 };
 
 /**
@@ -400,30 +739,6 @@ const composeDurableImpl = (
     // Self: the Function resource this wrapper owns (the Platform machinery
     // provides `Function.Self` during its own init).
     const host = yield* Function;
-
-    // Resolve the distilled operations once at init — they close over the
-    // ambient Credentials/Region/HttpClient so the handle's runtime
-    // callables need no cloud services of their own.
-    const invoke = yield* Lambda.invoke;
-    const getDurableExecution = yield* Lambda.getDurableExecution;
-    const listDurableExecutionsByFunction =
-      yield* Lambda.listDurableExecutionsByFunction;
-    const stopDurableExecution = yield* Lambda.stopDurableExecution;
-    const sendCallbackSuccess =
-      yield* Lambda.sendDurableExecutionCallbackSuccess;
-    const sendCallbackFailure =
-      yield* Lambda.sendDurableExecutionCallbackFailure;
-    const sendCallbackHeartbeat =
-      yield* Lambda.sendDurableExecutionCallbackHeartbeat;
-
-    // Capture the function-name Output WITHOUT resolving it. This is a
-    // self-reference — `host` is the very Function this wrapper's init is
-    // building — and `functionName`'s Output source only registers during
-    // that function's own reconcile. Yielding it here (init/plan time) would
-    // block forever (the reconcile that produces it waits on this init to
-    // finish). Resolve it lazily inside the runtime callables instead, the
-    // same posture as `InvokeFunctionHttp`.
-    const FunctionName = host.functionName;
 
     if (!globalThis.__ALCHEMY_RUNTIME__) {
       // Self-binding: the statements land on this function's own execution
@@ -453,76 +768,30 @@ const composeDurableImpl = (
               Output.interpolate`${host.functionArn}:*`,
             ],
           },
-          // Management-plane handle methods. Durable execution ARNs are
-          // a distinct resource shape from the function ARN, so these
-          // stay account-wide for now.
-          {
-            Effect: "Allow",
-            Action: [
-              "lambda:GetDurableExecution",
-              "lambda:GetDurableExecutionHistory",
-              "lambda:ListDurableExecutionsByFunction",
-              "lambda:StopDurableExecution",
-              "lambda:SendDurableExecutionCallbackSuccess",
-              "lambda:SendDurableExecutionCallbackFailure",
-              "lambda:SendDurableExecutionCallbackHeartbeat",
-            ],
-            Resource: ["*"],
-          },
+          // Listing is authorized against the function and its qualified
+          // version/alias ARNs. Execution management and the callback methods
+          // exposed by DurableFunctionHandle are scoped to executions
+          // belonging to this function. History remains ungranted because the
+          // handle does not expose it.
+          ...makeDurableSelfManagementPolicyStatements(
+            host.functionArn,
+            Output.interpolate`${host.functionArn}:*`,
+          ),
         ],
       });
     }
 
-    const handle: DurableFunctionHandle<any, any> = {
-      Type: TypeId,
+    // Lambda already supplies its own physical name at runtime. Reading that
+    // standard environment value keeps the self-handle out of the Function's
+    // deploy-time props; binding host.functionName here would make the
+    // Function depend on its own output and deadlock plan resolution.
+    const handle = yield* makeDurableHandle({
       name,
-      start: (options) =>
-        Effect.gen(function* () {
-          // `FunctionName` is the host's own unresolved Output (captured raw at
-          // init to avoid the plan-time self-reference deadlock). Resolve both
-          // stages — Output → Accessor → string — lazily at runtime.
-          const functionName = yield* yield* FunctionName;
-          const response = yield* invoke({
-            FunctionName: functionName,
-            InvocationType: "Event",
-            DurableExecutionName: options?.name,
-            Qualifier: options?.qualifier,
-            Payload: encodeDurableEnvelope(name, options?.params),
-          });
-          return {
-            executionArn: response.DurableExecutionArn,
-            statusCode: response.StatusCode,
-          };
-        }),
-      get: (executionArn) =>
-        getDurableExecution({ DurableExecutionArn: executionArn }),
-      list: (options) =>
-        Effect.gen(function* () {
-          const functionName = yield* yield* FunctionName;
-          return yield* listDurableExecutionsByFunction({
-            FunctionName: functionName,
-            DurableExecutionName: options?.name,
-            Statuses: options?.statuses,
-          });
-        }),
-      stop: (executionArn, error) =>
-        stopDurableExecution({
-          DurableExecutionArn: executionArn,
-          Error: error,
-        }),
-      sendCallbackSuccess: (callbackId, result) =>
-        sendCallbackSuccess({
-          CallbackId: callbackId,
-          Result: result === undefined ? undefined : JSON.stringify(result),
-        }).pipe(Effect.asVoid),
-      sendCallbackFailure: (callbackId, error) =>
-        sendCallbackFailure({
-          CallbackId: callbackId,
-          Error: error,
-        }).pipe(Effect.asVoid),
-      sendCallbackHeartbeat: (callbackId) =>
-        sendCallbackHeartbeat({ CallbackId: callbackId }).pipe(Effect.asVoid),
-    };
+      host,
+      functionName: Config.string("AWS_LAMBDA_FUNCTION_NAME").pipe(
+        Effect.orDie,
+      ),
+    });
 
     // Resolve the body function. Bindings resolved in the impl's init close
     // over their services; the returned closure's only leftover requirements
@@ -540,12 +809,7 @@ const composeDurableImpl = (
 
     // Expose the full DurableFunction value (handle + resource refs) to
     // `yield* MyDurableFunction` for every authoring form.
-    (host as unknown as Record<symbol, unknown>)[DurableHandleKey] = {
-      ...handle,
-      function: host,
-      functionName: host.functionName,
-      functionArn: host.functionArn,
-    } satisfies DurableFunction<any, any>;
+    (host as unknown as Record<symbol, unknown>)[DurableHandleKey] = handle;
   });
 
 /**

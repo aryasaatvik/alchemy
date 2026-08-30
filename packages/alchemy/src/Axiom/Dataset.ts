@@ -169,41 +169,45 @@ export const DatasetProvider = () =>
   Provider.effect(
     Dataset,
     Effect.gen(function* () {
-      const { apiBaseUrl } = yield* yield* Credentials;
+      const credentials = yield* Credentials;
       const create = yield* Axiom.createDataset;
       const update = yield* Axiom.updateDataset;
       const get = yield* Axiom.getDataset;
       const listDatasets = yield* Axiom.getDatasets;
       const del = yield* Axiom.deleteDataset;
 
-      const toAttrs = Effect.fn(function* (dataset: Axiom.Dataset) {
-        if (!dataset.edgeDeployment || !dataset.edgeDeploymentUrl) {
-          return yield* Effect.fail(
-            new Error(
-              `Axiom dataset "${dataset.name}" is missing its edge deployment metadata`,
-            ),
-          );
-        }
-        const apiRoot = apiBaseUrl.replace(/\/$/, "");
-        const otelRoot = dataset.edgeDeploymentUrl.replace(/\/$/, "");
-        return {
-          id: dataset.id,
-          name: dataset.name,
-          kind: dataset.kind,
-          description: stripMarker(dataset.description),
-          created: dataset.created,
-          edgeDeployment: dataset.edgeDeployment,
-          edgeDeploymentUrl: dataset.edgeDeploymentUrl,
-          apiBaseUrl: apiRoot,
-          otelEndpoint: otelRoot,
-          otelTracesEndpoint: `${otelRoot}/v1/traces`,
-          otelLogsEndpoint: `${otelRoot}/v1/logs`,
-          otelMetricsEndpoint: `${otelRoot}/v1/metrics`,
-          otelHeaders: {
-            "X-Axiom-Dataset": dataset.name,
-          } as Record<string, string>,
-        };
-      });
+      const resolveAttributes = credentials.pipe(
+        Effect.map(({ apiBaseUrl }) =>
+          Effect.fn(function* (dataset: Axiom.Dataset) {
+            if (!dataset.edgeDeployment || !dataset.edgeDeploymentUrl) {
+              return yield* Effect.fail(
+                new Error(
+                  `Axiom dataset "${dataset.name}" is missing its edge deployment metadata`,
+                ),
+              );
+            }
+            const apiRoot = apiBaseUrl.replace(/\/$/, "");
+            const otelRoot = dataset.edgeDeploymentUrl.replace(/\/$/, "");
+            return {
+              id: dataset.id,
+              name: dataset.name,
+              kind: dataset.kind,
+              description: stripMarker(dataset.description),
+              created: dataset.created,
+              edgeDeployment: dataset.edgeDeployment,
+              edgeDeploymentUrl: dataset.edgeDeploymentUrl,
+              apiBaseUrl: apiRoot,
+              otelEndpoint: otelRoot,
+              otelTracesEndpoint: `${otelRoot}/v1/traces`,
+              otelLogsEndpoint: `${otelRoot}/v1/logs`,
+              otelMetricsEndpoint: `${otelRoot}/v1/metrics`,
+              otelHeaders: {
+                "X-Axiom-Dataset": dataset.name,
+              } as Record<string, string>,
+            };
+          }),
+        ),
+      );
 
       return {
         stables: ["id", "name", "kind", "edgeDeployment", "edgeDeploymentUrl"],
@@ -214,6 +218,7 @@ export const DatasetProvider = () =>
         list: () =>
           Effect.gen(function* () {
             const datasets = yield* listDatasets({});
+            const toAttrs = yield* resolveAttributes;
             return yield* Effect.forEach(datasets, toAttrs);
           }),
         diff: Effect.fn(function* ({ olds, news, output }) {
@@ -288,6 +293,7 @@ export const DatasetProvider = () =>
                   }),
               ),
             );
+            const toAttrs = yield* resolveAttributes;
             return yield* toAttrs(current);
           }
 
@@ -303,6 +309,7 @@ export const DatasetProvider = () =>
             current.retentionDays !== news.retentionDays ||
             current.useRetentionPeriod !== news.useRetentionPeriod;
           if (!needsSync) {
+            const toAttrs = yield* resolveAttributes;
             return yield* toAttrs(current);
           }
           const updated = yield* update({
@@ -311,6 +318,7 @@ export const DatasetProvider = () =>
             retentionDays: news.retentionDays,
             useRetentionPeriod: news.useRetentionPeriod,
           });
+          const toAttrs = yield* resolveAttributes;
           return yield* toAttrs(updated);
         }),
         delete: Effect.fn(function* ({ output }) {
@@ -333,6 +341,7 @@ export const DatasetProvider = () =>
             ownership.stack === stack.name &&
             ownership.stage === stage &&
             ownership.id === id;
+          const toAttrs = yield* resolveAttributes;
           const attrs = yield* toAttrs(existing);
           return isOurs ? attrs : Unowned(attrs);
         }),

@@ -1,4 +1,5 @@
 import cloudflare, {
+  getViteFrameworkContribution,
   type CloudflareVitePluginOptions,
 } from "@alchemy.run/cloudflare-runtime/vite";
 import * as ConsoleService from "effect/Console";
@@ -17,6 +18,7 @@ import { viteSupportsPortZero } from "@alchemy.run/cloudflare-runtime/core/inter
 import { hashDirectory, type MemoOptions } from "../../../Command/Memo.ts";
 import { findAvailablePort, initialCwd } from "../../../Util/Node.ts";
 import { sha256Object } from "../../../Util/sha256.ts";
+import { withVitePluginOptions } from "../../VitePlugin/index.ts";
 import { readAssets } from "../Assets.ts";
 import type { SourceDevHandle, SourceProvider } from "../Source.ts";
 import { runViteBuildChild } from "../ViteChild.ts";
@@ -189,6 +191,7 @@ export const viteBuild = (
         base: result.base,
         serverBundle: Effect.succeed(result.serverBundle),
         externalWorkspaces: Effect.succeed(new Set(result.externalWorkspaces)),
+        framework: result.framework,
       } satisfies ViteBuildOutput;
     }),
   );
@@ -210,30 +213,43 @@ export const viteBuildInProcess = (
     });
     const console = yield* ConsoleService.Console;
     yield* Effect.promise(async () => {
+      const previousInjected = process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED];
       process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED] = "1";
-      const vite = await loadVite(rootDir);
-      const builder = await vite.createBuilder(
-        {
-          root: rootDir,
-          define: getDefine(env),
-          plugins: [cloudflare(pluginOptions), outputPlugin.plugin],
-          customLogger: makeViteLogger(console),
-          // Disables the NATIVE rolldown progress reporter ("transforming…",
-          // "rendering chunks…", "computing gzip size…"): it prints from
-          // Rust straight to fd 1 and cannot be intercepted from JS — vite
-          // only enables it when logLevel >= info. Info-level build
-          // summaries are suppressed with it; warnings and errors still
-          // reach the customLogger above.
-          logLevel: "warn",
-        },
-        // This is the `useLegacyBuilder` option. The Vite CLI implementation uses `null` here.
-        // Originally we used `undefined` here, but this caused the static site build to fail.
-        // https://github.com/vitejs/vite/blob/a07a4bd052ac75f916391c999c408ad5f2867e61/packages/vite/src/node/cli.ts#L367
-        null,
-      );
-      await builder.buildApp();
+      await withVitePluginOptions(pluginOptions, async () => {
+        const vite = await loadVite(rootDir);
+        const builder = await (async () => {
+          try {
+            return await vite.createBuilder(
+              {
+                root: rootDir,
+                define: getDefine(env),
+                plugins: [cloudflare(pluginOptions), outputPlugin.plugin],
+                customLogger: makeViteLogger(console),
+                // The native reporter writes directly to stdout and cannot be
+                // captured by the Effect Console used by the test runner.
+                logLevel: "warn",
+              },
+              null,
+            );
+          } finally {
+            if (previousInjected === undefined) {
+              delete process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED];
+            } else {
+              process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED] = previousInjected;
+            }
+          }
+        })();
+        await builder.buildApp();
+      });
     });
-    return yield* outputPlugin.output;
+    const contribution = getViteFrameworkContribution(pluginOptions);
+    return {
+      ...(yield* outputPlugin.output),
+      framework:
+        contribution.durableObjects && contribution.durableObjects.length > 0
+          ? { durableObjects: contribution.durableObjects }
+          : undefined,
+    } satisfies ViteBuildOutput;
   });
 
 // Emulate `vite build` env semantics for `props.env`: only
@@ -380,7 +396,7 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
   build: Effect.fn(function* (ctx) {
     const path = yield* Path.Path;
     const env = yield* resolveViteEnv(ctx.env ?? {});
-    const { clientDirectory, serverBundle, externalWorkspaces } =
+    const { clientDirectory, serverBundle, externalWorkspaces, framework } =
       yield* viteBuild(vite.rootDir, env, {
         main: vite.main,
         compatibilityDate: ctx.compatibility.date,
@@ -422,6 +438,7 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
         input: input.hash,
         additionalWorkspaces: input.workspaces,
       },
+      framework,
     };
   }),
   hash: Effect.fn(function* (_ctx, previous) {

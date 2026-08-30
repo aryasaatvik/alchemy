@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 
-import { Box, Text } from "ink";
+import { Box, Static, Text, useStdout } from "ink";
 import type { CRUD, Plan, ActionApply, ActionDelete } from "../../../Plan.ts";
 
 import type {
@@ -15,8 +15,6 @@ import {
   type FlattenedItem,
   type ActionVerb,
 } from "../../NamespaceTree.ts";
-import { formatModeNote } from "../../ModeTag.ts";
-import type { ProviderMode } from "../../../ProviderMode.ts";
 
 interface ProgressEventSource {
   subscribe(listener: (event: ApplyEvent) => void): () => void;
@@ -33,6 +31,18 @@ interface PlanTask extends Required<
 interface PlanProgressProps {
   source: ProgressEventSource;
   plan: Plan;
+}
+
+interface CompletedTask {
+  key: string;
+  row: WorkProgressRow;
+  task: PlanTask;
+}
+
+interface ProgressState {
+  tasks: Map<string, PlanTask>;
+  completed: CompletedTask[];
+  completedKeys: Set<string>;
 }
 
 type PlanItem = CRUD | NonNullable<Plan["deletions"][string]>;
@@ -54,10 +64,6 @@ export type ProgressRow =
       action: CRUD["action"];
       /** For `noop` resources, persisted state status to show instead of `pending`. */
       persistedApplyStatus?: "created" | "updated";
-      /** Resolved provider mode; `undefined` for mode-agnostic providers. */
-      providerMode?: ProviderMode;
-      /** On mode-switch replacements, the old generation's stamped mode. */
-      fromProviderMode?: ProviderMode;
     }
   | {
       key: string;
@@ -71,6 +77,7 @@ export type ProgressRow =
 const getTaskKey = (item: FlattenedItem) => item.path.join("/");
 
 type ResourceProgressRow = Extract<ProgressRow, { type: "resource" }>;
+type WorkProgressRow = Extract<ProgressRow, { type: "resource" | "task" }>;
 
 export const buildProgressRows = (plan: Plan): ProgressRow[] => {
   const items = [
@@ -114,8 +121,6 @@ export const buildProgressRows = (plan: Plan): ProgressRow[] => {
         depth: item.depth,
         resourceType: item.resourceType ?? "unknown",
         action: item.action as CRUD["action"],
-        providerMode: item.providerMode,
-        fromProviderMode: item.fromProviderMode,
         persistedApplyStatus:
           item.action === "noop"
             ? (() => {
@@ -196,13 +201,24 @@ const buildInitialTasks = (rows: ProgressRow[]) =>
     ),
   );
 
+const buildInitialState = (rows: ProgressRow[]): ProgressState => ({
+  tasks: buildInitialTasks(rows),
+  completed: [],
+  completedKeys: new Set(),
+});
+
 export function PlanProgress(props: PlanProgressProps): JSX.Element {
   const { source, plan } = props;
   const spinner = useGlobalSpinner();
+  const viewportRows = useViewportRows();
   const rows = useMemo(() => buildProgressRows(plan), [plan]);
   const logicalIdIndex = useMemo(() => buildLogicalIdIndex(rows), [rows]);
-  const [tasks, setTasks] = useState<Map<string, PlanTask>>(() =>
-    buildInitialTasks(rows),
+  const rowsByKey = useMemo(
+    () => new Map(rows.map((row) => [row.key, row])),
+    [rows],
+  );
+  const [progress, setProgress] = useState<ProgressState>(() =>
+    buildInitialState(rows),
   );
 
   const unsubscribeRef = useRef<null | (() => void)>(null);
@@ -210,29 +226,44 @@ export function PlanProgress(props: PlanProgressProps): JSX.Element {
   useEffect(() => {
     unsubscribeRef.current?.();
     unsubscribeRef.current = source.subscribe((event) => {
-      setTasks((prev) => {
-        const next = new Map(prev);
+      setProgress((prev) => {
+        const tasks = new Map(prev.tasks);
+        const completed = [...prev.completed];
+        const completedKeys = new Set(prev.completedKeys);
         const keys = logicalIdIndex.get(event.id) ?? [];
 
         if (event.kind === "status-change") {
           if (!event.bindingId) {
             for (const key of keys) {
-              const current = next.get(key);
-              next.set(key, {
+              const current = tasks.get(key);
+              const task = {
                 key,
                 id: event.id,
                 type: event.type,
                 status: event.status,
                 message: event.message ?? current?.message,
                 updatedAt: Date.now(),
-              });
+              } satisfies PlanTask;
+              tasks.set(key, task);
+
+              const row = rowsByKey.get(key);
+              if (
+                isTerminal(event.status) &&
+                row !== undefined &&
+                row.type !== "namespace" &&
+                row.action !== "noop" &&
+                !completedKeys.has(key)
+              ) {
+                completedKeys.add(key);
+                completed.push({ key, row, task });
+              }
             }
           }
         } else {
           for (const key of keys) {
-            const current = next.get(key);
+            const current = tasks.get(key);
             if (!current) continue;
-            next.set(key, {
+            tasks.set(key, {
               ...current,
               message: event.message,
               updatedAt: Date.now(),
@@ -240,115 +271,186 @@ export function PlanProgress(props: PlanProgressProps): JSX.Element {
           }
         }
 
-        return next;
+        return { tasks, completed, completedKeys };
       });
     });
     return () => {
       unsubscribeRef.current?.();
       unsubscribeRef.current = null;
     };
-  }, [logicalIdIndex, source]);
+  }, [logicalIdIndex, rowsByKey, source]);
 
   useEffect(() => {
-    setTasks(buildInitialTasks(rows));
+    setProgress(buildInitialState(rows));
   }, [rows]);
+
+  const workRows = rows.filter(
+    (row): row is WorkProgressRow =>
+      row.type !== "namespace" && row.action !== "noop",
+  );
+  const activeRows = workRows
+    .filter((row) => {
+      const status = progress.tasks.get(row.key)?.status ?? "pending";
+      return status !== "pending" && !isTerminal(status);
+    })
+    .sort(
+      (a, b) =>
+        (progress.tasks.get(b.key)?.updatedAt ?? 0) -
+        (progress.tasks.get(a.key)?.updatedAt ?? 0),
+    );
+  const pendingCount = workRows.filter(
+    (row) => (progress.tasks.get(row.key)?.status ?? "pending") === "pending",
+  ).length;
+  const failedCount = progress.completed.filter(
+    ({ task }) => task.status === "fail",
+  ).length;
+  const completedCount = progress.completed.length;
+  const liveWindow = getLiveProgressWindow(viewportRows, activeRows.length);
+  const visibleActiveRows = activeRows.slice(0, liveWindow.visibleActiveCount);
 
   return (
     <Box flexDirection="column">
-      {rows.map((row) => {
-        const indent = "  ".repeat(row.depth);
-
-        if (row.type === "namespace") {
-          return (
-            <Box key={row.key} flexDirection="row">
-              <Text>{indent}</Text>
-              <Box width={2}>
-                <Text color="blueBright">↳ </Text>
-              </Box>
-              <Text color="blueBright">{row.id}</Text>
-            </Box>
-          );
-        }
-
-        if (row.type === "task") {
-          const t = tasks.get(row.key);
-          const status: ApplyStatus =
-            t?.status ?? (row.action === "noop" ? "ran" : "pending");
-          const color = statusColor(status);
-          const icon = taskIcon(row.action, status, spinner);
-          const label =
-            row.action === "delete"
-              ? status === "deleted" || status === "retained"
-                ? status
-                : "drop"
-              : status === "ran"
-                ? row.action === "noop"
-                  ? "skip"
-                  : "ran"
-                : status === "running"
-                  ? "running"
-                  : status === "fail"
-                    ? "fail"
-                    : row.action === "noop"
-                      ? "skip"
-                      : "run";
-
-          return (
-            <Box key={row.key} flexDirection="column">
-              <Box flexDirection="row">
-                <Text>{indent}</Text>
-                <Box width={2}>
-                  <Text color={color}>{icon} </Text>
-                </Box>
-                <Text bold>{row.id}</Text>
-                <Text dimColor> ({row.actionType})</Text>
-                <Text color={color}> {label}</Text>
-                <Text color="cyan" dimColor>
-                  {" "}
-                  [action]
-                </Text>
-              </Box>
-              {t?.message ? (
-                <Box paddingLeft={row.depth * 2 + 2}>
-                  <Text dimColor>• {t.message}</Text>
-                </Box>
-              ) : null}
-            </Box>
-          );
-        }
-
-        const task = tasks.get(row.key) ?? toPlanTask(row);
-        const displayStatus = getDisplayStatus(row, task.status);
-        const color = statusColor(displayStatus);
-        const icon = statusIcon(task.status, spinner);
-        const modeNote = formatModeNote({
-          mode: row.providerMode,
-          priorMode: row.fromProviderMode,
-          defaultMode: plan.defaultMode,
-        });
-
-        return (
-          <Box key={row.key} flexDirection="column">
-            <Box flexDirection="row">
-              <Text>{indent}</Text>
-              <Box width={2}>
-                <Text color={color}>{icon} </Text>
-              </Box>
-              <Text bold>{task.id}</Text>
-              <Text dimColor> ({task.type})</Text>
-              {modeNote ? <Text dimColor> ({modeNote})</Text> : null}
-              <Text color={color}> {displayStatus}</Text>
-            </Box>
-            {task.message ? (
-              <Box paddingLeft={row.depth * 2 + 2}>
-                <Text dimColor>• {task.message}</Text>
-              </Box>
-            ) : null}
-          </Box>
-        );
-      })}
+      <Static items={progress.completed}>
+        {({ key, row, task }) => (
+          <ProgressItem key={key} row={row} task={task} spinner={spinner} />
+        )}
+      </Static>
+      <Box flexDirection="column" height={liveWindow.height} overflowY="hidden">
+        <ProgressSummary
+          activeCount={activeRows.length}
+          completedCount={completedCount}
+          failedCount={failedCount}
+          pendingCount={pendingCount}
+          spinner={spinner}
+          totalCount={workRows.length}
+        />
+        {visibleActiveRows.map((row) => (
+          <ProgressItem
+            key={row.key}
+            row={row}
+            task={progress.tasks.get(row.key) ?? toInitialTask(row)}
+            spinner={spinner}
+            truncate
+          />
+        ))}
+        {liveWindow.hiddenActiveCount > 0 ? (
+          <Text dimColor>… {liveWindow.hiddenActiveCount} more active</Text>
+        ) : null}
+      </Box>
     </Box>
   );
+}
+
+function ProgressSummary(props: {
+  activeCount: number;
+  completedCount: number;
+  failedCount: number;
+  pendingCount: number;
+  spinner: string;
+  totalCount: number;
+}): JSX.Element {
+  const done = props.completedCount >= props.totalCount;
+  const icon = done ? (props.failedCount > 0 ? "✗" : "✓") : props.spinner;
+  return (
+    <Text color={props.failedCount > 0 ? "redBright" : undefined}>
+      {icon} Apply {props.completedCount}/{props.totalCount}
+      {props.activeCount > 0 ? ` · ${props.activeCount} active` : ""}
+      {props.pendingCount > 0 ? ` · ${props.pendingCount} pending` : ""}
+      {props.failedCount > 0 ? ` · ${props.failedCount} failed` : ""}
+    </Text>
+  );
+}
+
+function ProgressItem(props: {
+  row: WorkProgressRow;
+  task: PlanTask;
+  spinner: string;
+  truncate?: boolean;
+}): JSX.Element {
+  const { row, task, spinner } = props;
+  const indent = "  ".repeat(row.depth);
+  const status =
+    row.type === "resource" ? getDisplayStatus(row, task.status) : task.status;
+  const color = statusColor(status);
+  const icon =
+    row.type === "task"
+      ? taskIcon(row.action, task.status, spinner)
+      : statusIcon(task.status, spinner);
+  const metadata = [
+    `(${task.type})`,
+    row.type === "task" ? "[action]" : undefined,
+    task.message ? `— ${task.message}` : undefined,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .join(" ");
+
+  return (
+    <Box flexDirection="row" height={props.truncate ? 1 : undefined}>
+      <Text>{indent}</Text>
+      <Box width={2}>
+        <Text color={color}>{icon} </Text>
+      </Box>
+      <Text bold>{task.id}</Text>
+      <Text color={color}> {status}</Text>
+      {metadata ? (
+        <Text dimColor wrap={props.truncate ? "truncate-end" : "wrap"}>
+          {" "}
+          {metadata}
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
+
+const toInitialTask = (row: WorkProgressRow): PlanTask =>
+  row.type === "resource"
+    ? toPlanTask(row)
+    : {
+        key: row.key,
+        id: row.id,
+        type: row.actionType,
+        status: row.action === "noop" ? "skipped" : "pending",
+        updatedAt: Date.now(),
+      };
+
+export const getLiveProgressWindow = (
+  viewportRows: number,
+  activeCount: number,
+): {
+  height: number;
+  visibleActiveCount: number;
+  hiddenActiveCount: number;
+} => {
+  // Ink 6 clears the terminal, including scrollback, when a rerendered frame
+  // reaches the viewport height. Keep the animated frame strictly shorter;
+  // completed rows leave this window through <Static> above.
+  const height = Math.max(1, viewportRows - 1);
+  const activeCapacity = Math.max(0, height - 1);
+  const visibleActiveCount =
+    activeCount > activeCapacity
+      ? Math.max(0, activeCapacity - 1)
+      : activeCount;
+  return {
+    height,
+    visibleActiveCount,
+    hiddenActiveCount: activeCount - visibleActiveCount,
+  };
+};
+
+function useViewportRows(): number {
+  const { stdout } = useStdout();
+  const readRows = () => stdout.rows ?? 24;
+  const [rows, setRows] = useState(readRows);
+
+  useEffect(() => {
+    const onResize = () => setRows(readRows());
+    stdout.on("resize", onResize);
+    return () => {
+      stdout.off("resize", onResize);
+    };
+  }, [stdout]);
+
+  return rows;
 }
 
 function getDisplayStatus(
@@ -416,11 +518,29 @@ function statusIcon(status: ApplyStatus, spinnerChar: string): string {
 
 function isInProgress(status: ApplyStatus): boolean {
   return (
+    status === "attaching" ||
+    status === "post-attach" ||
     status === "pending" ||
+    status === "pre-creating" ||
     status === "creating" ||
+    status === "creating replacement" ||
     status === "updating" ||
     status === "deleting" ||
+    status === "replacing" ||
     status === "running"
+  );
+}
+
+function isTerminal(status: ApplyStatus): boolean {
+  return (
+    status === "created" ||
+    status === "updated" ||
+    status === "deleted" ||
+    status === "retained" ||
+    status === "replaced" ||
+    status === "ran" ||
+    status === "skipped" ||
+    status === "fail"
   );
 }
 
