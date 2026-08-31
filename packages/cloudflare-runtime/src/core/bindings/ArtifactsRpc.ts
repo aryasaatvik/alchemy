@@ -1,25 +1,79 @@
 import { RpcTarget } from "capnweb";
 
+export type ArtifactsRepositoryMetadata = Pick<
+  ArtifactsRepo,
+  | "id"
+  | "name"
+  | "description"
+  | "defaultBranch"
+  | "createdAt"
+  | "updatedAt"
+  | "lastPushAt"
+  | "source"
+  | "readOnly"
+  | "remote"
+>;
+
+export class ArtifactsRepositoryMethods extends RpcTarget {
+  readonly #repository: ArtifactsRepo;
+
+  constructor(repository: ArtifactsRepo) {
+    super();
+    this.#repository = repository;
+  }
+
+  createToken(scope?: "write" | "read", ttl?: number) {
+    return this.#repository.createToken(scope, ttl);
+  }
+
+  listTokens() {
+    return this.#repository.listTokens();
+  }
+
+  revokeToken(tokenOrId: string) {
+    return this.#repository.revokeToken(tokenOrId);
+  }
+
+  fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return this.#repository.fork(name, options);
+  }
+}
+
+export type ArtifactsRepositoryWire = {
+  readonly metadata: ArtifactsRepositoryMetadata;
+  readonly methods: ArtifactsRepositoryMethods;
+};
+
 export const exposeArtifactsRepository = (
   repository: ArtifactsRepo,
-): ArtifactsRepo => ({
-  id: repository.id,
-  name: repository.name,
-  description: repository.description,
-  defaultBranch: repository.defaultBranch,
-  createdAt: repository.createdAt,
-  updatedAt: repository.updatedAt,
-  lastPushAt: repository.lastPushAt,
-  source: repository.source,
-  readOnly: repository.readOnly,
-  remote: repository.remote,
-  createToken: (scope, ttl) => repository.createToken(scope, ttl),
-  listTokens: () => repository.listTokens(),
-  revokeToken: (tokenOrId) => repository.revokeToken(tokenOrId),
-  fork: (name, options) => repository.fork(name, options),
+): ArtifactsRepositoryWire => ({
+  metadata: {
+    id: repository.id,
+    name: repository.name,
+    description: repository.description,
+    defaultBranch: repository.defaultBranch,
+    createdAt: repository.createdAt,
+    updatedAt: repository.updatedAt,
+    lastPushAt: repository.lastPushAt,
+    source: repository.source,
+    readOnly: repository.readOnly,
+    remote: repository.remote,
+  },
+  methods: new ArtifactsRepositoryMethods(repository),
 });
 
-export class ArtifactsBindingProxy extends RpcTarget implements Artifacts {
+export const hydrateArtifactsRepository = ({
+  metadata,
+  methods,
+}: ArtifactsRepositoryWire): ArtifactsRepo => ({
+  ...metadata,
+  createToken: (scope, ttl) => methods.createToken(scope, ttl),
+  listTokens: () => methods.listTokens(),
+  revokeToken: (tokenOrId) => methods.revokeToken(tokenOrId),
+  fork: (name, options) => methods.fork(name, options),
+});
+
+export class ArtifactsBindingProxy extends RpcTarget {
   readonly #binding: Artifacts;
 
   constructor(binding: Artifacts) {
@@ -38,7 +92,7 @@ export class ArtifactsBindingProxy extends RpcTarget implements Artifacts {
     return this.#binding.create(name, options);
   }
 
-  async get(name: string): Promise<ArtifactsRepo> {
+  async get(name: string): Promise<ArtifactsRepositoryWire> {
     return exposeArtifactsRepository(await this.#binding.get(name));
   }
 

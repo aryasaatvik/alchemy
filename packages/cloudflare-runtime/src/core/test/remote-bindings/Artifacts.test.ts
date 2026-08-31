@@ -4,6 +4,8 @@ import { newMessagePortRpcSession } from "capnweb";
 import {
   ArtifactsBindingProxy,
   exposeArtifactsRepository,
+  hydrateArtifactsRepository,
+  type ArtifactsRepositoryWire,
 } from "../../bindings/ArtifactsRpc.ts";
 
 describe("Artifacts remote binding", () => {
@@ -50,11 +52,11 @@ describe("Artifacts remote binding", () => {
 
     const exposed = exposeArtifactsRepository(repository);
 
-    expect(exposed.remote).toBe("https://example.com/starter.git");
-    expect(typeof exposed.createToken).toBe("function");
-    await exposed.createToken("read", 3_600);
-    await exposed.revokeToken("token-id");
-    await exposed.fork("forked");
+    expect(exposed.metadata.remote).toBe("https://example.com/starter.git");
+    expect(typeof exposed.methods.createToken).toBe("function");
+    await exposed.methods.createToken("read", 3_600);
+    await exposed.methods.revokeToken("token-id");
+    await exposed.methods.fork("forked");
     expect(calls).toEqual([
       ["createToken", "read", 3_600],
       ["revokeToken", "token-id"],
@@ -113,9 +115,11 @@ describe("Artifacts remote binding", () => {
       channel.port1,
       new ArtifactsBindingProxy(binding),
     );
-    using client = newMessagePortRpcSession<Artifacts>(channel.port2);
+    using client = newMessagePortRpcSession<{
+      get(name: string): Promise<ArtifactsRepositoryWire>;
+    }>(channel.port2);
 
-    const exposed = await client.get("starter");
+    const exposed = hydrateArtifactsRepository(await client.get("starter"));
 
     expect(exposed.remote).toBe("https://example.com/starter.git");
     await exposed.createToken("read", 3_600);

@@ -1,5 +1,9 @@
 import { newWebSocketRpcSession } from "capnweb";
 import { WorkerEntrypoint } from "cloudflare:workers";
+import {
+  hydrateArtifactsRepository,
+  type ArtifactsRepositoryWire,
+} from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
   binding: string;
@@ -95,6 +99,25 @@ export function makeRemoteProxyStub(
   };
 
   const stub = newWebSocketRpcSession(url.href) as unknown as ProxiedService;
+
+  if (bindingType === "artifacts") {
+    return new Proxy<ProxiedService>(stub, {
+      get(_, p) {
+        if (p === "fetch") return makeFetch(bindingName);
+        if (p === "get") {
+          return async (name: string) =>
+            hydrateArtifactsRepository(
+              await (
+                Reflect.get(stub, "get") as (
+                  name: string,
+                ) => Promise<ArtifactsRepositoryWire>
+              )(name),
+            );
+        }
+        return Reflect.get(stub, p);
+      },
+    });
+  }
 
   const headers = metadata
     ? new Headers(
