@@ -134,7 +134,7 @@ export const make: (
         cfPreviewUploadConfigToken,
         wranglerSessionConfig: { workersDev: true, minimalMode: true },
         metadata: {
-          compatibilityDate: "2025-04-28",
+          compatibilityDate: "2026-08-28",
           bindings: options.bindings,
           mainModule: files[0].name,
         },
