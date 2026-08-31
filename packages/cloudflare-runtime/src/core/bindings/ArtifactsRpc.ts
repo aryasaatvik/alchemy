@@ -112,6 +112,23 @@ export class ArtifactsBindingProxy extends RpcTarget {
     return exposeArtifactsRepository(await this.#binding.get(name));
   }
 
+  async getMetadata(name: string): Promise<ArtifactsRepositoryMetadata> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.#binding.list({ limit: 200, cursor });
+      const repository = (
+        page.repos as Array<ArtifactsRepositoryMetadata>
+      ).find((candidate) => candidate.name === name);
+      if (repository) return repository;
+      cursor = page.cursor;
+    } while (cursor);
+    throw new Error(`Artifacts repository '${name}' was not found`);
+  }
+
+  async getMethods(name: string): Promise<ArtifactsRepositoryOperations> {
+    return new ArtifactsRepositoryMethods(await this.#binding.get(name));
+  }
+
   import(
     params: Parameters<Artifacts["import"]>[0],
   ): Promise<ArtifactsCreateRepoResult> {

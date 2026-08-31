@@ -2,7 +2,7 @@ import { newWebSocketRpcSession } from "capnweb";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
   type ArtifactsRepositoryOperations,
-  type ArtifactsRepositoryWire,
+  type ArtifactsRepositoryMetadata,
 } from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
@@ -56,14 +56,19 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
           (prop === "artifactsGetMetadata" || prop === "artifactsGetMethods")
         ) {
           return async (name: string) => {
-            const repository = await (
-              Reflect.get(stub, "get") as (
+            if (prop === "artifactsGetMetadata") {
+              return (
+                Reflect.get(stub, "getMetadata") as (
+                  name: string,
+                ) => Promise<ArtifactsRepositoryMetadata>
+              )(name);
+            }
+            const methods = await (
+              Reflect.get(stub, "getMethods") as (
                 name: string,
-              ) => Promise<ArtifactsRepositoryWire>
+              ) => Promise<ArtifactsRepositoryOperations>
             )(name);
-            return prop === "artifactsGetMetadata"
-              ? repository.metadata
-              : new ArtifactsRepositoryMethodsBridge(repository.methods);
+            return new ArtifactsRepositoryMethodsBridge(methods);
           };
         }
         if (Reflect.has(target, prop)) {
