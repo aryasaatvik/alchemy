@@ -1,19 +1,57 @@
-import {
-  hydrateArtifactsRepository,
-  type ArtifactsRepositoryWire,
-} from "./ArtifactsRpc.ts";
+type RepositoryMetadata = Pick<
+  ArtifactsRepo,
+  | "id"
+  | "name"
+  | "description"
+  | "defaultBranch"
+  | "createdAt"
+  | "updatedAt"
+  | "lastPushAt"
+  | "source"
+  | "readOnly"
+  | "remote"
+>;
+
+interface RepositoryMethods {
+  createToken(
+    scope?: "write" | "read",
+    ttl?: number,
+  ): ReturnType<ArtifactsRepo["createToken"]>;
+  listTokens(): ReturnType<ArtifactsRepo["listTokens"]>;
+  revokeToken(tokenOrId: string): ReturnType<ArtifactsRepo["revokeToken"]>;
+  fork(
+    name: string,
+    options?: Parameters<ArtifactsRepo["fork"]>[1],
+  ): ReturnType<ArtifactsRepo["fork"]>;
+}
+
+interface RepositoryWire {
+  readonly metadata: RepositoryMetadata;
+  readonly methods: RepositoryMethods;
+}
 
 interface Env {
   proxyClient: Omit<Artifacts, "get"> & {
-    get(name: string): Promise<ArtifactsRepositoryWire>;
+    get(name: string): Promise<RepositoryWire>;
   };
 }
+
+const hydrateRepository = ({
+  metadata,
+  methods,
+}: RepositoryWire): ArtifactsRepo => ({
+  ...metadata,
+  createToken: (scope, ttl) => methods.createToken(scope, ttl),
+  listTokens: () => methods.listTokens(),
+  revokeToken: (tokenOrId) => methods.revokeToken(tokenOrId),
+  fork: (name, options) => methods.fork(name, options),
+});
 
 export default function makeBinding(env: Env): Artifacts {
   return {
     create: (name, options) => env.proxyClient.create(name, options),
     async get(name) {
-      return hydrateArtifactsRepository(await env.proxyClient.get(name));
+      return hydrateRepository(await env.proxyClient.get(name));
     },
     import: (params) => env.proxyClient.import(params),
     list: (options) => env.proxyClient.list(options),
