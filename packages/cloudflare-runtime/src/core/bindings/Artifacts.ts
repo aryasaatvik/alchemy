@@ -5,6 +5,9 @@ export const remote = (binding: string, namespace: string) =>
     { name: binding, type: "artifacts", namespace },
     (service) => ({
       name: binding,
-      service,
+      wrapped: {
+        moduleName: "cloudflare-runtime:artifacts",
+        innerBindings: [{ name: "proxyClient", service }],
+      },
     }),
   );

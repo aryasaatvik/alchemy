@@ -14,7 +14,23 @@ export type ArtifactsRepositoryMetadata = Pick<
   | "remote"
 >;
 
-export class ArtifactsRepositoryMethods extends RpcTarget {
+export interface ArtifactsRepositoryOperations {
+  createToken(
+    scope?: "write" | "read",
+    ttl?: number,
+  ): ReturnType<ArtifactsRepo["createToken"]>;
+  listTokens(): ReturnType<ArtifactsRepo["listTokens"]>;
+  revokeToken(tokenOrId: string): ReturnType<ArtifactsRepo["revokeToken"]>;
+  fork(
+    name: string,
+    options?: Parameters<ArtifactsRepo["fork"]>[1],
+  ): ReturnType<ArtifactsRepo["fork"]>;
+}
+
+export class ArtifactsRepositoryMethods
+  extends RpcTarget
+  implements ArtifactsRepositoryOperations
+{
   readonly #repository: ArtifactsRepo;
 
   constructor(repository: ArtifactsRepo) {
@@ -41,7 +57,7 @@ export class ArtifactsRepositoryMethods extends RpcTarget {
 
 export type ArtifactsRepositoryWire = {
   readonly metadata: ArtifactsRepositoryMetadata;
-  readonly methods: ArtifactsRepositoryMethods;
+  readonly methods: ArtifactsRepositoryOperations;
 };
 
 export const exposeArtifactsRepository = (

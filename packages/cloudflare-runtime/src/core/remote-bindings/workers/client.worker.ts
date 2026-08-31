@@ -1,13 +1,38 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
-  hydrateArtifactsRepository,
+  type ArtifactsRepositoryOperations,
   type ArtifactsRepositoryWire,
 } from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
   binding: string;
   bindingType: string;
+}
+
+class ArtifactsRepositoryMethodsBridge extends RpcTarget {
+  readonly #methods: ArtifactsRepositoryOperations;
+
+  constructor(methods: ArtifactsRepositoryOperations) {
+    super();
+    this.#methods = methods;
+  }
+
+  createToken(scope?: "write" | "read", ttl?: number) {
+    return this.#methods.createToken(scope, ttl);
+  }
+
+  listTokens() {
+    return this.#methods.listTokens();
+  }
+
+  revokeToken(tokenOrId: string) {
+    return this.#methods.revokeToken(tokenOrId);
+  }
+
+  fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return this.#methods.fork(name, options);
+  }
 }
 
 /** Generic remote proxy client for bindings. */
@@ -24,15 +49,21 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
       ctx.props.bindingType,
     );
 
-    // Artifacts has a synchronous metadata surface reconstructed by its
-    // specialized stub. Returning that stub directly prevents
-    // WorkerEntrypoint's own property surface from winning lookup first.
-    if (ctx.props.bindingType === "artifacts") {
-      return stub as unknown as Client;
-    }
-
     return new Proxy(this, {
       get: (target, prop) => {
+        if (ctx.props.bindingType === "artifacts" && prop === "get") {
+          return async (name: string): Promise<ArtifactsRepositoryWire> => {
+            const repository = await (
+              Reflect.get(stub, "get") as (
+                name: string,
+              ) => Promise<ArtifactsRepositoryWire>
+            )(name);
+            return {
+              metadata: repository.metadata,
+              methods: new ArtifactsRepositoryMethodsBridge(repository.methods),
+            };
+          };
+        }
         if (Reflect.has(target, prop)) {
           return Reflect.get(target, prop);
         }
@@ -106,25 +137,6 @@ export function makeRemoteProxyStub(
   };
 
   const stub = newWebSocketRpcSession(url.href) as unknown as ProxiedService;
-
-  if (bindingType === "artifacts") {
-    return new Proxy<ProxiedService>(stub, {
-      get(_, p) {
-        if (p === "fetch") return makeFetch(bindingName);
-        if (p === "get") {
-          return async (name: string) =>
-            hydrateArtifactsRepository(
-              await (
-                Reflect.get(stub, "get") as (
-                  name: string,
-                ) => Promise<ArtifactsRepositoryWire>
-              )(name),
-            );
-        }
-        return Reflect.get(stub, p);
-      },
-    });
-  }
 
   const headers = metadata
     ? new Headers(
