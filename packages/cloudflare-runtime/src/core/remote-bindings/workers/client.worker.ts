@@ -51,17 +51,19 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
 
     return new Proxy(this, {
       get: (target, prop) => {
-        if (ctx.props.bindingType === "artifacts" && prop === "get") {
-          return async (name: string): Promise<ArtifactsRepositoryWire> => {
+        if (
+          ctx.props.bindingType === "artifacts" &&
+          (prop === "artifactsGetMetadata" || prop === "artifactsGetMethods")
+        ) {
+          return async (name: string) => {
             const repository = await (
               Reflect.get(stub, "get") as (
                 name: string,
               ) => Promise<ArtifactsRepositoryWire>
             )(name);
-            return {
-              metadata: repository.metadata,
-              methods: new ArtifactsRepositoryMethodsBridge(repository.methods),
-            };
+            return prop === "artifactsGetMetadata"
+              ? repository.metadata
+              : new ArtifactsRepositoryMethodsBridge(repository.methods);
           };
         }
         if (Reflect.has(target, prop)) {
