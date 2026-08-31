@@ -83,7 +83,14 @@ export default {
         }
         case "/artifacts": {
           if (!env.ARTIFACTS) return new Response("no-artifacts", { status: 412 });
-          return new Response(typeof env.ARTIFACTS.fetch === "function" ? "artifacts-bound" : "artifacts-missing");
+          const repositories = await env.ARTIFACTS.list({ limit: 1 });
+          if (repositories.repos.length === 0) return new Response("no-artifacts-repository", { status: 412 });
+          const repository = await env.ARTIFACTS.get(repositories.repos[0].name);
+          return Response.json({
+            remoteType: typeof repository.remote,
+            remote: repository.remote,
+            createTokenType: typeof repository.createToken,
+          });
         }
       }
     } catch (error) {
@@ -157,7 +164,8 @@ describe.skipIf(!accountId)("RemoteBindings (integration)", () => {
     {
       label: "Artifacts",
       path: "/artifacts",
-      expectBodyMatches: /artifacts-bound/,
+      expectBodyMatches:
+        /"remoteType":"string".*"remote":"https:.*"createTokenType":"function"/,
       skip: !artifactsNamespace,
     },
   ];

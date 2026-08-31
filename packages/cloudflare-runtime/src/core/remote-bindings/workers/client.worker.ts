@@ -3,6 +3,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 
 interface Props {
   binding: string;
+  bindingType: string;
 }
 
 /** Generic remote proxy client for bindings. */
@@ -13,7 +14,11 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
 
   constructor(ctx: ExecutionContext<Props>, env: unknown) {
     super(ctx, env);
-    const stub = makeRemoteProxyStub(ctx.props.binding);
+    const stub = makeRemoteProxyStub(
+      ctx.props.binding,
+      undefined,
+      ctx.props.bindingType,
+    );
 
     return new Proxy(this, {
       get: (target, prop) => {
@@ -69,9 +74,13 @@ export function makeFetch(bindingName: string, extraHeaders?: Headers) {
 export function makeRemoteProxyStub(
   bindingName: string,
   metadata?: ProxyMetadata,
+  bindingType?: string,
 ): Fetcher {
   const url = new URL("ws://stub");
   url.searchParams.set("MF-Binding", bindingName);
+  if (bindingType) {
+    url.searchParams.set("MF-Binding-Type", bindingType);
+  }
   if (metadata) {
     for (const [key, value] of Object.entries(metadata)) {
       if (value !== undefined) {
