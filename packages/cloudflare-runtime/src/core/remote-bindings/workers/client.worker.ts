@@ -24,6 +24,13 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
       ctx.props.bindingType,
     );
 
+    // Artifacts has a synchronous metadata surface reconstructed by its
+    // specialized stub. Returning that stub directly prevents
+    // WorkerEntrypoint's own property surface from winning lookup first.
+    if (ctx.props.bindingType === "artifacts") {
+      return stub as unknown as Client;
+    }
+
     return new Proxy(this, {
       get: (target, prop) => {
         if (Reflect.has(target, prop)) {
