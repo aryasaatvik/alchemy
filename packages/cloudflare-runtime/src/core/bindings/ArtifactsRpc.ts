@@ -27,6 +27,16 @@ export interface ArtifactsRepositoryOperations {
   ): ReturnType<ArtifactsRepo["fork"]>;
 }
 
+export interface ArtifactsRepositoryWireOperations {
+  createToken(scope?: "write" | "read", ttl?: number): Promise<string>;
+  listTokens(): Promise<string>;
+  revokeToken(tokenOrId: string): ReturnType<ArtifactsRepo["revokeToken"]>;
+  fork(
+    name: string,
+    options?: Parameters<ArtifactsRepo["fork"]>[1],
+  ): Promise<string>;
+}
+
 const exposeCreateRepositoryResult = (
   result: ArtifactsCreateRepoResult,
 ): ArtifactsCreateRepoResult => ({
@@ -81,7 +91,7 @@ const exposeRepositoryListResult = (
 
 export class ArtifactsRepositoryMethods
   extends RpcTarget
-  implements ArtifactsRepositoryOperations
+  implements ArtifactsRepositoryWireOperations
 {
   readonly #repository: ArtifactsRepo;
 
@@ -91,13 +101,15 @@ export class ArtifactsRepositoryMethods
   }
 
   async createToken(scope?: "write" | "read", ttl?: number) {
-    return exposeCreateTokenResult(
-      await this.#repository.createToken(scope, ttl),
+    return JSON.stringify(
+      exposeCreateTokenResult(await this.#repository.createToken(scope, ttl)),
     );
   }
 
   async listTokens() {
-    return exposeTokenListResult(await this.#repository.listTokens());
+    return JSON.stringify(
+      exposeTokenListResult(await this.#repository.listTokens()),
+    );
   }
 
   revokeToken(tokenOrId: string) {
@@ -105,15 +117,15 @@ export class ArtifactsRepositoryMethods
   }
 
   async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return exposeCreateRepositoryResult(
-      await this.#repository.fork(name, options),
+    return JSON.stringify(
+      exposeCreateRepositoryResult(await this.#repository.fork(name, options)),
     );
   }
 }
 
 export type ArtifactsRepositoryWire = {
   readonly metadata: ArtifactsRepositoryMetadata;
-  readonly methods: ArtifactsRepositoryOperations;
+  readonly methods: ArtifactsRepositoryWireOperations;
 };
 
 export type ArtifactsErrorWire = {
@@ -173,10 +185,10 @@ export const hydrateArtifactsRepository = ({
   methods,
 }: ArtifactsRepositoryWire): ArtifactsRepo => ({
   ...metadata,
-  createToken: (scope, ttl) => methods.createToken(scope, ttl),
-  listTokens: () => methods.listTokens(),
+  createToken: async (scope, ttl) => JSON.parse(await methods.createToken(scope, ttl)),
+  listTokens: async () => JSON.parse(await methods.listTokens()),
   revokeToken: (tokenOrId) => methods.revokeToken(tokenOrId),
-  fork: (name, options) => methods.fork(name, options),
+  fork: async (name, options) => JSON.parse(await methods.fork(name, options)),
 });
 
 export class ArtifactsBindingProxy extends RpcTarget {
@@ -194,9 +206,9 @@ export class ArtifactsBindingProxy extends RpcTarget {
       description?: string;
       setDefaultBranch?: string;
     },
-  ): Promise<ArtifactsCreateRepoResult> {
-    return exposeCreateRepositoryResult(
-      await this.#binding.create(name, options),
+  ): Promise<string> {
+    return JSON.stringify(
+      exposeCreateRepositoryResult(await this.#binding.create(name, options)),
     );
   }
 
@@ -216,20 +228,24 @@ export class ArtifactsBindingProxy extends RpcTarget {
     }
   }
 
-  async getMethods(name: string): Promise<ArtifactsRepositoryOperations> {
+  async getMethods(name: string): Promise<ArtifactsRepositoryWireOperations> {
     return new ArtifactsRepositoryMethods(await this.#binding.get(name));
   }
 
   async import(
     params: Parameters<Artifacts["import"]>[0],
-  ): Promise<ArtifactsCreateRepoResult> {
-    return exposeCreateRepositoryResult(await this.#binding.import(params));
+  ): Promise<string> {
+    return JSON.stringify(
+      exposeCreateRepositoryResult(await this.#binding.import(params)),
+    );
   }
 
   async list(
     options?: Parameters<Artifacts["list"]>[0],
-  ): Promise<ArtifactsRepoListResult> {
-    return exposeRepositoryListResult(await this.#binding.list(options));
+  ): Promise<string> {
+    return JSON.stringify(
+      exposeRepositoryListResult(await this.#binding.list(options)),
+    );
   }
 
   delete(name: string): Promise<boolean> {

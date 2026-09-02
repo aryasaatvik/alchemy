@@ -3,6 +3,7 @@ import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
   type ArtifactsRepositoryMetadataResult,
   type ArtifactsRepositoryOperations,
+  type ArtifactsRepositoryWireOperations,
 } from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
@@ -11,19 +12,19 @@ interface Props {
 }
 
 class ArtifactsRepositoryMethodsBridge extends RpcTarget {
-  readonly #methods: ArtifactsRepositoryOperations;
+  readonly #methods: ArtifactsRepositoryWireOperations;
 
-  constructor(methods: ArtifactsRepositoryOperations) {
+  constructor(methods: ArtifactsRepositoryWireOperations) {
     super();
     this.#methods = methods;
   }
 
   async createToken(scope?: "write" | "read", ttl?: number) {
-    return await this.#methods.createToken(scope, ttl);
+    return JSON.parse(await this.#methods.createToken(scope, ttl));
   }
 
   async listTokens() {
-    return await this.#methods.listTokens();
+    return JSON.parse(await this.#methods.listTokens());
   }
 
   async revokeToken(tokenOrId: string) {
@@ -31,7 +32,7 @@ class ArtifactsRepositoryMethodsBridge extends RpcTarget {
   }
 
   async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return await this.#methods.fork(name, options);
+    return JSON.parse(await this.#methods.fork(name, options));
   }
 }
 
@@ -67,7 +68,7 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
             const methods = await (
               Reflect.get(stub, "getMethods") as (
                 name: string,
-              ) => Promise<ArtifactsRepositoryOperations>
+              ) => Promise<ArtifactsRepositoryWireOperations>
             )(name);
             return new ArtifactsRepositoryMethodsBridge(methods);
           };
@@ -78,7 +79,8 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
         ) {
           return async (...args: unknown[]) => {
             const operation = Reflect.get(stub, prop) as (...args: unknown[]) => Promise<unknown>;
-            return await operation(...args);
+            const result = await operation(...args);
+            return prop === "delete" ? result : JSON.parse(result as string);
           };
         }
         if (Reflect.has(target, prop)) {
