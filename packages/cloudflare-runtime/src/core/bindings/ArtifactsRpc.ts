@@ -37,58 +37,6 @@ export interface ArtifactsRepositoryWireOperations {
   ): Promise<string>;
 }
 
-const exposeCreateRepositoryResult = (
-  result: ArtifactsCreateRepoResult,
-): ArtifactsCreateRepoResult => ({
-  id: result.id,
-  name: result.name,
-  description: result.description,
-  defaultBranch: result.defaultBranch,
-  remote: result.remote,
-  token: result.token,
-  tokenExpiresAt: result.tokenExpiresAt,
-});
-
-const exposeCreateTokenResult = (
-  result: ArtifactsCreateTokenResult,
-): ArtifactsCreateTokenResult => ({
-  id: result.id,
-  plaintext: result.plaintext,
-  scope: result.scope,
-  expiresAt: result.expiresAt,
-});
-
-const exposeTokenListResult = (
-  result: ArtifactsTokenListResult,
-): ArtifactsTokenListResult => ({
-  tokens: result.tokens.map((token) => ({
-    id: token.id,
-    scope: token.scope,
-    state: token.state,
-    createdAt: token.createdAt,
-    expiresAt: token.expiresAt,
-  })),
-  total: result.total,
-});
-
-const exposeRepositoryListResult = (
-  result: ArtifactsRepoListResult,
-): ArtifactsRepoListResult => ({
-  repos: result.repos.map((repository) => ({
-    id: repository.id,
-    name: repository.name,
-    description: repository.description,
-    defaultBranch: repository.defaultBranch,
-    createdAt: repository.createdAt,
-    updatedAt: repository.updatedAt,
-    lastPushAt: repository.lastPushAt,
-    source: repository.source,
-    readOnly: repository.readOnly,
-  })),
-  total: result.total,
-  ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
-});
-
 export class ArtifactsRepositoryMethods
   extends RpcTarget
   implements ArtifactsRepositoryWireOperations
@@ -101,15 +49,11 @@ export class ArtifactsRepositoryMethods
   }
 
   async createToken(scope?: "write" | "read", ttl?: number) {
-    return JSON.stringify(
-      exposeCreateTokenResult(await this.#repository.createToken(scope, ttl)),
-    );
+    return JSON.stringify(await this.#repository.createToken(scope, ttl));
   }
 
   async listTokens() {
-    return JSON.stringify(
-      exposeTokenListResult(await this.#repository.listTokens()),
-    );
+    return JSON.stringify(await this.#repository.listTokens());
   }
 
   revokeToken(tokenOrId: string) {
@@ -117,9 +61,7 @@ export class ArtifactsRepositoryMethods
   }
 
   async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return JSON.stringify(
-      exposeCreateRepositoryResult(await this.#repository.fork(name, options)),
-    );
+    return JSON.stringify(await this.#repository.fork(name, options));
   }
 }
 
@@ -180,6 +122,11 @@ export const exposeArtifactsRepository = (
   methods: new ArtifactsRepositoryMethods(repository),
 });
 
+const serializeArtifactsRepositoryMetadata = (
+  repository: ArtifactsRepo,
+): ArtifactsRepositoryMetadata =>
+  JSON.parse(JSON.stringify(repository)) as ArtifactsRepositoryMetadata;
+
 export const hydrateArtifactsRepository = ({
   metadata,
   methods,
@@ -207,21 +154,24 @@ export class ArtifactsBindingProxy extends RpcTarget {
       setDefaultBranch?: string;
     },
   ): Promise<string> {
-    return JSON.stringify(
-      exposeCreateRepositoryResult(await this.#binding.create(name, options)),
-    );
+    return JSON.stringify(await this.#binding.create(name, options));
   }
 
   async get(name: string): Promise<ArtifactsRepositoryWire> {
-    return exposeArtifactsRepository(await this.#binding.get(name));
+    const repository = await this.#binding.get(name);
+    return {
+      metadata: serializeArtifactsRepositoryMetadata(repository),
+      methods: new ArtifactsRepositoryMethods(repository),
+    };
   }
 
   async getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult> {
     try {
       return {
         ok: true,
-        metadata: exposeArtifactsRepository(await this.#binding.get(name))
-          .metadata,
+        metadata: serializeArtifactsRepositoryMetadata(
+          await this.#binding.get(name),
+        ),
       };
     } catch (error) {
       return { ok: false, error: exposeArtifactsError(error) };
@@ -235,17 +185,13 @@ export class ArtifactsBindingProxy extends RpcTarget {
   async import(
     params: Parameters<Artifacts["import"]>[0],
   ): Promise<string> {
-    return JSON.stringify(
-      exposeCreateRepositoryResult(await this.#binding.import(params)),
-    );
+    return JSON.stringify(await this.#binding.import(params));
   }
 
   async list(
     options?: Parameters<Artifacts["list"]>[0],
   ): Promise<string> {
-    return JSON.stringify(
-      exposeRepositoryListResult(await this.#binding.list(options)),
-    );
+    return JSON.stringify(await this.#binding.list(options));
   }
 
   delete(name: string): Promise<boolean> {
