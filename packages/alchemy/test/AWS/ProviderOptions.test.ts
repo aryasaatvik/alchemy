@@ -124,6 +124,9 @@ describe("AWS provider options", () => {
           DATABASE_URL: packEnvValue(
             Redacted.make("postgres://127.0.0.1:54329/database"),
           ),
+          DOMAIN_CONNECT_EMULATOR_ORIGIN: packEnvValue(
+            Redacted.make("https://feature.emulate.samva.localhost"),
+          ),
           REDIS_URL: packEnvValue(Redacted.make("redis://127.0.0.1:56379/2")),
           PRESERVED: "value",
         },
@@ -131,6 +134,7 @@ describe("AWS provider options", () => {
           endpoint: Effect.succeed("http://floci:4566"),
           environment: Effect.succeed({
             DATABASE_URL: Redacted.make("postgres://postgres:5432/database"),
+            DOMAIN_CONNECT_EMULATOR_ORIGIN: "http://host.docker.internal:8800",
             PLACED_ONLY: Redacted.make("placed-value"),
             REDIS_URL: Redacted.make("redis://redis:6379/2"),
           }),
@@ -143,6 +147,9 @@ describe("AWS provider options", () => {
       expect(environment.AWS_ENDPOINT_URL).toBe("http://floci:4566");
       expect(environment.PRESERVED).toBe("value");
       expect(environment.PLACED_ONLY).toBe("placed-value");
+      expect(environment.DOMAIN_CONNECT_EMULATOR_ORIGIN).toBe(
+        "http://host.docker.internal:8800",
+      );
       expect(
         Redacted.value(
           unpackEnvValue<Redacted.Redacted<string>>(environment.DATABASE_URL)!,

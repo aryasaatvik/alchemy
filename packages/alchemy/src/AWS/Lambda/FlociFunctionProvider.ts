@@ -99,7 +99,7 @@ const materializeLocalEmulatorFunctionProviderOptions = Effect.fn(function* (
         : Object.fromEntries(
             Object.entries(configuredEnvironment).map(([key, value]) => [
               key,
-              Redacted.isRedacted(value) ? Redacted.value(value) : value,
+              Redacted.isRedacted(value) ? packEnvValue(value) : value,
             ]),
           ),
     endpoint:
@@ -117,7 +117,16 @@ const effectOptions = (
   environment:
     config.environment === undefined
       ? undefined
-      : Effect.succeed(config.environment),
+      : Effect.succeed(
+          Object.fromEntries(
+            Object.entries(config.environment).map(([key, value]) => {
+              const decoded = unpackEnvValue<
+                string | Redacted.Redacted<string>
+              >(value);
+              return [key, Redacted.isRedacted(decoded) ? decoded : value];
+            }),
+          ),
+        ),
   endpoint:
     config.endpoint === undefined ? undefined : Effect.succeed(config.endpoint),
   serviceEndpoints:
@@ -147,20 +156,21 @@ export class LocalEmulatorFunctionEnvironmentError extends Data.TaggedError(
   "LocalEmulatorFunctionEnvironmentError",
 )<{ readonly message: string }> {}
 
-const placeEnvironmentValue = (
-  current: string | undefined,
-  placed: string,
-): string => {
-  const decoded = unpackEnvValue<unknown>(current);
-  return Redacted.isRedacted(decoded)
-    ? packEnvValue(Redacted.make(placed))
-    : placed;
-};
-
 const reservedEnvironmentKeys = new Set([
   "AWS_ENDPOINT_URL",
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
 ]);
+
+const placeEnvironmentValue = (
+  current: string | undefined,
+  placed: string | Redacted.Redacted<string>,
+): string => {
+  if (!Redacted.isRedacted(placed)) return placed;
+  const decoded = unpackEnvValue<unknown>(current);
+  return Redacted.isRedacted(decoded)
+    ? packEnvValue(placed)
+    : Redacted.value(placed);
+};
 
 export const localEmulatorFunctionEnvironment = Effect.fn(function* (
   environment: Record<string, string>,
@@ -185,10 +195,7 @@ export const localEmulatorFunctionEnvironment = Effect.fn(function* (
             "Local emulator Lambda environment must contain non-reserved, non-empty keys with string or Redacted<string> values",
         });
       }
-      runtimeEnvironment[key] = placeEnvironmentValue(
-        environment[key],
-        Redacted.isRedacted(value) ? Redacted.value(value) : value,
-      );
+      runtimeEnvironment[key] = placeEnvironmentValue(environment[key], value);
     }
   }
 
