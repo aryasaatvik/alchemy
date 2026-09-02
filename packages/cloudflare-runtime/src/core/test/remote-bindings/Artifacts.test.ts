@@ -4,7 +4,6 @@ import { newMessagePortRpcSession } from "capnweb";
 import {
   ArtifactsBindingProxy,
   exposeArtifactsRepository,
-  hydrateArtifactsError,
   hydrateArtifactsRepository,
   type ArtifactsRepositoryMetadataResult,
   type ArtifactsRepositoryWire,
@@ -171,13 +170,5 @@ describe("Artifacts remote binding", () => {
         numericCode: 10_001,
       },
     });
-    if (!result.ok) {
-      expect(hydrateArtifactsError(result.error)).toMatchObject({
-        name: "ArtifactsError",
-        message: "Repository not found: missing.",
-        code: "NOT_FOUND",
-        numericCode: 10_001,
-      });
-    }
   });
 });

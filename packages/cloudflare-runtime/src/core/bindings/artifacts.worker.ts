@@ -55,7 +55,9 @@ export default function makeBinding(env: Env): Artifacts {
     create: (name, options) => env.proxyClient.create(name, options),
     async get(name) {
       const result = await env.proxyClient.artifactsGetMetadata(name);
-      if (!result.ok) throw hydrateArtifactsError(result.error);
+      if (!result.ok) {
+        throw Object.assign(new Error(result.error.message), result.error);
+      }
       const methods = await env.proxyClient.artifactsGetMethods(name);
       return hydrateRepository({ metadata: result.metadata, methods });
     },
@@ -64,7 +66,4 @@ export default function makeBinding(env: Env): Artifacts {
     delete: (name) => env.proxyClient.delete(name),
   };
 }
-import {
-  hydrateArtifactsError,
-  type ArtifactsRepositoryMetadataResult,
-} from "./ArtifactsRpc.ts";
+import type { ArtifactsRepositoryMetadataResult } from "./ArtifactsRpc.ts";
