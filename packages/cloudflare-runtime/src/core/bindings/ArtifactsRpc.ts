@@ -27,6 +27,58 @@ export interface ArtifactsRepositoryOperations {
   ): ReturnType<ArtifactsRepo["fork"]>;
 }
 
+const exposeCreateRepositoryResult = (
+  result: ArtifactsCreateRepoResult,
+): ArtifactsCreateRepoResult => ({
+  id: result.id,
+  name: result.name,
+  description: result.description,
+  defaultBranch: result.defaultBranch,
+  remote: result.remote,
+  token: result.token,
+  tokenExpiresAt: result.tokenExpiresAt,
+});
+
+const exposeCreateTokenResult = (
+  result: ArtifactsCreateTokenResult,
+): ArtifactsCreateTokenResult => ({
+  id: result.id,
+  plaintext: result.plaintext,
+  scope: result.scope,
+  expiresAt: result.expiresAt,
+});
+
+const exposeTokenListResult = (
+  result: ArtifactsTokenListResult,
+): ArtifactsTokenListResult => ({
+  tokens: result.tokens.map((token) => ({
+    id: token.id,
+    scope: token.scope,
+    state: token.state,
+    createdAt: token.createdAt,
+    expiresAt: token.expiresAt,
+  })),
+  total: result.total,
+});
+
+const exposeRepositoryListResult = (
+  result: ArtifactsRepoListResult,
+): ArtifactsRepoListResult => ({
+  repos: result.repos.map((repository) => ({
+    id: repository.id,
+    name: repository.name,
+    description: repository.description,
+    defaultBranch: repository.defaultBranch,
+    createdAt: repository.createdAt,
+    updatedAt: repository.updatedAt,
+    lastPushAt: repository.lastPushAt,
+    source: repository.source,
+    readOnly: repository.readOnly,
+  })),
+  total: result.total,
+  ...(result.cursor === undefined ? {} : { cursor: result.cursor }),
+});
+
 export class ArtifactsRepositoryMethods
   extends RpcTarget
   implements ArtifactsRepositoryOperations
@@ -38,20 +90,24 @@ export class ArtifactsRepositoryMethods
     this.#repository = repository;
   }
 
-  createToken(scope?: "write" | "read", ttl?: number) {
-    return this.#repository.createToken(scope, ttl);
+  async createToken(scope?: "write" | "read", ttl?: number) {
+    return exposeCreateTokenResult(
+      await this.#repository.createToken(scope, ttl),
+    );
   }
 
-  listTokens() {
-    return this.#repository.listTokens();
+  async listTokens() {
+    return exposeTokenListResult(await this.#repository.listTokens());
   }
 
   revokeToken(tokenOrId: string) {
     return this.#repository.revokeToken(tokenOrId);
   }
 
-  fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return this.#repository.fork(name, options);
+  async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return exposeCreateRepositoryResult(
+      await this.#repository.fork(name, options),
+    );
   }
 }
 
@@ -131,7 +187,7 @@ export class ArtifactsBindingProxy extends RpcTarget {
     this.#binding = binding;
   }
 
-  create(
+  async create(
     name: string,
     options?: {
       readOnly?: boolean;
@@ -139,7 +195,9 @@ export class ArtifactsBindingProxy extends RpcTarget {
       setDefaultBranch?: string;
     },
   ): Promise<ArtifactsCreateRepoResult> {
-    return this.#binding.create(name, options);
+    return exposeCreateRepositoryResult(
+      await this.#binding.create(name, options),
+    );
   }
 
   async get(name: string): Promise<ArtifactsRepositoryWire> {
@@ -162,16 +220,16 @@ export class ArtifactsBindingProxy extends RpcTarget {
     return new ArtifactsRepositoryMethods(await this.#binding.get(name));
   }
 
-  import(
+  async import(
     params: Parameters<Artifacts["import"]>[0],
   ): Promise<ArtifactsCreateRepoResult> {
-    return this.#binding.import(params);
+    return exposeCreateRepositoryResult(await this.#binding.import(params));
   }
 
-  list(
+  async list(
     options?: Parameters<Artifacts["list"]>[0],
   ): Promise<ArtifactsRepoListResult> {
-    return this.#binding.list(options);
+    return exposeRepositoryListResult(await this.#binding.list(options));
   }
 
   delete(name: string): Promise<boolean> {

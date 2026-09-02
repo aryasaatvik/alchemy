@@ -123,7 +123,9 @@ describe("Artifacts remote binding", () => {
     const exposed = hydrateArtifactsRepository(await client.get("starter"));
 
     expect(exposed.remote).toBe("https://example.com/starter.git");
-    await exposed.createToken("read", 3_600);
+    const credential = await exposed.createToken("read", 3_600);
+    expect(credential.id).toBe("token-id");
+    expect(credential.plaintext).toBe("secret");
     expect(calls).toEqual([["createToken", "read", 3_600]]);
   });
 
