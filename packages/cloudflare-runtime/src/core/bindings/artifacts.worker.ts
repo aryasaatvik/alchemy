@@ -32,7 +32,9 @@ interface RepositoryWire {
 
 interface Env {
   proxyClient: Omit<Artifacts, "get"> & {
-    artifactsGetMetadata(name: string): Promise<RepositoryMetadata>;
+    artifactsGetMetadata(
+      name: string,
+    ): Promise<ArtifactsRepositoryMetadataResult>;
     artifactsGetMethods(name: string): Promise<RepositoryMethods>;
   };
 }
@@ -52,12 +54,17 @@ export default function makeBinding(env: Env): Artifacts {
   return {
     create: (name, options) => env.proxyClient.create(name, options),
     async get(name) {
-      const metadata = await env.proxyClient.artifactsGetMetadata(name);
+      const result = await env.proxyClient.artifactsGetMetadata(name);
+      if (!result.ok) throw hydrateArtifactsError(result.error);
       const methods = await env.proxyClient.artifactsGetMethods(name);
-      return hydrateRepository({ metadata, methods });
+      return hydrateRepository({ metadata: result.metadata, methods });
     },
     import: (params) => env.proxyClient.import(params),
     list: (options) => env.proxyClient.list(options),
     delete: (name) => env.proxyClient.delete(name),
   };
 }
+import {
+  hydrateArtifactsError,
+  type ArtifactsRepositoryMetadataResult,
+} from "./ArtifactsRpc.ts";

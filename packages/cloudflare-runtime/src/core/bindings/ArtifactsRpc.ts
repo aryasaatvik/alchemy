@@ -71,6 +71,10 @@ export type ArtifactsRepositoryMetadataResult =
   | { readonly ok: true; readonly metadata: ArtifactsRepositoryMetadata }
   | { readonly ok: false; readonly error: ArtifactsErrorWire };
 
+export const hydrateArtifactsError = (
+  error: ArtifactsErrorWire,
+): ArtifactsError => Object.assign(new Error(error.message), error);
+
 const exposeArtifactsError = (error: unknown): ArtifactsErrorWire => {
   if (
     error instanceof Error &&

@@ -62,13 +62,7 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
                   name: string,
                 ) => Promise<ArtifactsRepositoryMetadataResult>
               )(name);
-              if (!result.ok) {
-                throw Object.assign(
-                  new Error(result.error.message),
-                  result.error,
-                );
-              }
-              return result.metadata;
+              return result;
             }
             const methods = await (
               Reflect.get(stub, "getMethods") as (
