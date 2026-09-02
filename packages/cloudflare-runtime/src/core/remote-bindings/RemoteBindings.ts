@@ -187,6 +187,9 @@ export const RemoteBindingsLive = Layer.effect(
                     json: JSON.stringify({
                       binding: binding.name,
                       bindingType: binding.type,
+                      ...(binding.type === "artifacts"
+                        ? { namespace: binding.namespace }
+                        : {}),
                     }),
                   },
                 };

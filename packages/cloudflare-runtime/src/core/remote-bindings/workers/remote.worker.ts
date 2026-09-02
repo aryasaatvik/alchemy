@@ -4,7 +4,9 @@ import { ArtifactsBindingProxy } from "../../bindings/ArtifactsRpc.ts";
 import { ConfigError, SystemError } from "../../RuntimeError.shared.ts";
 import { makeErrorResponse } from "../../internal/response.shared.ts";
 
-interface Env extends Record<string, unknown> {}
+interface Env extends Record<string, unknown> {
+  __ALCHEMY_REMOTE_ACCOUNT_ID: string;
+}
 
 class BindingNotFoundError extends Error {
   readonly bindingName?: string;
@@ -73,7 +75,11 @@ function getExposedJSRPCBinding(request: Request, env: Env) {
   }
 
   if (url.searchParams.get("MF-Binding-Type") === "artifacts") {
-    return new ArtifactsBindingProxy(targetBinding as Artifacts);
+    return new ArtifactsBindingProxy(
+      targetBinding as Artifacts,
+      env.__ALCHEMY_REMOTE_ACCOUNT_ID,
+      url.searchParams.get("MF-Artifacts-Namespace") ?? undefined,
+    );
   }
 
   if (url.searchParams.has("MF-Dispatch-Namespace-Options")) {

@@ -9,6 +9,7 @@ import {
 interface Props {
   binding: string;
   bindingType: string;
+  namespace?: string;
 }
 
 class ArtifactsRepositoryMethodsBridge extends RpcTarget {
@@ -48,6 +49,7 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
       ctx.props.binding,
       undefined,
       ctx.props.bindingType,
+      ctx.props.namespace,
     );
 
     return new Proxy(this, {
@@ -136,11 +138,15 @@ export function makeRemoteProxyStub(
   bindingName: string,
   metadata?: ProxyMetadata,
   bindingType?: string,
+  artifactsNamespace?: string,
 ): Fetcher {
   const url = new URL("ws://stub");
   url.searchParams.set("MF-Binding", bindingName);
   if (bindingType) {
     url.searchParams.set("MF-Binding-Type", bindingType);
+  }
+  if (artifactsNamespace) {
+    url.searchParams.set("MF-Artifacts-Namespace", artifactsNamespace);
   }
   if (metadata) {
     for (const [key, value] of Object.entries(metadata)) {

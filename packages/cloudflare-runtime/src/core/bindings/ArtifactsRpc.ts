@@ -140,10 +140,14 @@ export const hydrateArtifactsRepository = ({
 
 export class ArtifactsBindingProxy extends RpcTarget {
   readonly #binding: Artifacts;
+  readonly #accountId: string | undefined;
+  readonly #namespace: string | undefined;
 
-  constructor(binding: Artifacts) {
+  constructor(binding: Artifacts, accountId?: string, namespace?: string) {
     super();
     this.#binding = binding;
+    this.#accountId = accountId;
+    this.#namespace = namespace;
   }
 
   async create(
@@ -167,11 +171,47 @@ export class ArtifactsBindingProxy extends RpcTarget {
 
   async getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult> {
     try {
+      type RepositoryList = {
+        readonly repos: ReadonlyArray<
+          Omit<ArtifactsRepositoryMetadata, "remote"> &
+            Partial<Pick<ArtifactsRepositoryMetadata, "remote">>
+        >;
+        readonly total: number;
+        readonly cursor?: string;
+      };
+      let cursor: string | undefined;
+      let repository: RepositoryList["repos"][number] | undefined;
+      do {
+        const result = JSON.parse(
+          JSON.stringify(await this.#binding.list({ limit: 100, cursor })),
+        ) as RepositoryList;
+        repository = result.repos.find((candidate) => candidate.name === name);
+        cursor = result.cursor;
+      } while (repository === undefined && cursor !== undefined);
+      if (repository === undefined) {
+        return {
+          ok: false,
+          error: {
+            name: "ArtifactsError",
+            message: `Repository not found: ${name}.`,
+            code: "NOT_FOUND",
+            numericCode: 10_001,
+          },
+        };
+      }
+      const remote =
+        repository.remote ??
+        (this.#accountId !== undefined && this.#namespace !== undefined
+          ? `https://${this.#accountId}.artifacts.cloudflare.net/git/${encodeURIComponent(this.#namespace)}/${encodeURIComponent(name)}.git`
+          : undefined);
+      if (remote === undefined) {
+        throw new Error(
+          "Artifacts repository metadata requires account and namespace context.",
+        );
+      }
       return {
         ok: true,
-        metadata: serializeArtifactsRepositoryMetadata(
-          await this.#binding.get(name),
-        ),
+        metadata: { ...repository, remote },
       };
     } catch (error) {
       return { ok: false, error: exposeArtifactsError(error) };

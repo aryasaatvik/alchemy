@@ -129,21 +129,60 @@ describe("Artifacts remote binding", () => {
     expect(calls).toEqual([["createToken", "read", 3_600]]);
   });
 
-  it("preserves structured Artifacts errors across Cap'n Web", async () => {
-    const notFound = Object.assign(
-      new Error("Repository not found: missing."),
-      {
-        name: "ArtifactsError" as const,
-        code: "NOT_FOUND" as const,
-        numericCode: 10_001,
-      },
-    );
+  it("reconstructs the Git remote from repository-list metadata", async () => {
     const binding = {
       create: async () => {
         throw new Error("not used");
       },
       get: async () => {
-        throw notFound;
+        throw new Error("repository handles are not metadata records");
+      },
+      import: async () => {
+        throw new Error("not used");
+      },
+      list: async () => ({
+        repos: [
+          {
+            id: "repo-id",
+            name: "starter",
+            description: null,
+            defaultBranch: "main",
+            createdAt: "2026-09-01T00:00:00.000Z",
+            updatedAt: "2026-09-01T00:00:00.000Z",
+            lastPushAt: null,
+            source: null,
+            readOnly: false,
+          },
+        ],
+        total: 1,
+      }),
+      delete: async () => false,
+    } satisfies Artifacts;
+    const proxy = new ArtifactsBindingProxy(
+      binding,
+      "account-id",
+      "samva-templates-development",
+    );
+
+    const result = await proxy.getMetadata("starter");
+
+    expect(result).toMatchObject({
+      ok: true,
+      metadata: {
+        id: "repo-id",
+        remote:
+          "https://account-id.artifacts.cloudflare.net/git/samva-templates-development/starter.git",
+      },
+    });
+  });
+
+  it("preserves structured Artifacts errors across Cap'n Web", async () => {
+    const binding = {
+      create: async () => {
+        throw new Error("not used");
+      },
+      get: async () => {
+        throw new Error("repository handles are not metadata records");
       },
       import: async () => {
         throw new Error("not used");
