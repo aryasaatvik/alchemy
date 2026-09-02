@@ -18,20 +18,20 @@ class ArtifactsRepositoryMethodsBridge extends RpcTarget {
     this.#methods = methods;
   }
 
-  createToken(scope?: "write" | "read", ttl?: number) {
-    return this.#methods.createToken(scope, ttl);
+  async createToken(scope?: "write" | "read", ttl?: number) {
+    return await this.#methods.createToken(scope, ttl);
   }
 
-  listTokens() {
-    return this.#methods.listTokens();
+  async listTokens() {
+    return await this.#methods.listTokens();
   }
 
-  revokeToken(tokenOrId: string) {
-    return this.#methods.revokeToken(tokenOrId);
+  async revokeToken(tokenOrId: string) {
+    return await this.#methods.revokeToken(tokenOrId);
   }
 
-  fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return this.#methods.fork(name, options);
+  async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return await this.#methods.fork(name, options);
   }
 }
 
@@ -70,6 +70,15 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
               ) => Promise<ArtifactsRepositoryOperations>
             )(name);
             return new ArtifactsRepositoryMethodsBridge(methods);
+          };
+        }
+        if (
+          ctx.props.bindingType === "artifacts" &&
+          (prop === "create" || prop === "import" || prop === "list" || prop === "delete")
+        ) {
+          return async (...args: unknown[]) => {
+            const operation = Reflect.get(stub, prop) as (...args: unknown[]) => Promise<unknown>;
+            return await operation(...args);
           };
         }
         if (Reflect.has(target, prop)) {
