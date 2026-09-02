@@ -52,10 +52,8 @@ export default function makeBinding(env: Env): Artifacts {
   return {
     create: (name, options) => env.proxyClient.create(name, options),
     async get(name) {
-      const [metadata, methods] = await Promise.all([
-        env.proxyClient.artifactsGetMetadata(name),
-        env.proxyClient.artifactsGetMethods(name),
-      ]);
+      const metadata = await env.proxyClient.artifactsGetMetadata(name);
+      const methods = await env.proxyClient.artifactsGetMethods(name);
       return hydrateRepository({ metadata, methods });
     },
     import: (params) => env.proxyClient.import(params),

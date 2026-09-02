@@ -5,6 +5,7 @@ import {
   ArtifactsBindingProxy,
   exposeArtifactsRepository,
   hydrateArtifactsRepository,
+  type ArtifactsRepositoryMetadataResult,
   type ArtifactsRepositoryWire,
 } from "../../bindings/ArtifactsRpc.ts";
 
@@ -124,5 +125,50 @@ describe("Artifacts remote binding", () => {
     expect(exposed.remote).toBe("https://example.com/starter.git");
     await exposed.createToken("read", 3_600);
     expect(calls).toEqual([["createToken", "read", 3_600]]);
+  });
+
+  it("preserves structured Artifacts errors across Cap'n Web", async () => {
+    const notFound = Object.assign(
+      new Error("Repository not found: missing."),
+      {
+        name: "ArtifactsError" as const,
+        code: "NOT_FOUND" as const,
+        numericCode: 10_001,
+      },
+    );
+    const binding = {
+      create: async () => {
+        throw new Error("not used");
+      },
+      get: async () => {
+        throw notFound;
+      },
+      import: async () => {
+        throw new Error("not used");
+      },
+      list: async () => ({ repos: [], total: 0 }),
+      delete: async () => false,
+    } satisfies Artifacts;
+    const channel = new MessageChannel();
+
+    using server = newMessagePortRpcSession(
+      channel.port1,
+      new ArtifactsBindingProxy(binding),
+    );
+    using client = newMessagePortRpcSession<{
+      getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult>;
+    }>(channel.port2);
+
+    const result = await client.getMetadata("missing");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        name: "ArtifactsError",
+        message: "Repository not found: missing.",
+        code: "NOT_FOUND",
+        numericCode: 10_001,
+      },
+    });
   });
 });

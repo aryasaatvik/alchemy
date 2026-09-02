@@ -1,8 +1,8 @@
 import { newWebSocketRpcSession } from "capnweb";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
+  type ArtifactsRepositoryMetadataResult,
   type ArtifactsRepositoryOperations,
-  type ArtifactsRepositoryMetadata,
 } from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
@@ -57,11 +57,18 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
         ) {
           return async (name: string) => {
             if (prop === "artifactsGetMetadata") {
-              return (
+              const result = await (
                 Reflect.get(stub, "getMetadata") as (
                   name: string,
-                ) => Promise<ArtifactsRepositoryMetadata>
+                ) => Promise<ArtifactsRepositoryMetadataResult>
               )(name);
+              if (!result.ok) {
+                throw Object.assign(
+                  new Error(result.error.message),
+                  result.error,
+                );
+              }
+              return result.metadata;
             }
             const methods = await (
               Reflect.get(stub, "getMethods") as (

@@ -60,6 +60,40 @@ export type ArtifactsRepositoryWire = {
   readonly methods: ArtifactsRepositoryOperations;
 };
 
+export type ArtifactsErrorWire = {
+  readonly name: "ArtifactsError";
+  readonly message: string;
+  readonly code: ArtifactsErrorCode;
+  readonly numericCode: number;
+};
+
+export type ArtifactsRepositoryMetadataResult =
+  | { readonly ok: true; readonly metadata: ArtifactsRepositoryMetadata }
+  | { readonly ok: false; readonly error: ArtifactsErrorWire };
+
+const exposeArtifactsError = (error: unknown): ArtifactsErrorWire => {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    "numericCode" in error &&
+    typeof error.numericCode === "number"
+  ) {
+    return {
+      name: "ArtifactsError",
+      message: error.message,
+      code: error.code as ArtifactsErrorCode,
+      numericCode: error.numericCode,
+    };
+  }
+  return {
+    name: "ArtifactsError",
+    message: error instanceof Error ? error.message : "Unknown Artifacts error",
+    code: "INTERNAL_ERROR",
+    numericCode: 0,
+  };
+};
+
 export const exposeArtifactsRepository = (
   repository: ArtifactsRepo,
 ): ArtifactsRepositoryWire => ({
@@ -112,17 +146,16 @@ export class ArtifactsBindingProxy extends RpcTarget {
     return exposeArtifactsRepository(await this.#binding.get(name));
   }
 
-  async getMetadata(name: string): Promise<ArtifactsRepositoryMetadata> {
-    let cursor: string | undefined;
-    do {
-      const page = await this.#binding.list({ limit: 200, cursor });
-      const repository = (
-        page.repos as Array<ArtifactsRepositoryMetadata>
-      ).find((candidate) => candidate.name === name);
-      if (repository) return repository;
-      cursor = page.cursor;
-    } while (cursor);
-    throw new Error(`Artifacts repository '${name}' was not found`);
+  async getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult> {
+    try {
+      return {
+        ok: true,
+        metadata: exposeArtifactsRepository(await this.#binding.get(name))
+          .metadata,
+      };
+    } catch (error) {
+      return { ok: false, error: exposeArtifactsError(error) };
+    }
   }
 
   async getMethods(name: string): Promise<ArtifactsRepositoryOperations> {
