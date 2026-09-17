@@ -35,6 +35,7 @@ export * from "./Subdomain.ts";
 export * from "./Telemetry.ts";
 export * from "./VersionMetadata.ts";
 export * from "./VersionMetadataBinding.ts";
+export * from "./ViteFramework.ts";
 export * from "./WebSocket.ts";
 export * from "./Worker.ts";
 export * from "./WorkerAccess.ts";

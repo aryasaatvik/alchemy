@@ -52,7 +52,10 @@ export const withProviderContext = <R extends ResourceLike>(
       }
       if (!Predicate.isFunction(value)) return value;
       return (...args: any[]) => {
-        const result: unknown = value(...args);
+        // Preserve the provider receiver for methods that read instance
+        // state (notably the lazily-resolved mode collection). The proxy
+        // still supplies the captured services to the returned Effect.
+        const result: unknown = Reflect.apply(value, target, args);
         if (Stream.isStream(result)) {
           return Stream.provide(result, services);
         }

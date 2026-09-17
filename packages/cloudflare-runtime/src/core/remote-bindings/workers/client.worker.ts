@@ -1,8 +1,40 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import {
+  type ArtifactsRepositoryMetadataResult,
+  type ArtifactsRepositoryOperations,
+  type ArtifactsRepositoryWireOperations,
+} from "../../bindings/ArtifactsRpc.ts";
 
 interface Props {
   binding: string;
+  bindingType: string;
+  namespace?: string;
+}
+
+class ArtifactsRepositoryMethodsBridge extends RpcTarget {
+  readonly #methods: ArtifactsRepositoryWireOperations;
+
+  constructor(methods: ArtifactsRepositoryWireOperations) {
+    super();
+    this.#methods = methods;
+  }
+
+  async createToken(scope?: "write" | "read", ttl?: number) {
+    return JSON.parse(await this.#methods.createToken(scope, ttl));
+  }
+
+  async listTokens() {
+    return JSON.parse(await this.#methods.listTokens());
+  }
+
+  async revokeToken(tokenOrId: string) {
+    return await this.#methods.revokeToken(tokenOrId);
+  }
+
+  async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return JSON.parse(await this.#methods.fork(name, options));
+  }
 }
 
 /** Generic remote proxy client for bindings. */
@@ -13,10 +45,51 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
 
   constructor(ctx: ExecutionContext<Props>, env: unknown) {
     super(ctx, env);
-    const stub = makeRemoteProxyStub(ctx.props.binding);
+    const stub = makeRemoteProxyStub(
+      ctx.props.binding,
+      undefined,
+      ctx.props.bindingType,
+      ctx.props.namespace,
+    );
 
     return new Proxy(this, {
       get: (target, prop) => {
+        if (
+          ctx.props.bindingType === "artifacts" &&
+          (prop === "artifactsGetMetadata" || prop === "artifactsGetMethods")
+        ) {
+          return async (name: string) => {
+            if (prop === "artifactsGetMetadata") {
+              const result = await (
+                Reflect.get(stub, "getMetadata") as (
+                  name: string,
+                ) => Promise<ArtifactsRepositoryMetadataResult>
+              )(name);
+              return result;
+            }
+            const methods = await (
+              Reflect.get(stub, "getMethods") as (
+                name: string,
+              ) => Promise<ArtifactsRepositoryWireOperations>
+            )(name);
+            return new ArtifactsRepositoryMethodsBridge(methods);
+          };
+        }
+        if (
+          ctx.props.bindingType === "artifacts" &&
+          (prop === "create" ||
+            prop === "import" ||
+            prop === "list" ||
+            prop === "delete")
+        ) {
+          return async (...args: unknown[]) => {
+            const operation = Reflect.get(stub, prop) as (
+              ...args: unknown[]
+            ) => Promise<unknown>;
+            const result = await operation(...args);
+            return prop === "delete" ? result : JSON.parse(result as string);
+          };
+        }
         if (Reflect.has(target, prop)) {
           return Reflect.get(target, prop);
         }
@@ -69,9 +142,17 @@ export function makeFetch(bindingName: string, extraHeaders?: Headers) {
 export function makeRemoteProxyStub(
   bindingName: string,
   metadata?: ProxyMetadata,
+  bindingType?: string,
+  artifactsNamespace?: string,
 ): Fetcher {
   const url = new URL("ws://stub");
   url.searchParams.set("MF-Binding", bindingName);
+  if (bindingType) {
+    url.searchParams.set("MF-Binding-Type", bindingType);
+  }
+  if (artifactsNamespace) {
+    url.searchParams.set("MF-Artifacts-Namespace", artifactsNamespace);
+  }
   if (metadata) {
     for (const [key, value] of Object.entries(metadata)) {
       if (value !== undefined) {

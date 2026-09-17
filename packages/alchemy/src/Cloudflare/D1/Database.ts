@@ -23,6 +23,7 @@ import {
 import { hashImports, readSqlFile } from "../../SQL/SqlFile.ts";
 import { recordsEqual } from "../../Util/equal.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import {
   generateLocalId,
   LOCAL_PROVIDERS_URL,
@@ -709,7 +710,10 @@ export const DatabaseProvider = () =>
     // and unused) and the provider group (`../Local.ts`) supplies the real
     // runtime; without the proxy the provider builds in-process and this
     // layer is real.
-    local: () => ProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+    local: () =>
+      provideLocalEnvironment(
+        ProviderLocal().pipe(Layer.provide(localRuntimeServices())),
+      ),
     live: () => ProviderLive(),
   });
 

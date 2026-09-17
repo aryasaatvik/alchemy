@@ -30,18 +30,32 @@ export class AlchemyContext extends EffectContext.Service<
   }
 >()("alchemy/Context") {}
 
-export const AlchemyContextLive = Layer.effect(
-  AlchemyContext,
+export interface AlchemyContextOptions {
+  /**
+   * Root for evaluation-owned state, logs, local-provider data, and build
+   * artifacts. Relative paths resolve from the invoking process's cwd.
+   * @default "<cwd>/.alchemy"
+   */
+  readonly dataDir?: string;
+}
+
+/** Build an evaluation context with one canonical absolute data root. */
+export const makeAlchemyContext = (options: AlchemyContextOptions = {}) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const dir = path.join(process.cwd(), ".alchemy");
+    const cwd = yield* Effect.sync(() => process.cwd());
+    const dir = path.resolve(cwd, options.dataDir ?? ".alchemy");
     yield* fs.makeDirectory(dir, { recursive: true });
-    return {
+    return AlchemyContext.of({
       dotAlchemy: dir,
       updateStateStore: false,
       dev: false,
       adopt: false,
-    };
-  }),
+    });
+  });
+
+export const AlchemyContextLive = Layer.effect(
+  AlchemyContext,
+  makeAlchemyContext(),
 );

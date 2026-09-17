@@ -38,10 +38,19 @@ const workerConfig = (
     }),
     InternalWorkerExportPlugin(),
   ] as unknown as UserConfig["plugins"],
+  inputOptions: {
+    experimental: {
+      // Preserve dependency execution order inside scope-hoisted worker
+      // chunks. Alphabetical module-id ordering can invoke bundled CommonJS
+      // initializers before their declarations.
+      chunkModulesOrder: "exec-order",
+    },
+  },
   deps: {
     alwaysBundle: [/.+/],
   },
   outputOptions: {
+    codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
     entryFileNames: "[name].mjs",
   },
 });
@@ -134,17 +143,26 @@ export default defineConfig([
       }),
       InternalWorkerExportPlugin(),
     ],
+    inputOptions: {
+      experimental: {
+        chunkModulesOrder: "exec-order",
+      },
+    },
     deps: {
       alwaysBundle: [/.+/],
     },
     dts: false,
     outputOptions: {
+      codeSplitting: { minShareCount: Number.MAX_SAFE_INTEGER },
       entryFileNames: "[name].mjs",
     },
   },
   {
     cwd: ".",
-    entry: ["src/vite/plugin.ts"],
+    entry: {
+      plugin: "src/vite/plugin.ts",
+      framework: "src/vite/framework.ts",
+    },
     exports: false,
     outDir: "dist/vite/node",
     tsconfig: "tsconfig.json",

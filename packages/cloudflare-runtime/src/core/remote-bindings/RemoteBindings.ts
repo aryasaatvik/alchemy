@@ -18,9 +18,18 @@ const OutboundWorker = {
       "#cloudflare-runtime-core-worker/remote-bindings/workers/outbound.worker",
     ),
 };
+const ArtifactsBindingWorker = {
+  worker: () =>
+    loadInternalWorker(
+      "#cloudflare-runtime-core-worker/bindings/artifacts.worker",
+    ),
+};
 import * as Loopback from "../globals/Loopback.ts";
 import { DEFAULT_COMPATIBILITY_DATE } from "../internal/constants.ts";
-import { formatInternalWorkerModules } from "../internal/internal-modules.ts";
+import {
+  formatExtensionModule,
+  formatInternalWorkerModules,
+} from "../internal/internal-modules.ts";
 import * as Plugin from "../Plugin.ts";
 import * as PluginContext from "../PluginContext.ts";
 import type {
@@ -98,6 +107,11 @@ export const RemoteBindingsLive = Layer.effect(
           ),
         { concurrency: "unbounded" },
       );
+      const artifactsExtension = config.bindings.some(
+        (binding) => binding.type === "artifacts",
+      )
+        ? yield* formatExtensionModule(ArtifactsBindingWorker)
+        : undefined;
       const outbound = {
         name: "remote-bindings:outbound",
         worker: {
@@ -137,6 +151,21 @@ export const RemoteBindingsLive = Layer.effect(
       } satisfies WorkerdConfig.Service;
       return {
         services: [client, outbound],
+        ...(artifactsExtension
+          ? {
+              extensions: [
+                {
+                  modules: [
+                    {
+                      name: "cloudflare-runtime:artifacts",
+                      internal: true,
+                      esModule: artifactsExtension,
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}),
       };
     });
     return RemoteBindings.of(
@@ -156,7 +185,13 @@ export const RemoteBindingsLive = Layer.effect(
                 return {
                   name: "remote-bindings:client",
                   props: {
-                    json: JSON.stringify({ binding: binding.name }),
+                    json: JSON.stringify({
+                      binding: binding.name,
+                      bindingType: binding.type,
+                      ...(binding.type === "artifacts"
+                        ? { namespace: binding.namespace }
+                        : {}),
+                    }),
                   },
                 };
               }),

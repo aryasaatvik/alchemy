@@ -38,6 +38,9 @@ const COMMAND_PROVIDERS_TS_URL = new URL(
 const LONG_RUNNING_CJS = fileURLToPath(
   new URL("../Command/fixture/long-running.cjs", import.meta.url),
 );
+const IGNORE_TERM_TREE_CJS = fileURLToPath(
+  new URL("../Command/fixture/ignore-term-tree.cjs", import.meta.url),
+);
 
 for (const runtime of runtimes()) {
   describe.skipIf(!runtime.available)(
@@ -133,6 +136,7 @@ for (const runtime of runtimes()) {
               prefix: "alchemy-devserver-",
             });
             const pidFile = `${tmpDir}/${process.pid}-${runtime.name}.json`;
+            const shutdownFile = `${tmpDir}/${process.pid}-${runtime.name}.shutdown`;
             const child = yield* ChildProcess.make(
               bin,
               [
@@ -141,6 +145,7 @@ for (const runtime of runtimes()) {
                 COMMAND_PROVIDERS_TS_URL,
                 `node ${LONG_RUNNING_CJS}`,
                 pidFile,
+                shutdownFile,
               ],
               {
                 stdout: "pipe",
@@ -187,6 +192,70 @@ for (const runtime of runtimes()) {
             yield* killPid(parentPid, "SIGTERM");
             yield* waitForExit(child, Duration.seconds(10));
             yield* assertPidExited(devServerPid);
+            expect(JSON.parse(yield* fs.readFileString(shutdownFile))).toEqual({
+              pid: devServerPid,
+              marker: "rpc-devserver",
+            });
+          }).pipe(Effect.provide(PlatformServices)),
+        { timeout: 45_000 },
+      );
+
+      it.live(
+        "DevServer escalation kills an ignoring process group after parent exit",
+        () =>
+          Effect.gen(function* () {
+            const [bin, ...args] = runtime.argv(DEVSERVER_PARENT_TS);
+            const fs = yield* FileSystem.FileSystem;
+            const tmpDir = yield* fs.makeTempDirectory({
+              prefix: "alchemy-devserver-ignore-",
+            });
+            const pidFile = `${tmpDir}/${process.pid}-${runtime.name}.json`;
+            const shutdownFile = `${tmpDir}/${process.pid}-${runtime.name}.shutdown`;
+            const child = yield* ChildProcess.make(
+              bin,
+              [
+                ...args,
+                DEVSERVER_SIDECAR_TS_URL,
+                `node ${IGNORE_TERM_TREE_CJS}`,
+                pidFile,
+                shutdownFile,
+              ],
+              { stdout: "pipe" },
+            );
+            const output = yield* child.stdout.pipe(
+              Stream.decodeText,
+              Stream.run(
+                Sink.fold(
+                  () => "",
+                  (acc) =>
+                    !acc.includes("PARENT_PID=") ||
+                    !acc.includes("DEVSERVER_PID="),
+                  (acc, chunk) => Effect.succeed(acc + chunk),
+                ),
+              ),
+              Effect.timeout("30 seconds"),
+            );
+            const parentPid = Number.parseInt(
+              output.match(/PARENT_PID=(\d+)/)?.[1]!,
+              10,
+            );
+            const pids = JSON.parse(yield* fs.readFileString(pidFile)) as {
+              pid: number;
+              descendantPid: number;
+            };
+            yield* Effect.addFinalizer(() =>
+              Effect.all(
+                [
+                  killPid(pids.pid, "SIGKILL"),
+                  killPid(pids.descendantPid, "SIGKILL"),
+                ],
+                { discard: true },
+              ),
+            );
+            yield* killPid(parentPid, "SIGTERM");
+            yield* waitForExit(child, Duration.seconds(10));
+            yield* assertPidExited(pids.pid);
+            yield* assertPidExited(pids.descendantPid);
           }).pipe(Effect.provide(PlatformServices)),
         { timeout: 45_000 },
       );

@@ -6,7 +6,13 @@ import { PlatformServices } from "@/Util/PlatformServices";
 import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+
+const localStateServices = Layer.provideMerge(
+  AlchemyContextLive,
+  PlatformServices,
+);
 
 const resource = (
   fqn: string,
@@ -57,7 +63,7 @@ describe("makeLocalState", () => {
       expect(
         yield* state.getReplacedResources({ stack, stage: "test" }),
       ).toEqual([]);
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("set/get roundtrip with list, listStacks and listStages", () =>
@@ -85,7 +91,7 @@ describe("makeLocalState", () => {
       expect(yield* state.listStages(stack)).toEqual([stage]);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("delete removes one resource without touching its siblings", () =>
@@ -111,7 +117,7 @@ describe("makeLocalState", () => {
       expect(yield* state.get({ stack, stage, fqn: a.fqn })).toEqual(a);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("list excludes bookkeeping, in-flight and non-json files", () =>
@@ -131,7 +137,7 @@ describe("makeLocalState", () => {
       expect(yield* state.list({ stack, stage })).toEqual(["resource-a"]);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("get treats a zero-length state file as absent", () =>
@@ -150,7 +156,7 @@ describe("makeLocalState", () => {
       ).toBeUndefined();
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("getReplacedResources returns only replaced resources", () =>
@@ -172,7 +178,7 @@ describe("makeLocalState", () => {
       ]);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("setOutput/getOutput roundtrip", () =>
@@ -186,7 +192,7 @@ describe("makeLocalState", () => {
       expect(yield* state.getOutput({ stack, stage })).toEqual(value);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("set persists again after deleteStack removes the stage dir", () =>
@@ -210,7 +216,7 @@ describe("makeLocalState", () => {
       expect(yield* state.get(key)).toMatchObject({ attr: { round: 2 } });
 
       yield* state.deleteStack({ stack: key.stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("set persists again after a stage-scoped deleteStack", () =>
@@ -230,7 +236,7 @@ describe("makeLocalState", () => {
       expect(yield* state.get(key)).toMatchObject({ attr: { round: 2 } });
 
       yield* state.deleteStack({ stack: key.stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("whole-stack deleteStack invalidates every stage's cache", () =>
@@ -275,7 +281,7 @@ describe("makeLocalState", () => {
       });
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("stage-scoped deleteStack leaves the sibling stage intact", () =>
@@ -325,7 +331,7 @@ describe("makeLocalState", () => {
       });
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("setOutput persists again after deleteStack", () =>
@@ -343,14 +349,14 @@ describe("makeLocalState", () => {
       expect(yield* state.getOutput({ stack, stage })).toEqual({ round: 2 });
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("getVersion returns the state store version", () =>
     Effect.gen(function* () {
       const state = yield* makeLocalState();
       expect(yield* state.getVersion()).toBe(STATE_STORE_VERSION);
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("deleteStack removes the stack from listings", () =>
@@ -368,7 +374,7 @@ describe("makeLocalState", () => {
 
       expect(yield* state.listStacks()).not.toContain(stack);
       expect(yield* state.listStages(stack)).toEqual([]);
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   it.effect("concurrent writes to the same resource never corrupt it", () =>
@@ -392,7 +398,7 @@ describe("makeLocalState", () => {
       expect(rounds).toContain((final.attr as { round: number }).round);
 
       yield* state.deleteStack({ stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.provide(localStateServices)),
   );
 
   describe("weird names", () => {
@@ -413,7 +419,7 @@ describe("makeLocalState", () => {
         expect(yield* state.get({ stack, stage, fqn })).toBeUndefined();
 
         yield* state.deleteStack({ stack });
-      }).pipe(Effect.provide(PlatformServices)),
+      }).pipe(Effect.provide(localStateServices)),
     );
 
     it.effect("empty-string fqn roundtrips", () =>
@@ -428,7 +434,7 @@ describe("makeLocalState", () => {
         expect(yield* state.list({ stack, stage })).toEqual([""]);
 
         yield* state.deleteStack({ stack });
-      }).pipe(Effect.provide(PlatformServices)),
+      }).pipe(Effect.provide(localStateServices)),
     );
 
     it.effect("literal __ in a logical id: get roundtrips, list decodes", () =>
@@ -448,7 +454,7 @@ describe("makeLocalState", () => {
         expect(yield* state.list({ stack, stage })).toEqual(["foo/bar"]);
 
         yield* state.deleteStack({ stack });
-      }).pipe(Effect.provide(PlatformServices)),
+      }).pipe(Effect.provide(localStateServices)),
     );
 
     it.effect("a resource named __stack_output__ never surfaces in list", () =>
@@ -462,7 +468,7 @@ describe("makeLocalState", () => {
         expect(yield* state.list({ stack, stage })).toEqual([]);
 
         yield* state.deleteStack({ stack });
-      }).pipe(Effect.provide(PlatformServices)),
+      }).pipe(Effect.provide(localStateServices)),
     );
 
     it.effect("overlong names fail with a typed StateStoreError", () =>
@@ -486,7 +492,8 @@ describe("makeLocalState", () => {
         expect(getError._tag).toBe("StateStoreError");
 
         yield* state.deleteStack({ stack });
-      }).pipe(Effect.provide(PlatformServices)),
+      }).pipe(Effect.provide(localStateServices)),
     );
   });
 });
+import { AlchemyContextLive } from "@/AlchemyContext.ts";

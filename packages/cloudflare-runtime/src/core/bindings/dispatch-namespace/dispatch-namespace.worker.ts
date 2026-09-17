@@ -20,7 +20,7 @@ export default function makeBinding(env: Env): DispatchNamespace {
         connect() {
           throw new Error("DispatchNamespace.get().connect() is not supported");
         },
-      } as Fetcher;
+      } as unknown as Fetcher;
     },
   } satisfies DispatchNamespace;
 }

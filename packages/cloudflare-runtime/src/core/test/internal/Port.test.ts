@@ -29,6 +29,26 @@ describe("Port.find", () => {
       expect(next).toBeGreaterThan(occupied.port);
     }),
   );
+
+  it.effect(
+    "does not let a stale owner release another allocator's lease",
+    () =>
+      Effect.gen(function* () {
+        const port = yield* PortHelpers.find(0);
+        const stale = yield* Port.make({ cache: false });
+        const owner = yield* Port.make({ cache: false });
+        const observer = yield* Port.make({ cache: false });
+
+        yield* stale.reserve(port);
+        yield* owner.reserve(port);
+        yield* stale.release(port);
+        expect(yield* observer.check(port).pipe(Effect.flip)).toBeDefined();
+
+        yield* owner.release(port);
+        expect(yield* observer.check(port)).toBe(port);
+        yield* observer.release(port);
+      }),
+  );
 });
 
 describe("Port.isUnsupportedHostError", () => {

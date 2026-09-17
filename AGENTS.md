@@ -4,6 +4,10 @@ Alchemy Effect is an Infrastructure-as-Effects (IaE) framework that extends Infr
 
 It includes a core IaC engine built with Effect. Effect provides the foundation for type-safe, composable, and testable infrastructure programs. It brings errors into the type-system and provides declarative/composable retry logic that ensure proper and reliable handling of failures.
 
+On the `samva/integration` distribution branch, read [docs/samva-integration.md](./docs/samva-integration.md)
+before changing the integration history, Distilled gitlink, package artifact, checkpoint, or Samva
+consumer pin.
+
 # Concepts
 
 - **Cloud Provider** - a cloud provider that offers a set of Services, e.g. AWS, Azure, GCP, Cloudflare, Stripe, Planetscale, Neon, etc.

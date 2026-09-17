@@ -6,6 +6,7 @@ import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { provideLocalEnvironment } from "../LocalEnvironment.ts";
 import { generateLocalId } from "../LocalRuntime.ts";
 import type { Providers } from "../Providers.ts";
 
@@ -201,7 +202,7 @@ export const StoreProviderLocal = () =>
 
 export const SecretsStoreProvider = () =>
   ProviderLayer.dual(Store, {
-    local: () => StoreProviderLocal(),
+    local: () => provideLocalEnvironment(StoreProviderLocal()),
     live: () => StoreProviderLive(),
   });
 

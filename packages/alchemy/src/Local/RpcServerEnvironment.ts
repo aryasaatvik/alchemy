@@ -1,9 +1,14 @@
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { AlchemyContext } from "../AlchemyContext.ts";
+import {
+  FlociProfileService,
+  type FlociProfileTransport,
+} from "../AWS/Local/FlociServices.ts";
 import { AuthProviders } from "../Auth/AuthProvider.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileStoreLive } from "../Auth/Profile.ts";
@@ -25,7 +30,18 @@ export interface SessionEnvironment {
     name: string;
     stage: string;
   };
+  /** Profile selected by the parent for AWS local providers in this session. */
+  flociProfile?: FlociProfileTransport;
 }
+
+/** Provider-specific data supplied by the stack process for this RPC build. */
+export class ProviderSessionConfig extends Context.Service<
+  ProviderSessionConfig,
+  {
+    readonly type: string;
+    readonly value: unknown;
+  }
+>()("alchemy/Local/ProviderSessionConfig") {}
 
 export interface RpcServerEnvironment {
   profile: string | undefined;
@@ -55,7 +71,12 @@ export type RpcEnvironmentServices = Layer.Success<ReturnType<typeof layer>>;
 
 export const layer = (
   environment: Pick<RpcServerEnvironment, "profile" | "envFile"> &
-    SessionEnvironment,
+    SessionEnvironment & {
+      readonly providerSessionConfig?: {
+        readonly type: string;
+        readonly value: unknown;
+      };
+    },
 ) =>
   Layer.mergeAll(
     ProfileStoreLive,
@@ -75,6 +96,11 @@ export const layer = (
       actions: {},
     }),
     Layer.succeed(Stage, environment.stack.stage),
+    Layer.succeed(FlociProfileService, environment.flociProfile ?? {}),
+    Layer.succeed(
+      ProviderSessionConfig,
+      environment.providerSessionConfig ?? { type: "", value: undefined },
+    ),
   );
 
 export const RPC_SERVER_ENVIRONMENT_KEY =

@@ -72,6 +72,7 @@ import * as Intel from "./Intel/index.ts";
 import * as KeylessCertificate from "./KeylessCertificate/index.ts";
 import * as KV from "./KV/index.ts";
 import * as LeakedCredentialCheck from "./LeakedCredentialCheck/index.ts";
+import { retainedLiveEnvironment } from "./LocalEnvironment.ts";
 import * as LoadBalancer from "./LoadBalancer/index.ts";
 import * as Logpush from "./Logpush/index.ts";
 import * as LogsControl from "./LogsControl/index.ts";
@@ -675,8 +676,9 @@ export const providers = () =>
  * in the SDK's global error map, so that default covers them.
  */
 export const CloudflareApiLive = () =>
-  Credentials.fromAuthProvider().pipe(
+  retainedLiveEnvironment.pipe(
     Layer.provideMerge(CloudflareEnvironment.fromProfile()),
+    Layer.provideMerge(Credentials.fromAuthProvider()),
     Layer.provideMerge(CloudflareAuth),
     Layer.provideMerge(Access.AccessLive),
     Layer.provideMerge(ProfileStoreLive),

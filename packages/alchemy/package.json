@@ -95,6 +95,12 @@
       "worker": "./src/AWS/Endpoint.ts",
       "import": "./lib/AWS/Endpoint.js"
     },
+    "./AWS/Environment": {
+      "types": "./lib/AWS/Environment.d.ts",
+      "bun": "./src/AWS/Environment.ts",
+      "worker": "./src/AWS/Environment.ts",
+      "import": "./lib/AWS/Environment.js"
+    },
     "./AWS/Region": {
       "types": "./lib/AWS/Region.d.ts",
       "bun": "./src/AWS/Region.ts",
@@ -184,6 +190,12 @@
       "bun": "./src/Cloudflare/Bridge.ts",
       "worker": "./src/Cloudflare/Bridge.ts",
       "import": "./lib/Cloudflare/Bridge.js"
+    },
+    "./Cloudflare/CloudflareEnvironment": {
+      "types": "./lib/Cloudflare/CloudflareEnvironment.d.ts",
+      "bun": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "worker": "./src/Cloudflare/CloudflareEnvironment.ts",
+      "import": "./lib/Cloudflare/CloudflareEnvironment.js"
     },
     "./Cloudflare/Live": {
       "types": "./lib/Cloudflare/Live.d.ts",
@@ -345,12 +357,10 @@
       "import": "./lib/Runtime.js"
     },
     "./Runtime/Bootstrap/*": {
-      "types": "./src/Runtime/Bootstrap/*.ts",
+      "types": "./lib/Runtime/Bootstrap/*.d.ts",
       "bun": "./src/Runtime/Bootstrap/*.ts",
-      "node": "./src/Runtime/Bootstrap/*.ts",
       "worker": "./src/Runtime/Bootstrap/*.ts",
-      "import": "./src/Runtime/Bootstrap/*.ts",
-      "default": "./src/Runtime/Bootstrap/*.ts"
+      "import": "./lib/Runtime/Bootstrap/*.js"
     },
     "./Process": {
       "types": "./lib/Process/index.d.ts",
@@ -430,12 +440,6 @@
       "worker": "./src/Util/index.ts",
       "import": "./lib/Util/index.js"
     },
-    "./Util/Clank": {
-      "types": "./lib/Util/Clank.d.ts",
-      "bun": "./src/Util/Clank.ts",
-      "worker": "./src/Util/Clank.ts",
-      "import": "./lib/Util/Clank.js"
-    },
     "./Util/PlatformServices": {
       "types": "./lib/Util/PlatformServices.d.ts",
       "bun": "./src/Util/PlatformServices.ts",
@@ -462,6 +466,7 @@
     "@distilled.cloud/fly-io": "workspace:*",
     "@distilled.cloud/hetzner": "workspace:*",
     "@distilled.cloud/neon": "workspace:*",
+    "@distilled.cloud/otel-collector": "workspace:*",
     "@distilled.cloud/planetscale": "workspace:*",
     "@distilled.cloud/prisma": "workspace:*",
     "@distilled.cloud/railway": "workspace:*",

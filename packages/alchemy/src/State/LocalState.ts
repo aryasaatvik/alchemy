@@ -1,9 +1,11 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
 import { existsSync } from "node:fs";
+import { AlchemyContext } from "../AlchemyContext.ts";
 import { decodeFqn, encodeFqn } from "../FQN.ts";
 import { recordStateStoreInit } from "../Telemetry/Metrics.ts";
 import { writeFileAtomic } from "../Util/AtomicFile.ts";
@@ -46,7 +48,13 @@ export const makeLocalState = () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const dotAlchemy = path.join(initialCwd, ".alchemy");
+    // Prefer the evaluation's data directory from `AlchemyContext`; fall back to
+    // the process working directory captured at module load for contexts that do
+    // not install one (e.g. scratch/test stacks).
+    const alchemy = yield* Effect.serviceOption(AlchemyContext);
+    const dotAlchemy = Option.isSome(alchemy)
+      ? alchemy.value.dotAlchemy
+      : path.join(initialCwd, ".alchemy");
     const stateDir = path.join(dotAlchemy, "state");
 
     const fail = (err: PlatformError) =>

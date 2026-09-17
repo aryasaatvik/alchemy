@@ -193,6 +193,7 @@ export const viteBuild = (
       base: result.base,
       serverBundle: Effect.succeed(result.serverBundle),
       externalWorkspaces: Effect.succeed(new Set(result.externalWorkspaces)),
+      framework: result.framework,
     } satisfies ViteBuildOutput;
   });
 

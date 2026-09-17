@@ -40,4 +40,6 @@ const NodeServices = {
 };
 
 export const PlatformServices =
-  typeof Bun === "undefined" ? NodeServices.layer : BunServices.layer;
+  typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
+    ? NodeServices.layer
+    : BunServices.layer;

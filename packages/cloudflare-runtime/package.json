@@ -47,6 +47,7 @@
     "@puppeteer/browsers": "catalog:",
     "capnp-es": "catalog:",
     "magic-string": "catalog:",
+    "mime": "catalog:",
     "sharp": "catalog:",
     "unenv": "catalog:",
     "workerd": "catalog:",
@@ -66,7 +67,6 @@
     "heap-js": "catalog:",
     "http-cache-semantics": "catalog:",
     "itty-time": "catalog:",
-    "mime": "catalog:",
     "mysql2": "catalog:",
     "postal-mime": "catalog:",
     "rolldown": "catalog:",
@@ -782,12 +782,18 @@
       "worker": "./src/vite/plugin.ts",
       "import": "./dist/vite/node/plugin.mjs"
     },
+    "./vite/framework": {
+      "types": "./dist/vite/node/framework.d.mts",
+      "bun": "./src/vite/framework.ts",
+      "worker": "./src/vite/framework.ts",
+      "import": "./dist/vite/node/framework.mjs"
+    },
     "./package.json": "./package.json"
   },
   "inlinedDependencies": {
     "capnp-es": "0.0.14",
     "capnweb": "0.8.0",
-    "effect": "catalog:effect",
+    "effect": "catalog:",
     "http-cache-semantics": "4.2.0",
     "postal-mime": "2.7.5"
   }

@@ -2,6 +2,7 @@ import { AlchemyContext } from "@/AlchemyContext.ts";
 import * as Artifacts from "@/Artifacts.ts";
 import { InstanceId } from "@/InstanceId.ts";
 import * as RpcProvider from "@/Local/RpcProvider.ts";
+import { RpcProviderProxy } from "@/Local/RpcProviderProxy.ts";
 import type { ProviderService } from "@/Provider.ts";
 import { Resource } from "@/Resource.ts";
 import { Stack, type StackSpec } from "@/Stack.ts";
@@ -36,6 +37,52 @@ const defaultStack: StackShape = {
 };
 
 describe("Local.RpcProvider.effect", () => {
+  it.effect(
+    "forwards resolved provider session configuration to the proxy",
+    () =>
+      Effect.gen(function* () {
+        let received: unknown;
+        yield* TestResource.Provider.pipe(
+          Effect.provide(
+            RpcProvider.effect(
+              TestResource,
+              "ignored://entry",
+              Effect.die("the proxied provider must not build locally"),
+              {
+                sessionConfig: Effect.succeed({
+                  environment: { REDIS_URL: "redis://redis:6379/2" },
+                }),
+              },
+            ),
+          ),
+          Effect.provideService(
+            RpcProviderProxy,
+            RpcProviderProxy.of({
+              get: (_url, _type, config) =>
+                Effect.sync(() => {
+                  received = config;
+                  return {
+                    reconcile: Effect.fn(function* () {
+                      return { ok: true, artifact: "unused" };
+                    }),
+                    delete: Effect.fn(function* () {}),
+                    list: () => Effect.succeed([]),
+                  } as ProviderService<TestResource>;
+                }),
+            }),
+          ),
+          Effect.provideService(Stack, defaultStack),
+          Effect.provideService(
+            Artifacts.ArtifactStore,
+            Artifacts.createArtifactStore(),
+          ),
+        );
+        expect(received).toEqual({
+          environment: { REDIS_URL: "redis://redis:6379/2" },
+        });
+      }),
+  );
+
   it.effect(
     "provides default Stack, Stage, and InstanceId to lifecycle effects",
     () =>
