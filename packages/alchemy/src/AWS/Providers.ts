@@ -239,7 +239,26 @@ export class Providers extends Provider.ProviderCollection<Providers>()(
   "AWS",
 ) {}
 
-export const providers = () =>
+/** Options for {@link providers}. */
+export interface ProvidersOptions {
+  /**
+   * Route individual AWS services to their own endpoints, keyed by SDK
+   * service ID (`"SESv2"`, `"Service Quotas"`; matched case- and
+   * punctuation-insensitively). Applies to every provider, the stack
+   * program, and — in a dev run — the local emulator context, where
+   * services without an entry keep the emulator endpoint.
+   *
+   * @example
+   * ```ts
+   * AWS.providers({
+   *   serviceEndpoints: { SES: "http://127.0.0.1:8800/ses" },
+   * });
+   * ```
+   */
+  readonly serviceEndpoints?: Endpoint.ServiceEndpoints;
+}
+
+export const providers = (options: ProvidersOptions = {}) =>
   Layer.effect(
     Providers,
     // Providers are PINNED to the environment they are registered with (the
@@ -1989,6 +2008,11 @@ export const providers = () =>
     Layer.provideMerge(Region.fromEnvironment),
     Layer.provideMerge(Credentials.fromEnvironment),
     Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(
+      options.serviceEndpoints === undefined
+        ? Layer.empty
+        : Endpoint.services(options.serviceEndpoints),
+    ),
     Layer.provideMerge(DefaultEnvironment),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),

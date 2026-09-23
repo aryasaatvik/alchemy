@@ -7,6 +7,49 @@ export const of = (endpoint: string) =>
   Layer.succeed(Endpoint.Endpoint, Effect.succeed(endpoint));
 
 /**
+ * Endpoints for individual AWS services, keyed by SDK service ID (`"S3"`,
+ * `"SESv2"`, `"Service Quotas"`). Keys match case- and
+ * punctuation-insensitively, so `"sesv2"` and `"service_quotas"` select the
+ * same services as their SDK IDs.
+ */
+export type ServiceEndpoints = Readonly<Record<string, string>>;
+
+const normalizeServiceId = (service: string) =>
+  service.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/**
+ * A distilled {@link Endpoint.ServiceEndpointResolver} over a
+ * {@link ServiceEndpoints} map. Services without an entry resolve to
+ * `fallback` (`undefined` keeps the SDK's default endpoint rules).
+ */
+export const serviceEndpointResolver = (
+  serviceEndpoints: ServiceEndpoints | undefined,
+  fallback?: string,
+): Endpoint.ServiceEndpointResolver => {
+  const byService = new Map(
+    Object.entries(serviceEndpoints ?? {}).map(([service, endpoint]) => [
+      normalizeServiceId(service),
+      endpoint,
+    ]),
+  );
+  return {
+    resolve: (service) =>
+      byService.get(normalizeServiceId(service)) ?? fallback,
+  };
+};
+
+/**
+ * Route individual AWS services to their own endpoints. Distilled consults
+ * this only when no explicit {@link Endpoint.Endpoint} is set for the call,
+ * so an operation-scoped `Endpoint.of(...)` still wins.
+ */
+export const services = (serviceEndpoints: ServiceEndpoints) =>
+  Layer.succeed(
+    Endpoint.ServiceEndpoint,
+    serviceEndpointResolver(serviceEndpoints),
+  );
+
+/**
  * Derive a custom endpoint (if any) from the surrounding
  * {@link AWSEnvironment}. If the environment has no `endpoint` set, this
  * Layer is empty (the SDK uses its default endpoint resolver).
