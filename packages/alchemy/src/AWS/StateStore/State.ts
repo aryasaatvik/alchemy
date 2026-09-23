@@ -70,6 +70,41 @@ export interface S3StateOptions {
 /** Context required by the distilled S3 operations. */
 type S3Deps = Credentials | HttpClient | Region;
 
+const s3StateLayer = (options: S3StateOptions) =>
+  Layer.effect(
+    State,
+    Effect.gen(function* () {
+      const context = yield* Effect.context<S3Deps | AWSEnvironment>();
+
+      const make = makeS3State(options).pipe(
+        recordStateStoreInit,
+        Effect.orDie,
+        Effect.provideContext(context),
+      );
+
+      return yield* Effect.cached(make);
+    }),
+  ).pipe(
+    Layer.provideMerge(AwsRegion.fromEnvironment),
+    Layer.provideMerge(AwsCredentials.fromEnvironment),
+    Layer.provideMerge(Endpoint.fromEnvironment),
+    Layer.provideMerge(DefaultEnvironment),
+    Layer.provideMerge(AwsAuth),
+    Layer.provideMerge(CredentialsStoreLive),
+    Layer.orDie,
+  );
+
+/**
+ * Services the S3 state layer needs from the stack. The layer's output is
+ * narrowed to {@link State}: the AWS auth, credential, and region services it
+ * builds internally are implementation details, and leaking them into the
+ * output type made the layer's type unnameable from consumer declaration
+ * files (TS2742) and incompatible with a stage-selected `Layer.unwrap`.
+ */
+export type S3StateRequirements = Layer.Services<
+  ReturnType<typeof s3StateLayer>
+>;
+
 /**
  * State store backed by an AWS S3 bucket.
  *
@@ -147,29 +182,9 @@ type S3Deps = Credentials | HttpClient | Region;
  *
  * @resource
  */
-export const state = (options: S3StateOptions = {}) =>
-  Layer.effect(
-    State,
-    Effect.gen(function* () {
-      const context = yield* Effect.context<S3Deps | AWSEnvironment>();
-
-      const make = makeS3State(options).pipe(
-        recordStateStoreInit,
-        Effect.orDie,
-        Effect.provideContext(context),
-      );
-
-      return yield* Effect.cached(make);
-    }),
-  ).pipe(
-    Layer.provideMerge(AwsRegion.fromEnvironment),
-    Layer.provideMerge(AwsCredentials.fromEnvironment),
-    Layer.provideMerge(Endpoint.fromEnvironment),
-    Layer.provideMerge(DefaultEnvironment),
-    Layer.provideMerge(AwsAuth),
-    Layer.provideMerge(CredentialsStoreLive),
-    Layer.orDie,
-  );
+export const state = (
+  options: S3StateOptions = {},
+): Layer.Layer<State, never, S3StateRequirements> => s3StateLayer(options);
 
 /**
  * Construct an S3-backed {@link StateService}.
