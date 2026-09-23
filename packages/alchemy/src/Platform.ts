@@ -291,6 +291,15 @@ export interface Platform<
     PlatformIdentity<Id>;
 }
 
+/** A value `JSON.parse` can produce: a primitive, array, or plain object. */
+const isParsedJson = (value: unknown): boolean =>
+  typeof value === "number" ||
+  typeof value === "boolean" ||
+  Array.isArray(value) ||
+  (typeof value === "object" &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype);
+
 export const Platform = <
   R extends ResourceLike<
     string,
@@ -599,14 +608,24 @@ export const Platform = <
                             key.length > 0
                           ) {
                             // retrieve from the RuntimeContext if running in runtime phase
-                            const value =
-                              yield* ctx.get<Redacted.Redacted<string>>(key);
+                            const value = yield* ctx.get<unknown>(key);
                             if (value) {
-                              return ConfigProvider.makeValue(
-                                Redacted.isRedacted(value)
-                                  ? Redacted.value(value)
-                                  : value,
-                              );
+                              // `get` unpacks the stored env string, so a
+                              // variable holding JSON arrives parsed; config
+                              // leaves are strings, so hand back its JSON.
+                              // Anything else (a platform binding object) is
+                              // not config.
+                              const raw = Redacted.isRedacted(value)
+                                ? Redacted.value(value)
+                                : value;
+                              if (typeof raw === "string") {
+                                return ConfigProvider.makeValue(raw);
+                              }
+                              if (isParsedJson(raw)) {
+                                return ConfigProvider.makeValue(
+                                  JSON.stringify(raw),
+                                );
+                              }
                             }
                           }
                           // fallback to the config provider otherwise
