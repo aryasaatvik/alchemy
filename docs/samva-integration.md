@@ -87,6 +87,13 @@ the repository use the same pnpm as the workspace. A package build that rewrites
 (for example a regenerated `publishConfig`) fails the run, because the fingerprint was computed from
 the tree before the build; commit the regenerated file and pack again.
 
+Staging also refuses a package whose published files include an untracked file under a top-level
+directory that holds tracked files, such as declarations an old build emitted into
+`packages/alchemy/bin/`: ignored output survives `git reset --hard`, and `files` would ship it.
+Top-level directories without tracked files (`lib/`, `dist/`) and the copied `LICENSE`, `NOTICE`,
+`README.md`, and `THIRD_PARTY_LICENSES.md` belong to the build; any other untracked top-level file
+is refused too. The error lists each path; remove them and pack again.
+
 Consumer verification installs the artifact beside the workspace's exact `overrides.effect`
 version, type-checks and runs every `alchemy` subpath Samva imports under Bun and Node, boots the
 packaged Lambda bootstrap, and exercises local Lambda placement and per-service endpoint routing.

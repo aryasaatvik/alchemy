@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 
 import { packageFingerprint } from "./fingerprint.ts";
 import { integrationClosure, workspaceEffectVersion } from "./graph.ts";
-import { readManifest } from "./io.ts";
+import { readManifest, run } from "./io.ts";
 import {
   pnpmInstallCommand,
   pnpmPackCommand,
@@ -23,6 +23,7 @@ import {
   makeBundledPackagesSelfContained,
   patchIntegrationManifest,
   stageAndPack,
+  unownedPublishedFiles,
 } from "./staging.ts";
 import {
   assertBundledFiles,
@@ -84,6 +85,12 @@ describe("integration package graph", () => {
     }
   });
 });
+
+/** Real workspace packages live in a Git checkout; fixtures mirror that. */
+const trackAll = async (directory: string): Promise<void> => {
+  await run(["git", "init", "--quiet"], { cwd: directory });
+  await run(["git", "add", "--all"], { cwd: directory });
+};
 
 describe("integration package staging", () => {
   test("suppresses lifecycle scripts and uses a hoisted pnpm layout", () => {
@@ -265,6 +272,93 @@ describe("integration package staging", () => {
     }
   });
 
+  test("treats only untracked files in source roots as unowned", () => {
+    const tracked = new Set(["package.json", "bin/cli.js", "src/index.ts"]);
+    expect(
+      unownedPublishedFiles(
+        [
+          "package.json",
+          "bin/cli.js",
+          "src/index.ts",
+          // Build output roots and copied metadata are owned by the build.
+          "lib/index.js",
+          "lib/index.d.ts",
+          "LICENSE",
+          "NOTICE",
+          // Stale output left in source roots is not.
+          "bin/cli.d.ts",
+          "bin/cli.js.map",
+          "src/index.d.ts",
+          "stray.txt",
+        ],
+        tracked,
+      ),
+    ).toEqual([
+      "bin/cli.d.ts",
+      "bin/cli.js.map",
+      "src/index.d.ts",
+      "stray.txt",
+    ]);
+  });
+
+  test("refuses to pack stale ignored files from a source root", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "integration-stale-stage-"));
+    const output = await mkdtemp(join(tmpdir(), "integration-stale-output-"));
+    try {
+      await mkdir(join(directory, "bin"));
+      await mkdir(join(directory, "lib"));
+      await writeFile(join(directory, ".gitignore"), "lib/\n*.d.ts\n*.map\n");
+      await writeFile(join(directory, "bin", "cli.js"), "export {};\n");
+      await writeFile(
+        join(directory, "package.json"),
+        `${JSON.stringify({
+          name: "fixture",
+          version: "1.0.0",
+          type: "module",
+          files: ["bin", "lib"],
+        })}\n`,
+      );
+      await trackAll(directory);
+      // Build outputs: an untracked output root and copied metadata.
+      await writeFile(join(directory, "lib", "index.js"), "export {};\n");
+      await writeFile(join(directory, "LICENSE"), "MIT\n");
+      const input = {
+        repositoryRoot,
+        pnpmVersion: await repositoryPnpmVersion(repositoryRoot),
+        workspace: {
+          name: "fixture",
+          directory,
+          manifest: { name: "fixture" },
+          localDependencies: [],
+        },
+        localPackages: [],
+        version: "1.0.0-samva.test",
+        outputDir: output,
+        bundleLocalPackages: false,
+      } as const;
+
+      await stageAndPack(input);
+
+      // Ignored output an old build left in `bin/` survives `git reset
+      // --hard`, and `files: ["bin"]` would ship it.
+      await writeFile(join(directory, "bin", "cli.d.ts"), "export {};\n");
+      await writeFile(join(directory, "bin", "cli.js.map"), "{}\n");
+      const rejection = await stageAndPack(input).then(
+        () => undefined,
+        (error: Error) => error.message,
+      );
+      expect(rejection).toContain("fixture would publish files");
+      expect(rejection).toContain(join(directory, "bin", "cli.d.ts"));
+      expect(rejection).toContain(join(directory, "bin", "cli.js.map"));
+      expect(rejection).not.toContain(join(directory, "lib", "index.js"));
+    } finally {
+      await Promise.all([
+        rm(directory, { recursive: true, force: true }),
+        rm(output, { recursive: true, force: true }),
+      ]);
+    }
+  }, 60_000);
+
   test("produces byte-identical archives across repeated stage builds", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "integration-repeat-stage-"),
@@ -286,6 +380,7 @@ describe("integration package staging", () => {
           devDependencies: { typescript: "^7.0.0" },
         })}\n`,
       );
+      await trackAll(directory);
       const input = {
         repositoryRoot,
         pnpmVersion: await repositoryPnpmVersion(repositoryRoot),

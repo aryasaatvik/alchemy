@@ -134,6 +134,72 @@ export const assertSafeArchiveEntries = (
   }
 };
 
+/**
+ * Top-level files that `scripts/copy-package-files.ts` copies in at build
+ * time, or that pnpm injects from the workspace root. They are untracked by
+ * design and rewritten by every build.
+ */
+const packageMetadataFiles: ReadonlySet<string> = new Set([
+  "LICENSE",
+  "NOTICE",
+  "README.md",
+  "THIRD_PARTY_LICENSES.md",
+]);
+
+/**
+ * Published files Git does not track and no build owns.
+ *
+ * A top-level directory without any tracked file (`lib/`, `dist/`) is a
+ * build output root: the build owns everything under it. A directory with
+ * tracked files (`bin/`, `src/`) is a source root, where an untracked file is
+ * stale local output (e.g. declarations an old build emitted into `bin/`)
+ * that `git reset --hard` keeps and the pack would ship.
+ */
+export const unownedPublishedFiles = (
+  entries: ReadonlyArray<string>,
+  tracked: ReadonlySet<string>,
+): ReadonlyArray<string> => {
+  const sourceRoots = new Set(
+    [...tracked].flatMap((path) => {
+      const separator = path.indexOf("/");
+      return separator === -1 ? [] : [path.slice(0, separator)];
+    }),
+  );
+  return entries.filter((entry) => {
+    if (tracked.has(entry)) return false;
+    const separator = entry.indexOf("/");
+    if (separator === -1) return !packageMetadataFiles.has(entry);
+    return sourceRoots.has(entry.slice(0, separator));
+  });
+};
+
+/** Refuses to stage a native pack that contains untracked source-root files. */
+const assertPublishedFilesOwned = async (
+  workspace: WorkspacePackage,
+  archiveEntries: ReadonlyArray<string>,
+): Promise<void> => {
+  const tracked = new Set(
+    (
+      await run(["git", "ls-files", "-z"], {
+        cwd: workspace.directory,
+        quiet: true,
+      })
+    )
+      .split("\0")
+      .filter((path) => path.length > 0),
+  );
+  const files = archiveEntries
+    .filter((entry) => entry.startsWith("package/") && !entry.endsWith("/"))
+    .map((entry) => entry.slice("package/".length));
+  const unowned = unownedPublishedFiles(files, tracked);
+  if (unowned.length > 0)
+    throw new Error(
+      `${workspace.name} would publish files that Git does not track and no build produces; remove them and pack again:\n${unowned
+        .map((path) => `  ${join(workspace.directory, path)}`)
+        .join("\n")}`,
+    );
+};
+
 export const patchIntegrationManifest = async (
   directory: string,
   manifest: PackageManifest,
@@ -299,6 +365,7 @@ export const stageAndPack = async (
       })
     ).split("\n");
     assertSafeArchiveEntries(entries);
+    await assertPublishedFilesOwned(input.workspace, entries);
     const verbose = await run(["tar", "-tvzf", rawTarball], {
       cwd: input.repositoryRoot,
       quiet: true,
