@@ -19,6 +19,7 @@ import {
   isAlive,
   killPid,
   pidListeningOn,
+  ppidOf,
   waitForExit,
 } from "./fixtures/process-effect.ts";
 import { runtimes } from "./fixtures/runtimes.ts";
@@ -44,6 +45,9 @@ const COMMAND_PROVIDERS_TS_URL = new URL(
 ).toString();
 const LONG_RUNNING_CJS = fileURLToPath(
   new URL("../Command/fixture/long-running.cjs", import.meta.url),
+);
+const IGNORE_TERM_TREE_CJS = fileURLToPath(
+  new URL("../Command/fixture/ignore-term-tree.cjs", import.meta.url),
 );
 
 for (const runtime of runtimes()) {
@@ -195,6 +199,63 @@ for (const runtime of runtimes()) {
             yield* killPid(parentPid, "SIGTERM");
             yield* waitForExit(child, Duration.seconds(10));
             yield* assertPidExited(devServerPid);
+          }).pipe(Effect.provide(PlatformServices)),
+        { tags: ["local"], timeout: 45_000 },
+      );
+
+      it.live.skipIf(process.platform === "win32")(
+        "DevServer process group dies after the sidecar is force-killed",
+        () =>
+          Effect.gen(function* () {
+            const [bin, ...args] = runtime.argv(DEVSERVER_PARENT_TS);
+            const fs = yield* FileSystem.FileSystem;
+            const tmpDir = yield* fs.makeTempDirectoryScoped({
+              prefix: "alchemy-devserver-owner-",
+            });
+            const pidFile = `${tmpDir}/${process.pid}-${runtime.name}.json`;
+            const child = yield* ChildProcess.make(
+              bin,
+              [
+                ...args,
+                SIDECAR_TS_URL,
+                COMMAND_PROVIDERS_TS_URL,
+                `node ${IGNORE_TERM_TREE_CJS}`,
+                pidFile,
+              ],
+              { stdout: "pipe", forceKillAfter: "1 second" },
+            );
+            yield* child.stdout.pipe(
+              Stream.decodeText,
+              Stream.run(
+                Sink.fold(
+                  () => "",
+                  (acc) => !acc.includes("DEVSERVER_PID="),
+                  (acc, chunk) => Effect.succeed(acc + chunk),
+                ),
+              ),
+              Effect.timeout("30 seconds"),
+            );
+            const tree = JSON.parse(yield* fs.readFileString(pidFile)) as {
+              pid: number;
+              descendantPid: number;
+            };
+            yield* Effect.addFinalizer(() =>
+              Effect.all(
+                [
+                  killPid(tree.pid, "SIGKILL"),
+                  killPid(tree.descendantPid, "SIGKILL"),
+                ],
+                { discard: true },
+              ),
+            );
+            // The dev process is a direct child of the sidecar. SIGKILL skips
+            // every finalizer in it, so only an owner-exit watcher outside the
+            // sidecar can reap the detached group.
+            const sidecarPid = yield* ppidOf(tree.pid);
+            expect(yield* isAlive(sidecarPid)).toBe(true);
+            yield* killPid(sidecarPid, "SIGKILL");
+            yield* assertPidExited(tree.pid);
+            yield* assertPidExited(tree.descendantPid);
           }).pipe(Effect.provide(PlatformServices)),
         { tags: ["local"], timeout: 45_000 },
       );

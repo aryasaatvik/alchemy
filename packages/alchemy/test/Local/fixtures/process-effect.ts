@@ -104,6 +104,18 @@ export const pgidOf = (pid: number) =>
     Effect.map((stdout) => Number.parseInt(stdout.trim(), 10)),
   );
 
+/** Parent pid of a pid via `ps`. Returns NaN when the pid is gone. */
+export const ppidOf = (pid: number) =>
+  ChildProcess.make("ps", ["-o", "ppid=", "-p", String(pid)], {
+    stdout: "pipe",
+  }).pipe(
+    Effect.flatMap((handle) =>
+      handle.stdout.pipe(Stream.decodeText, Stream.mkString),
+    ),
+    Effect.map((stdout) => Number.parseInt(stdout.trim(), 10)),
+    Effect.scoped,
+  );
+
 /** Send a signal to a pid we don't own a handle to. */
 export const killPid = (
   pid: number,
