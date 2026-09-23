@@ -55,21 +55,20 @@ export const cachedFunction = <A extends Array<any>, B, E, R>(
           return Deferred.await(existing);
         }
 
-        // Create a new deferred and store it
-        return Effect.gen(function* () {
-          const deferred = yield* Deferred.make<B, E>();
-          cache.set(cacheKey, deferred);
+        // Install the deferred synchronously, before any yield point, so a
+        // concurrent caller with the same key always observes it.
+        const deferred = Deferred.makeUnsafe<B, E>();
+        cache.set(cacheKey, deferred);
 
-          // Execute the effect and complete the deferred
-          const exit = yield* Effect.exit(fn(...args));
-          yield* Deferred.done(deferred, exit);
-
-          if (exit._tag === "Failure") {
-            cache.delete(cacheKey);
-          }
-
-          // Return the result
-          return yield* exit;
-        });
+        // Settle waiters on every exit, interruption included, and forget
+        // failures so the next call retries.
+        return fn(...args).pipe(
+          Effect.onExit((exit) => {
+            if (exit._tag === "Failure") {
+              cache.delete(cacheKey);
+            }
+            return Deferred.done(deferred, exit);
+          }),
+        );
       });
   });
