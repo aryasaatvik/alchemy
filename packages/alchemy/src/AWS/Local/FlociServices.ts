@@ -13,6 +13,7 @@ import * as ProviderLayer from "../../Local/ProviderLayer.ts";
 import * as ProviderSessionConfig from "../../Local/ProviderSessionConfig.ts";
 import type { Platform } from "../../Platform.ts";
 import type { ResourceClassLike, ResourceLike } from "../../Resource.ts";
+import { packEnvValue } from "../../RuntimeContext.ts";
 import { DEFAULT_LOCAL_ENDPOINT, LOCAL_ACCOUNT_ID } from "../AuthProvider.ts";
 import * as Endpoint from "../Endpoint.ts";
 import type { ServiceEndpoints } from "../Endpoint.ts";
@@ -55,21 +56,55 @@ export interface LocalProfile {
    * @default "http://localhost:4566"
    */
   readonly endpoint?: string;
+  /** How local Lambda functions reach their dependencies from the container. */
+  readonly lambda?: LocalLambdaPlacement;
+}
+
+/**
+ * Local Lambda functions run in containers the emulator starts, where the
+ * host's addresses (`127.0.0.1:<port>`) do not reach the emulator or the
+ * services the function talks to. These values replace the corresponding
+ * runtime environment variables of every local function.
+ */
+export interface LocalLambdaPlacement {
+  /** `AWS_ENDPOINT_URL` inside the container, e.g. `"http://floci:4566"`. */
+  readonly endpoint?: string;
+  /**
+   * Per-service endpoints inside the container, set as
+   * `ALCHEMY_AWS_SERVICE_ENDPOINTS` (read at runtime with
+   * `AWS_SERVICE_ENDPOINTS`).
+   */
+  readonly serviceEndpoints?: ServiceEndpoints;
+  /**
+   * Environment variables to override. A value replacing a secret
+   * (Config-bound or `Redacted`) stays secret at runtime. Applied before
+   * {@link endpoint} and {@link serviceEndpoints}, which win.
+   */
+  readonly environment?: Readonly<
+    Record<string, string | Redacted.Redacted<string>>
+  >;
 }
 
 /**
  * The `"AWS"` entry of the {@link ProviderSessionConfig}: everything a
  * local AWS provider needs from the stack's `AWS.providers(...)` options,
- * in either process (the stack process or the dev sidecar).
+ * in either process (the stack process or the dev sidecar). Plain JSON:
+ * Lambda environment values travel `packEnvValue`-packed, so `Redacted`
+ * survives the trip.
  */
 export interface AwsSessionConfig {
-  readonly local?: LocalProfile;
+  readonly local?: Omit<LocalProfile, "lambda"> & {
+    readonly lambda?: Omit<LocalLambdaPlacement, "environment"> & {
+      readonly environment?: Readonly<Record<string, string>>;
+    };
+  };
   readonly serviceEndpoints?: ServiceEndpoints;
 }
 
 export const AWS_SESSION_NAMESPACE = "AWS";
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1));
+const Endpoints = Schema.Record(NonEmptyString, NonEmptyString);
 
 const AwsSessionConfigSchema = Schema.Struct({
   local: Schema.optional(
@@ -77,16 +112,53 @@ const AwsSessionConfigSchema = Schema.Struct({
       accountId: Schema.optional(NonEmptyString),
       region: Schema.optional(NonEmptyString),
       endpoint: Schema.optional(NonEmptyString),
+      lambda: Schema.optional(
+        Schema.Struct({
+          endpoint: Schema.optional(NonEmptyString),
+          serviceEndpoints: Schema.optional(Endpoints),
+          environment: Schema.optional(
+            Schema.Record(NonEmptyString, Schema.String),
+          ),
+        }),
+      ),
     }),
   ),
-  serviceEndpoints: Schema.optional(
-    Schema.Record(NonEmptyString, NonEmptyString),
-  ),
+  serviceEndpoints: Schema.optional(Endpoints),
 });
 
 /** Place the AWS entry in the {@link ProviderSessionConfig}. */
-export const awsSessionConfig = (config: AwsSessionConfig) =>
-  ProviderSessionConfig.layer(AWS_SESSION_NAMESPACE, config);
+export const awsSessionConfig = (options: {
+  readonly local?: LocalProfile;
+  readonly serviceEndpoints?: ServiceEndpoints;
+}) => {
+  const { lambda, ...profile } = options.local ?? {};
+  const environment = lambda?.environment;
+  const config: AwsSessionConfig = {
+    local:
+      options.local === undefined
+        ? undefined
+        : {
+            ...profile,
+            lambda:
+              lambda === undefined
+                ? undefined
+                : {
+                    ...lambda,
+                    environment:
+                      environment === undefined
+                        ? undefined
+                        : Object.fromEntries(
+                            Object.entries(environment).map(([key, value]) => [
+                              key,
+                              packEnvValue(value),
+                            ]),
+                          ),
+                  },
+          },
+    serviceEndpoints: options.serviceEndpoints,
+  };
+  return ProviderSessionConfig.layer(AWS_SESSION_NAMESPACE, config);
+};
 
 /**
  * The AWS entry of the ambient {@link ProviderSessionConfig} (`{}` when no

@@ -1348,7 +1348,18 @@ export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
   } satisfies Record<string, string>;
 });
 
-export const FunctionProvider = () =>
+export interface FunctionProviderOptions {
+  /**
+   * Rewrite the function's runtime environment variables right before
+   * they are sent to Lambda. The local (floci) provider uses this to place
+   * the function inside its container network.
+   */
+  readonly transformEnvironment?: (
+    environment: Record<string, string>,
+  ) => Effect.Effect<Record<string, string>>;
+}
+
+export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
   Provider.effect(
     Function,
     Effect.gen(function* () {
@@ -1916,9 +1927,14 @@ export const FunctionProvider = () =>
             S3Key: key,
           } as const;
         });
-        const runtimeEnv = isFunctionImageProps(news)
+        const baseRuntimeEnv = isFunctionImageProps(news)
           ? env
           : withNodeSourceMaps(env, news);
+        const runtimeEnv =
+          baseRuntimeEnv === undefined ||
+          options.transformEnvironment === undefined
+            ? baseRuntimeEnv
+            : yield* options.transformEnvironment(baseRuntimeEnv);
         // Always sent, even when the function declares no variables: the
         // packaged bootstrap reads its stack and account identity from here.
         const environmentVariables = {

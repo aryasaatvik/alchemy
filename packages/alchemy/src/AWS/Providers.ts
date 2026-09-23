@@ -273,6 +273,7 @@ export interface ProvidersOptions {
    *     accountId: "100000000001",
    *     region: "us-east-1",
    *     endpoint: "http://127.0.0.1:4566",
+   *     lambda: { endpoint: "http://floci:4566" },
    *   },
    * });
    * ```
@@ -2069,10 +2070,7 @@ export const providers = (options: ProvidersOptions = {}) =>
     Layer.provideMerge(
       options.local === undefined && options.serviceEndpoints === undefined
         ? Layer.empty
-        : awsSessionConfig({
-            local: options.local,
-            serviceEndpoints: options.serviceEndpoints,
-          }),
+        : awsSessionConfig(options),
     ),
     Layer.orDie,
   );

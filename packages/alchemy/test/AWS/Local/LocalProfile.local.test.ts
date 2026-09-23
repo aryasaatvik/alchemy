@@ -1,10 +1,15 @@
 import * as AWS from "@/AWS";
-import { AWSEnvironment } from "@/AWS/Environment.ts";
+import {
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  AWSEnvironment,
+} from "@/AWS/Environment.ts";
 import { inMemoryState } from "@/State/index.ts";
 import * as Test from "@/Test/Alchemy";
+import { packEnvValue } from "@/RuntimeContext.ts";
 import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import {
   LocalProfileProbe,
   LocalProfileProbeProvider,
@@ -12,8 +17,9 @@ import {
 
 /**
  * `AWS.providers({ local, serviceEndpoints })` selects the emulator account,
- * region and endpoint of every local AWS provider — including the ones the
- * dev sidecar hosts, which only see what the session carries.
+ * region and endpoint (and the Lambda container placement) of every local
+ * AWS provider — including the ones the dev sidecar hosts, which only see
+ * what the session carries.
  *
  * The endpoints are never dialed: a custom endpoint is caller-owned (no
  * `ensureFloci`) and the probe only observes its context, so no emulator or
@@ -25,11 +31,17 @@ const LOCAL = {
   endpoint: "http://127.0.0.1:45999",
 };
 const SES_ENDPOINT = "http://127.0.0.1:45998/ses";
+const CONTAINER_DATABASE_URL = "postgres://postgres:5432/db";
+const LAMBDA = {
+  endpoint: "http://floci:4566",
+  serviceEndpoints: { ses: "http://host.docker.internal:45998/ses" },
+  environment: { DATABASE_URL: Redacted.make(CONTAINER_DATABASE_URL) },
+};
 
 const providers = LocalProfileProbeProvider().pipe(
   Layer.provideMerge(
     AWS.providers({
-      local: LOCAL,
+      local: { ...LOCAL, lambda: LAMBDA },
       serviceEndpoints: { sesv2: SES_ENDPOINT },
     }),
   ),
@@ -48,6 +60,14 @@ const expectedProbe = {
   emulator: true,
   s3Endpoint: LOCAL.endpoint,
   sesEndpoint: SES_ENDPOINT,
+  // The container placement arrives intact, and the replaced secret stays
+  // marker-packed (Redacted at runtime).
+  lambdaEnvironment: {
+    DATABASE_URL: packEnvValue(Redacted.make(CONTAINER_DATABASE_URL)),
+    PLAIN: "unchanged",
+    AWS_ENDPOINT_URL: LAMBDA.endpoint,
+    [AWS_SERVICE_ENDPOINTS_ENV_VAR]: JSON.stringify(LAMBDA.serviceEndpoints),
+  },
 };
 
 const program = Effect.gen(function* () {

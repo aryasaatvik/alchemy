@@ -32,15 +32,22 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import * as s3 from "@distilled.cloud/aws/s3";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
+import { packEnvValue, unpackEnvValue } from "../../RuntimeContext.ts";
 import { Assets, AssetsLive } from "../Assets.ts";
+import { AWS_SERVICE_ENDPOINTS_ENV_VAR } from "../Environment.ts";
 import {
   flociProvidersUrl,
   makeDevWatchProvider,
 } from "../Local/DevWatchProvider.ts";
+import {
+  currentAwsSessionConfig,
+  type AwsSessionConfig,
+} from "../Local/FlociServices.ts";
 import {
   Function,
   FunctionProvider,
@@ -57,12 +64,57 @@ const isFunctionImageProps = (
   props: FunctionProps,
 ): props is FunctionImageProps => props.image !== undefined;
 
+type LocalLambdaPlacement = NonNullable<
+  NonNullable<AwsSessionConfig["local"]>["lambda"]
+>;
+
+const isPackedRedacted = (value: string | undefined) =>
+  Redacted.isRedacted(unpackEnvValue<unknown>(value));
+
+/**
+ * Place a local function's runtime environment inside its container (see
+ * `LocalLambdaPlacement` in `AWS/Local/FlociServices.ts`). An override
+ * keeps the encoding of the value it replaces: a Config-bound secret stays
+ * marker-packed, so the runtime still reads it as `Redacted`.
+ */
+export const placeLocalLambdaEnvironment = (
+  environment: Record<string, string>,
+  placement: LocalLambdaPlacement | undefined,
+): Record<string, string> => {
+  if (placement === undefined) return environment;
+  const placed = { ...environment };
+  for (const [key, packed] of Object.entries(placement.environment ?? {})) {
+    const value = unpackEnvValue<string | Redacted.Redacted<string>>(packed)!;
+    const raw = Redacted.isRedacted(value) ? Redacted.value(value) : value;
+    placed[key] = isPackedRedacted(environment[key])
+      ? packEnvValue(Redacted.make(raw))
+      : raw;
+  }
+  if (placement.endpoint !== undefined) {
+    placed.AWS_ENDPOINT_URL = placement.endpoint;
+  }
+  if (Object.keys(placement.serviceEndpoints ?? {}).length > 0) {
+    placed[AWS_SERVICE_ENDPOINTS_ENV_VAR] = JSON.stringify(
+      placement.serviceEndpoints,
+    );
+  }
+  return placed;
+};
+
 export const FlociFunctionProvider = () =>
   makeDevWatchProvider<Function, FunctionProps, Function["Attributes"]>(
     Function,
     flociProvidersUrl(),
     {
-      liveProvider: () => FunctionProvider(),
+      liveProvider: () =>
+        FunctionProvider({
+          // The stack's `local.lambda` placement, read where the lifecycle
+          // runs (the dev sidecar receives it with the session).
+          transformEnvironment: (environment) =>
+            Effect.map(currentAwsSessionConfig, (config) =>
+              placeLocalLambdaEnvironment(environment, config.local?.lambda),
+            ),
+        }),
       // A FRESH `Assets` instance: its cached bucket lookup must resolve
       // against the emulator (auto-bootstrapped there) and can never share a
       // cache with the live arm's instance.
