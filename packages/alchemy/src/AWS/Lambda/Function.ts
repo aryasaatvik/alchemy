@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -520,6 +521,84 @@ export const toTimeoutSeconds = (
       : timeout;
   const seconds = Duration.toSeconds(input);
   return Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds)) : undefined;
+};
+
+/**
+ * AWS Lambda's aggregate limit for a function's environment variables,
+ * measured over the JSON-serialized variable map.
+ */
+export const LambdaEnvironmentMaxBytes = 4 * 1024;
+
+export interface LambdaEnvironmentEntrySize {
+  readonly key: string;
+  readonly bytes: number;
+}
+
+/**
+ * Raised before a Lambda mutation when the final environment exceeds AWS's
+ * 4 KiB limit. Carries sizes and keys only, never values.
+ */
+export class LambdaEnvironmentTooLarge extends Data.TaggedError(
+  "LambdaEnvironmentTooLarge",
+)<{
+  readonly message: string;
+  readonly sizeBytes: number;
+  readonly limitBytes: number;
+  readonly entryCount: number;
+  readonly largestEntries: ReadonlyArray<LambdaEnvironmentEntrySize>;
+}> {}
+
+const serializeLambdaEnvironment = (
+  environment: Record<string, unknown> | undefined,
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(environment ?? {}).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : [[key, Redacted.isRedacted(value) ? Redacted.value(value) : value]],
+    ),
+  );
+
+const encodedSize = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+/** The UTF-8 size of the compact JSON variable map Lambda measures. */
+export const lambdaEnvironmentSize = (
+  environment: Record<string, unknown> | undefined,
+): number => encodedSize(serializeLambdaEnvironment(environment));
+
+/**
+ * Fail before an AWS mutation when the final Lambda environment exceeds
+ * {@link LambdaEnvironmentMaxBytes}, naming the largest entries by key.
+ */
+export const validateLambdaEnvironment = (
+  environment: Record<string, unknown> | undefined,
+): Effect.Effect<void, LambdaEnvironmentTooLarge> => {
+  const serialized = serializeLambdaEnvironment(environment);
+  const sizeBytes = encodedSize(serialized);
+  if (sizeBytes <= LambdaEnvironmentMaxBytes) return Effect.void;
+
+  const entries = Object.entries(serialized);
+  const largestEntries = entries
+    .map(([key, value]) => ({
+      key,
+      // `{"k":"v"}` minus the enclosing braces
+      bytes: encodedSize({ [key]: value }) - 2,
+    }))
+    .sort((a, b) => b.bytes - a.bytes || a.key.localeCompare(b.key))
+    .slice(0, 20);
+  return Effect.fail(
+    new LambdaEnvironmentTooLarge({
+      sizeBytes,
+      limitBytes: LambdaEnvironmentMaxBytes,
+      entryCount: entries.length,
+      largestEntries,
+      message:
+        `Lambda environment has ${entries.length} entries totaling ${sizeBytes} bytes; ` +
+        `AWS limits the aggregate to ${LambdaEnvironmentMaxBytes} bytes. ` +
+        `Largest entries: ${largestEntries.map(({ key, bytes }) => `${key} (${bytes} bytes)`).join(", ")}.`,
+    }),
+  );
 };
 
 export interface Function extends Resource<
@@ -1813,6 +1892,10 @@ export const FunctionProvider = () =>
         const runtimeEnv = isFunctionImageProps(news)
           ? env
           : withNodeSourceMaps(env, news);
+        const environmentVariables = runtimeEnv
+          ? { ...runtimeEnv, ...alchemyEnv }
+          : undefined;
+        yield* validateLambdaEnvironment(environmentVariables);
 
         const createFunctionRequest: CreateFunctionRequest = {
           FunctionName: functionName,
@@ -1842,13 +1925,8 @@ export const FunctionProvider = () =>
           Layers: isFunctionImageProps(news)
             ? undefined
             : (news.layers ?? []).map(layerVersionArnOf),
-          Environment: runtimeEnv
-            ? {
-                Variables: {
-                  ...runtimeEnv,
-                  ...alchemyEnv,
-                },
-              }
+          Environment: environmentVariables
+            ? { Variables: environmentVariables }
             : undefined,
           Tags: tags,
           Timeout: toTimeoutSeconds(news.timeout),
