@@ -202,6 +202,13 @@ export interface NoopUpdate<
   R extends ResourceLike = ResourceLike,
 > extends ApplyNodeBase<R> {
   action: "noop";
+  /**
+   * Evaluable desired inputs (never the materialized diff-facing view). A
+   * noop planned against a stables-only snapshot of an updating upstream is
+   * provisional: apply re-evaluates these against the upstream's fresh
+   * outputs and upgrades the node to an update when they changed.
+   */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1920,6 +1927,7 @@ const makePlan = <A>(
       } else {
         return Node<NoopUpdate>({
           action: "noop",
+          props: applyProps,
           state: oldState,
         });
       }

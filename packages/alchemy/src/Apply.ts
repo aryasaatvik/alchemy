@@ -33,7 +33,7 @@ import {
   noopSession,
 } from "./Report.ts";
 import type { ApplyStatus } from "./Report.ts";
-import { havePropsChanged, stripUnresolved } from "./Diff.ts";
+import { diffBindings, havePropsChanged, stripUnresolved } from "./Diff.ts";
 import type { Input } from "./Input.ts";
 import { generateInstanceId, InstanceId } from "./InstanceId.ts";
 import * as Output from "./Output.ts";
@@ -462,6 +462,46 @@ const executePlan = Effect.fn(function* (
       { concurrency: "unbounded" },
     );
 
+  // A resource noop is settled when its output cannot change during this
+  // apply: every upstream is itself settled. Cycle members keep their
+  // previous output through the initial pass and `converge` skips noops, so
+  // a noop cycle member is settled by definition. Action noops reuse their
+  // persisted output.
+  const settled = new Map<string, boolean>();
+  const isSettled = (fqn: string): boolean => {
+    const node = allNodes[fqn];
+    if (node === undefined) return true;
+    const cached = settled.get(fqn);
+    if (cached !== undefined) return cached;
+    const result =
+      node.action === "noop" &&
+      ((node as ActionApply).kind === "action" ||
+        plan.cycleMembers.has(fqn) ||
+        resourceUpstreamFqns(node as Apply).every(isSettled));
+    settled.set(fqn, result);
+    return result;
+  };
+
+  // Outputs as persisted before this apply, overlaid on the live tracker. A
+  // planned noop evaluates its inputs against both to tell whether an
+  // upstream change reached them.
+  const priorOutputs = Object.fromEntries(
+    Object.entries(allNodes).flatMap(([fqn, node]) => {
+      const actionState = (node as ActionApply).state;
+      const prior =
+        (node as ActionApply).kind === "action"
+          ? actionState?.status === "ran"
+            ? actionState.output
+            : undefined
+          : (node as Apply).state?.attr;
+      return prior === undefined ? [] : [[fqn, prior] as const];
+    }),
+  );
+  const getPriorOutputs = (): Record<string, any> => ({
+    ...getOutputs(),
+    ...priorOutputs,
+  });
+
   const failures: LifecycleFailure[] = [];
 
   yield* Effect.all(
@@ -497,6 +537,8 @@ const executePlan = Effect.fn(function* (
             waitForDeps,
             failures,
             plan.cycleMembers.has(fqn),
+            (fqns) => fqns.every(isSettled),
+            getPriorOutputs,
           ),
     ),
     { concurrency: "unbounded" },
@@ -581,6 +623,8 @@ const executeNode = (
   waitForDeps: (fqns: string[]) => Effect.Effect<void[], never, never>,
   failures: LifecycleFailure[],
   inCycle: boolean,
+  upstreamsSettled: (fqns: string[]) => boolean,
+  getPriorOutputs: () => Record<string, any>,
 ): Effect.Effect<void, never, never> =>
   Effect.gen(function* () {
     const logicalId = node.resource.LogicalId;
@@ -700,9 +744,92 @@ const executeNode = (
         yield* signalReady;
       });
 
+    const allUpstreamFqns = () => resourceUpstreamFqns(node);
+
     // ── noop ──
 
     if (node.action === "noop") {
+      // A plan-time noop is provisional while an upstream can still change
+      // in this apply: the plan diffed a whole-resource reference to an
+      // updating upstream through its stables-only snapshot (and a row
+      // persisted before #993 may hold only that snapshot), so a change to a
+      // non-stable attribute never reached the diff. Wait for the fresh
+      // upstream outputs and upgrade to an update when the change reaches
+      // this resource's inputs. Comparing against the inputs evaluated over
+      // the PRIOR outputs, rather than the persisted props, keeps a
+      // provider's deliberate noop intact when no upstream moved.
+      const upstreams = allUpstreamFqns();
+      if (!inCycle && !upstreamsSettled(upstreams)) {
+        yield* waitForDeps(upstreams);
+        const outputs = getOutputs();
+        const priorOutputs = getPriorOutputs();
+        const news = (yield* Output.evaluate(node.props, outputs)) as Record<
+          string,
+          any
+        >;
+        const bindingOutputs = excludeDeletedBindings(
+          yield* Output.evaluate(node.bindings, outputs),
+        );
+        const priorNews = yield* Output.evaluate(node.props, priorOutputs);
+        const priorBindings = excludeDeletedBindings(
+          yield* Output.evaluate(node.bindings, priorOutputs),
+        );
+        if (
+          havePropsChanged(priorNews, news) ||
+          diffBindings(priorBindings, bindingOutputs).some(
+            (binding) => binding.action !== "noop",
+          )
+        ) {
+          const instanceId = node.state.instanceId;
+          yield* report("updating");
+          const attr = yield* node.provider
+            .reconcile({
+              id: logicalId,
+              fqn,
+              news,
+              instanceId,
+              bindings: bindingOutputs,
+              session: scopedSession,
+              olds: node.state.props,
+              output: node.state.attr,
+            })
+            .pipe(
+              instrumentLifecycle(
+                "update",
+                fqn,
+                node.resource.Type,
+                logicalId,
+                instanceId,
+              ),
+            );
+          yield* commit<UpdatedResourceState>({
+            status: "updated",
+            fqn,
+            logicalId,
+            instanceId,
+            resourceType: node.resource.Type,
+            props: news,
+            attr,
+            bindings: bindingOutputs,
+            providerVersion: node.provider.version ?? 0,
+            downstream: node.downstream,
+            removalPolicy: node.resource.RemovalPolicy,
+            // A noop never switches modes (that plans a replacement); keep
+            // the row's stamp for mode-agnostic providers.
+            providerMode: node.mode ?? node.state.providerMode,
+          });
+          yield* storeAndSignal({
+            output: attr,
+            props: news,
+            bindings: bindingOutputs,
+            instanceId,
+          });
+          yield* signalReadyStable;
+          yield* markTerminal("updated");
+          return;
+        }
+      }
+
       // No work to do on the cloud resource — the persisted attr is already
       // stable. Two pieces of row METADATA can still have drifted from the
       // declaration, and this is the only pass that will ever see them:
@@ -758,12 +885,6 @@ const executeNode = (
       yield* signalReadyStable;
       return;
     }
-
-    const allUpstreamFqns = () => {
-      const propDeps = Object.keys(Output.resolveUpstream(node.props));
-      const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
-      return [...new Set([...propDeps, ...bindingDeps])];
-    };
 
     // ── instance ID ──
 
@@ -2518,6 +2639,13 @@ const collectGarbage = Effect.fn(function* (
     );
   }
 });
+
+/** Upstream FQNs a resource node's props and bindings reference. */
+const resourceUpstreamFqns = (node: Apply): string[] => {
+  const propDeps = Object.keys(Output.resolveUpstream(node.props));
+  const bindingDeps = Object.keys(Output.resolveUpstream(node.bindings));
+  return [...new Set([...propDeps, ...bindingDeps])];
+};
 
 const excludeDeletedBindings = (
   bindings: ReadonlyArray<ResourceBinding & { action?: string }>,

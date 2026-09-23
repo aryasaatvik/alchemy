@@ -78,6 +78,7 @@ export const createNode = (props: object, id = "Worker"): Create => ({
 export const noopNode = (props: object, id = "Worker"): NoopUpdate => ({
   ...baseNode(id, props),
   action: "noop",
+  props,
   state: state(id, props),
 });
 
