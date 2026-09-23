@@ -55,6 +55,7 @@ import type { ConsumerSettings } from "../Queues/Consumer.ts";
 import type { WorkerAssetsConfig, WorkerProps } from "../Workers/Worker.ts";
 import { readAssetsConfigFiles } from "./Assets.ts";
 import { getCompatibility } from "./Compatibility.ts";
+import { resolveViteMain } from "./ViteMain.ts";
 import { watchPrebuiltWorkerBundle } from "./Sources/Prebuilt.ts";
 import { isPythonMain, watchPythonWorkerBundle } from "./Sources/Python.ts";
 import {
@@ -532,11 +533,14 @@ export const LocalWorkerProvider = () =>
           rules: props.rules,
           devRemote,
           vite: !!props.vite,
-          // Relative `vite.main` resolves from the Vite root (see the
-          // matching normalization in WorkerProvider's `viteBuild`).
-          viteMain: props.vite?.main
-            ? path.resolve(props.vite.rootDir ?? process.cwd(), props.vite.main)
-            : undefined,
+          // A `./`/`../` `vite.main` resolves from the Vite root; module
+          // ids pass through (see the matching normalization in
+          // WorkerProvider's `viteBuild`).
+          viteMain: resolveViteMain(
+            path,
+            props.vite?.rootDir ?? process.cwd(),
+            props.vite?.main,
+          ),
           viteEnvironments: props.vite?.viteEnvironments,
           viteRootDir: props.vite?.rootDir,
           bundleOptions: {

@@ -46,6 +46,7 @@ import { getCompatibility } from "./Compatibility.ts";
 import { isDurableObjectExport } from "./DurableObject.ts";
 import { LocalWorkerProvider } from "./LocalWorkerProvider.ts";
 import { makeSourceContext, resolveSource } from "./Source.ts";
+import { resolveViteMain } from "./ViteMain.ts";
 import { assertCloudflareTelemetryCompatibility } from "./Telemetry.ts";
 import {
   isSelfUrl,
@@ -2473,18 +2474,17 @@ export const LiveWorkerProvider = () =>
               )).filter(([_, value]) => value !== undefined),
             ),
             {
-              // A relative `vite.main` is documented to resolve from the Vite
-              // root. The rolldown plugin resolves the worker entry with no
-              // importer (i.e. against `process.cwd()`), which breaks when the
-              // deploy runs from a different directory (e.g. a monorepo infra
-              // package) — absolutize before handing it over (#796).
-              main: props.vite?.main
-                ? path.resolve(
-                    initialCwd,
-                    props.vite.rootDir ?? ".",
-                    props.vite.main,
-                  )
-                : undefined,
+              // A `./`/`../` `vite.main` is documented to resolve from the
+              // Vite root. The rolldown plugin resolves the worker entry with
+              // no importer (i.e. against `process.cwd()`), which breaks when
+              // the deploy runs from a different directory (e.g. a monorepo
+              // infra package) — absolutize it before handing it over (#796).
+              // Module ids (`virtual:*`) and bare paths pass through.
+              main: resolveViteMain(
+                path,
+                path.resolve(initialCwd, props.vite?.rootDir ?? "."),
+                props.vite?.main,
+              ),
               compatibilityDate: compatibility.date,
               compatibilityFlags: compatibility.flags,
               viteEnvironments: props.vite?.viteEnvironments,
