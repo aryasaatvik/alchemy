@@ -13,7 +13,7 @@ import { watchImport } from "@alchemy.run/node-utils/watch-import";
 import { trackBunImports } from "@alchemy.run/node-utils/watch-import-bun";
 import { fileURLToPath } from "node:url";
 
-import { AlchemyContextLive } from "../AlchemyContext.ts";
+import { AlchemyContextLive, withDataDir } from "../AlchemyContext.ts";
 import { resolveStackEntrypoint } from "../Alchemist/Entrypoint.ts";
 import { StackModuleLoader } from "../Alchemist/Session.ts";
 import { ArtifactStore, createArtifactStore } from "../Artifacts.ts";
@@ -292,7 +292,12 @@ const makeExec = () => {
       : process.versions.bun !== undefined
         ? runBunDevWatcher(options)
         : runNodeDevWatcher(options);
-  }).pipe(Effect.provide(services), Effect.scoped, handleCliErrors);
+  }).pipe(
+    withDataDir(options.dataDir),
+    Effect.provide(services),
+    Effect.scoped,
+    handleCliErrors,
+  );
 };
 
 /** Fully wired sidecar CLI program. */

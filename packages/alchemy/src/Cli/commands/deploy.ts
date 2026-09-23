@@ -3,6 +3,7 @@ import * as Option from "effect/Option";
 import * as Command from "effect/unstable/cli/Command";
 import * as Flag from "effect/unstable/cli/Flag";
 
+import { withDataDir } from "../../AlchemyContext.ts";
 import * as Drift from "../../Alchemist/routes/drift.ts";
 import * as Stacks from "../../Alchemist/routes/stack.ts";
 import { Cli } from "../../Report.ts";
@@ -13,6 +14,7 @@ import { stackOutputsView } from "../components/view/StackOutputs.tsx";
 import { exitDeclined } from "./errors.ts";
 import {
   configPath,
+  dataDir,
   dryRun as dryRunFlag,
   envFile,
   force,
@@ -32,6 +34,7 @@ interface StackCommandOptions {
   readonly main: string;
   readonly stage: string;
   readonly envFile: Option.Option<string>;
+  readonly dataDir: string | undefined;
   readonly profile?: string;
   readonly dryRun?: boolean;
   readonly force?: boolean;
@@ -158,7 +161,10 @@ const detectAndMaybeRepairDrift = Effect.fn(function* (
   return decision !== "cancel";
 });
 
-const runStack = Effect.fn(function* (options: StackCommandOptions) {
+const runStack = (options: StackCommandOptions) =>
+  runStackIn(options).pipe(withDataDir(options.dataDir));
+
+const runStackIn = Effect.fn(function* (options: StackCommandOptions) {
   yield* validateSelectionOptions(options);
   const cli = yield* Cli;
   const display = { detailed: options.detailed, stage: options.stage };
@@ -242,6 +248,7 @@ export const deployCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -264,6 +271,7 @@ export const destroyCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage,
     yes,
     profile,
@@ -292,6 +300,7 @@ export const planCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage,
     profile,
     detailed,

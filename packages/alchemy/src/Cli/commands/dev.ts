@@ -13,6 +13,7 @@ import { nodeLoaderArgs } from "../../Util/Node.ts";
 import { DEV_RELOAD_EXIT_CODE, DevOptions } from "../DevOptions.ts";
 import {
   configPath,
+  dataDir,
   envFile,
   force,
   include,
@@ -45,6 +46,7 @@ export const devCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage: devStage,
     profile,
   },
