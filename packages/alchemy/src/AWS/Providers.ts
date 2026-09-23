@@ -22,6 +22,7 @@ import * as Command from "../Command/index.ts";
 import { DockerLive } from "../Docker/Docker.ts";
 import { KeyPair, KeyPairProvider } from "../KeyPair.ts";
 import * as ProviderLayer from "../Local/ProviderLayer.ts";
+import { ALCHEMY_DEV } from "../Phase.ts";
 import { defaultProviderMode } from "../ProviderMode.ts";
 import {
   captureAwsEnvironment,
@@ -2057,11 +2058,17 @@ export const providers = (options: ProvidersOptions = {}) =>
     // registered data plane. `Layer.merge`'s second layer wins duplicate
     // tags, which is exactly the shadowing we want; `Alchemy.remote()`
     // resources stay live through the per-resource binding routing.
+    //
+    // A program told it is a dev run (`ALCHEMY_DEV`) outside `alchemy dev` —
+    // a supervisor destroying a dev stage with a plain `alchemy destroy` —
+    // evaluates against the same emulator ambient. Deletes still follow each
+    // row's stamped mode.
     (base) =>
       Layer.unwrap(
         Effect.gen(function* () {
           const mode = yield* defaultProviderMode;
-          return mode === "local" ? Layer.merge(base, flociServices()) : base;
+          const devProgram = mode === "local" || (yield* ALCHEMY_DEV);
+          return devProgram ? Layer.merge(base, flociServices()) : base;
         }),
       ),
     // The local emulator configuration, below everything above so every

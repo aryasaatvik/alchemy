@@ -8,6 +8,7 @@ import {
   AWS_ENDPOINT_URL,
   AWS_SERVICE_ENDPOINTS,
   AWS_SERVICE_ENDPOINTS_ENV_VAR,
+  AWSEnvironment,
 } from "@/AWS/Environment.ts";
 import { captureAwsEnvironment } from "@/AWS/Local/ProviderContext.ts";
 import { reifyBoundConfigProvider } from "@/Runtime.ts";
@@ -24,7 +25,7 @@ import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
-const stackServices = (dev: boolean) =>
+const stackServices = (dev: boolean, config: Record<string, string> = {}) =>
   Layer.mergeAll(
     Layer.succeed(AuthProviders, {}),
     Layer.sync(ArtifactStore, createArtifactStore),
@@ -41,7 +42,7 @@ const stackServices = (dev: boolean) =>
       adopt: false,
       dotAlchemy: ".alchemy",
     }),
-    ConfigProvider.layer(ConfigProvider.fromUnknown({})),
+    ConfigProvider.layer(ConfigProvider.fromUnknown(config)),
     ProfileStoreLive,
   ).pipe(
     Layer.provideMerge(
@@ -54,6 +55,12 @@ const runtimeEnv = (env: Record<string, string>) =>
     ConfigProvider.ConfigProvider,
     ConfigProvider.fromEnv({ env }),
   );
+
+const LOCAL = {
+  accountId: "100000000042",
+  region: "eu-west-1",
+  endpoint: "http://127.0.0.1:45999",
+};
 
 describe("AWS service endpoints", { tags: ["unit", "provider:aws"] }, () => {
   it("matches SDK service IDs case- and punctuation-insensitively", () => {
@@ -108,6 +115,25 @@ describe("AWS service endpoints", { tags: ["unit", "provider:aws"] }, () => {
       );
       expect(none).toBeUndefined();
     }),
+  );
+
+  // A supervisor destroys a dev stage with a plain `alchemy destroy` and
+  // `ALCHEMY_DEV=true`, so the program evaluates as the dev run that deployed
+  // it. Its ambient AWS environment must be that run's emulator too.
+  it.effect(
+    "a dev program outside `alchemy dev` gets the emulator ambient",
+    () =>
+      Effect.gen(function* () {
+        const ambient = yield* AWSEnvironment.current;
+        expect({
+          accountId: ambient.accountId,
+          region: ambient.region,
+          endpoint: ambient.endpoint,
+        }).toEqual(LOCAL);
+      }).pipe(
+        Effect.provide(AWS.providers({ local: LOCAL })),
+        Effect.provide(stackServices(false, { ALCHEMY_DEV: "true" })),
+      ),
   );
 
   it.effect("an explicit operation endpoint wins over the service map", () =>
