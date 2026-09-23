@@ -31,6 +31,8 @@ const ProbeResponse = Schema.Struct({
   accountId: Schema.optionalKey(Schema.String),
   region: Schema.optionalKey(Schema.String),
   initHasHandlerContext: Schema.optionalKey(Schema.Boolean),
+  hasRuntimeContext: Schema.Boolean,
+  runtimeAccountId: Schema.optionalKey(Schema.String),
 });
 
 test.provider(
@@ -78,6 +80,10 @@ test.provider(
         expect(requestIds.has(body.requestId)).toBe(false);
         requestIds.add(body.requestId);
         expect(body.requestBuild).toBe(body.request);
+        // Handlers run with the host's RuntimeContext, and the account
+        // arrives injected rather than via an STS call.
+        expect(body.hasRuntimeContext).toBe(true);
+        expect(body.runtimeAccountId).toBe(environment.accountId);
         expect(body.finalized).toBe(body.request - 1);
         const prior = previous.get(body.sandbox);
         if (prior) {

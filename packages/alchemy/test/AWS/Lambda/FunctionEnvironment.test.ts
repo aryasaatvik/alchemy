@@ -1,8 +1,15 @@
+import { AWSEnvironment } from "@/AWS/Environment.ts";
 import {
   LambdaEnvironmentMaxBytes,
   lambdaEnvironmentSize,
+  resolveFunctionRuntimeEnv,
   validateLambdaEnvironment,
 } from "@/AWS/Lambda/Function.ts";
+import {
+  CloudflareEnvironment,
+  runtimeIdentity,
+} from "@/Cloudflare/CloudflareEnvironment.ts";
+import { Stack } from "@/Stack.ts";
 import { expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -44,4 +51,60 @@ it.effect("rejects an oversized environment without exposing values", () =>
       expect(result.failure.largestEntries[0]?.key).toBe("SECRET");
     }
   }),
+);
+
+const provideDeployIdentity = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.provideService(
+      AWSEnvironment,
+      Effect.succeed({
+        accountId: "654654387918",
+        region: "us-east-1",
+        credentials: Effect.die("not used"),
+      }),
+    ),
+    Effect.provideService(Stack, {
+      name: "samva",
+      stage: "production",
+      resources: {},
+      bindings: {},
+      actions: {},
+    }),
+  );
+
+it.effect("serializes the runtime identity of a packaged Lambda", () =>
+  Effect.gen(function* () {
+    expect(yield* resolveFunctionRuntimeEnv).toEqual({
+      ALCHEMY_STACK_NAME: "samva",
+      ALCHEMY_STAGE: "production",
+      ALCHEMY_PHASE: "runtime",
+      ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+    });
+  }).pipe(provideDeployIdentity),
+);
+
+it.effect("carries the deploying stack's Cloudflare account", () =>
+  Effect.gen(function* () {
+    const environment = yield* resolveFunctionRuntimeEnv;
+    expect(environment.ALCHEMY_CLOUDFLARE_ACCOUNT_ID).toBe("cf-account");
+  }).pipe(
+    provideDeployIdentity,
+    Effect.provideService(
+      CloudflareEnvironment,
+      Effect.succeed(runtimeIdentity("cf-account")),
+    ),
+  ),
+);
+
+it.effect("omits an unresolvable Cloudflare account instead of failing", () =>
+  Effect.gen(function* () {
+    const environment = yield* resolveFunctionRuntimeEnv;
+    expect(environment).not.toHaveProperty("ALCHEMY_CLOUDFLARE_ACCOUNT_ID");
+  }).pipe(
+    provideDeployIdentity,
+    Effect.provideService(
+      CloudflareEnvironment,
+      Effect.die(new Error("Cloudflare is not configured")),
+    ),
+  ),
 );

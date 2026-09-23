@@ -1,4 +1,5 @@
 import * as AWS from "@/AWS/index.ts";
+import { RuntimeContext } from "@/RuntimeContext.ts";
 import { Stage } from "@/Stage.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -46,6 +47,10 @@ export default class ListenerProbe extends AWS.Lambda.Function<ListenerProbe>()(
         const context = yield* AWS.Lambda.HandlerContext;
         const config = yield* Effect.serviceOption(ApplicationConfig);
         const requestBuild = yield* RequestValue;
+        const runtimeContext = yield* Effect.serviceOption(RuntimeContext);
+        const runtimeAccountId = yield* Effect.sync(
+          () => process.env.ALCHEMY_AWS_ACCOUNT_ID,
+        );
         const snapshot = yield* Effect.sync(() => {
           const freshScope = scope !== state.previousScope;
           state.previousScope = scope;
@@ -72,6 +77,8 @@ export default class ListenerProbe extends AWS.Lambda.Function<ListenerProbe>()(
           accountId: init?.accountId,
           region: init?.region,
           initHasHandlerContext: init?.hasHandlerContext,
+          hasRuntimeContext: Option.isSome(runtimeContext),
+          runtimeAccountId,
         });
       }).pipe(Effect.provide(requestValue), Effect.orDie);
 

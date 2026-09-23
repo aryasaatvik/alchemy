@@ -9,18 +9,65 @@ import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import * as Region from "@distilled.cloud/aws/Region";
 import { getCallerIdentity } from "@distilled.cloud/aws/sts";
 import { layer as nodeServicesLayer } from "@effect/platform-node/NodeServices";
+import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import { MinimumLogLevel } from "effect/References";
 import * as Scope from "effect/Scope";
 import { layer as fetchHttpClientLayer } from "effect/unstable/http/FetchHttpClient";
 import { AWSEnvironment } from "../../AWS/Environment.ts";
 import { registerLambdaExtension } from "../../AWS/Lambda/RuntimeExtension.ts";
+import { runtimeIdentityLayer } from "../../Cloudflare/CloudflareEnvironmentService.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
 import { entrypointLayer, entrypointTag, stackFromEnv } from "./Process.ts";
+
+/**
+ * `AWSEnvironment` for a packaged Lambda: the sandbox's credentials, Region,
+ * and endpoint, plus the account id. The Function provider injects
+ * `ALCHEMY_AWS_ACCOUNT_ID`; without it (a function deployed by an older
+ * provider) the account is resolved with STS. Either way it resolves only
+ * when requested, once per sandbox.
+ */
+export const lambdaAWSEnvironment = Layer.effect(
+  AWSEnvironment,
+  Effect.gen(function* () {
+    const credentials = yield* Credentials.Credentials;
+    const region = yield* yield* Region.Region;
+    const endpoint = yield* yield* Endpoint.Endpoint;
+    const accountId = Config.String("ALCHEMY_AWS_ACCOUNT_ID").pipe(
+      Config.option,
+      Effect.flatMap(
+        Option.match({
+          onSome: Effect.succeed,
+          onNone: () =>
+            getCallerIdentity({}).pipe(Effect.map(({ Account }) => Account!)),
+        }),
+      ),
+    );
+    const resolve = accountId.pipe(
+      Effect.map((accountId) => ({
+        accountId,
+        region,
+        credentials,
+        endpoint,
+      })),
+    );
+    const context = yield* Effect.context<Effect.Services<typeof resolve>>();
+    return yield* resolve.pipe(
+      Effect.provideContext(context),
+      Effect.orDie,
+      Effect.cached,
+    );
+  }),
+).pipe(
+  Layer.provideMerge(Credentials.fromEnv()),
+  Layer.provideMerge(Region.fromEnv()),
+  Layer.provideMerge(Endpoint.fromEnv()),
+);
 
 /**
  * Build the sandbox-lifetime layer stack and return the Lambda handler the
@@ -46,37 +93,12 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
     Logger.layer([Logger.consolePretty()]),
   );
 
-  const awsEnvironment = Layer.effect(
-    AWSEnvironment,
-    Effect.gen(function* () {
-      const credentials = yield* Credentials.Credentials;
-      const region = yield* yield* Region.Region;
-      const endpoint = yield* yield* Endpoint.Endpoint;
-      const resolve = getCallerIdentity({}).pipe(
-        Effect.map(({ Account }) => ({
-          accountId: Account!,
-          region,
-          credentials,
-          endpoint,
-        })),
-      );
-      const context = yield* Effect.context<Effect.Services<typeof resolve>>();
-      // Resolve account identity only when requested, once per sandbox.
-      return yield* resolve.pipe(
-        Effect.provideContext(context),
-        Effect.orDie,
-        Effect.cached,
-      );
-    }),
-  ).pipe(
-    Layer.provideMerge(Credentials.fromEnv()),
-    Layer.provideMerge(Region.fromEnv()),
-    Layer.provideMerge(Endpoint.fromEnv()),
-  );
-
   const entryLayer = entrypointLayer(entrypoint).pipe(
     Layer.provideMerge(stackFromEnv),
-    Layer.provideMerge(awsEnvironment),
+    Layer.provideMerge(lambdaAWSEnvironment),
+    Layer.provideMerge(
+      runtimeIdentityLayer(process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID),
+    ),
     Layer.provideMerge(platform),
     Layer.provideMerge(
       Layer.succeed(

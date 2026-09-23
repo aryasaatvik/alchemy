@@ -47,6 +47,7 @@ import { sha256 } from "../../Util/sha256.ts";
 import { zipCode } from "../../Util/zip.ts";
 import { Assets } from "../Assets.ts";
 import { AWSEnvironment } from "../Environment.ts";
+import { CloudflareEnvironment } from "../../Cloudflare/CloudflareEnvironmentService.ts";
 import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import type { Providers } from "../Providers.ts";
@@ -1314,21 +1315,47 @@ export const Function: Platform<
   },
 });
 
+/**
+ * The identity a packaged Lambda needs when its init graph replays at
+ * runtime: the stack/stage, the phase, the AWS account (so
+ * `AWSEnvironment.current` resolves without an STS round-trip on every cold
+ * start), and — when the deploying stack has a Cloudflare identity — the
+ * Cloudflare account (so `CloudflareEnvironment` resolves in the Lambda).
+ */
+export const resolveFunctionRuntimeEnv = Effect.gen(function* () {
+  const stack = yield* Stack;
+  const { accountId } = yield* AWSEnvironment.current;
+  const cloudflareEnvironment = yield* Effect.serviceOption(
+    CloudflareEnvironment,
+  );
+  // An unconfigured Cloudflare identity must not fail an AWS deploy; the
+  // Lambda then dies only if its runtime code actually reads it.
+  const cloudflareAccountId = Option.isSome(cloudflareEnvironment)
+    ? yield* cloudflareEnvironment.value.pipe(
+        Effect.map((environment) => environment.accountId),
+        Effect.exit,
+        Effect.map((exit) => (Exit.isSuccess(exit) ? exit.value : undefined)),
+      )
+    : undefined;
+  return {
+    ALCHEMY_STACK_NAME: stack.name,
+    ALCHEMY_STAGE: stack.stage,
+    ALCHEMY_PHASE: "runtime",
+    ALCHEMY_AWS_ACCOUNT_ID: accountId,
+    ...(cloudflareAccountId === undefined
+      ? {}
+      : { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId }),
+  } satisfies Record<string, string>;
+});
+
 export const FunctionProvider = () =>
   Provider.effect(
     Function,
     Effect.gen(function* () {
-      const stack = yield* Stack;
-
       // Code bundling lives in FunctionBundle.ts so the floci local
       // provider's watch loop can rebuild the identical artifact.
       const { bundleCode } = yield* makeFunctionBundler;
       const functionImage = yield* makeFunctionImage;
-      const alchemyEnv = {
-        ALCHEMY_STACK_NAME: stack.name,
-        ALCHEMY_STAGE: stack.stage,
-        ALCHEMY_PHASE: "runtime",
-      };
 
       const createFunctionName = (
         id: string,
@@ -1892,9 +1919,12 @@ export const FunctionProvider = () =>
         const runtimeEnv = isFunctionImageProps(news)
           ? env
           : withNodeSourceMaps(env, news);
-        const environmentVariables = runtimeEnv
-          ? { ...runtimeEnv, ...alchemyEnv }
-          : undefined;
+        // Always sent, even when the function declares no variables: the
+        // packaged bootstrap reads its stack and account identity from here.
+        const environmentVariables = {
+          ...runtimeEnv,
+          ...(yield* resolveFunctionRuntimeEnv),
+        };
         yield* validateLambdaEnvironment(environmentVariables);
 
         const createFunctionRequest: CreateFunctionRequest = {
@@ -1925,9 +1955,7 @@ export const FunctionProvider = () =>
           Layers: isFunctionImageProps(news)
             ? undefined
             : (news.layers ?? []).map(layerVersionArnOf),
-          Environment: environmentVariables
-            ? { Variables: environmentVariables }
-            : undefined,
+          Environment: { Variables: environmentVariables },
           Tags: tags,
           Timeout: toTimeoutSeconds(news.timeout),
           // Always explicit so removing the `tracing` prop converges back to
@@ -2505,7 +2533,7 @@ export const FunctionProvider = () =>
             roleArn: role.Role.Arn,
             code: prepared.deployment,
             functionName,
-            env: alchemyEnv,
+            env: undefined,
             session,
           });
 
