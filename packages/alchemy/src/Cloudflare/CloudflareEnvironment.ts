@@ -1,7 +1,6 @@
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { resolveProviderConfig } from "../Auth/Resolve.ts";
 import {
   CLOUDFLARE_AUTH_PROVIDER_NAME,
@@ -9,22 +8,29 @@ import {
   type CloudflareResolvedCredentials,
 } from "./Auth/AuthConfig.ts";
 
-import { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
+import {
+  CloudflareEnvironment,
+  runtimeIdentity,
+} from "./CloudflareEnvironmentService.ts";
 
-export { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
+export {
+  CloudflareEnvironment,
+  runtimeIdentity,
+  runtimeIdentityLayer,
+  type CloudflareEnvironmentShape,
+  type CloudflareRuntimeIdentity,
+} from "./CloudflareEnvironmentService.ts";
 
 const CLOUDFLARE_ACCOUNT_ID = Config.String("CLOUDFLARE_ACCOUNT_ID");
 
 export const fromEnv = () =>
   Layer.effect(
     CloudflareEnvironment,
-    Effect.gen(function* () {
-      const accountId = yield* CLOUDFLARE_ACCOUNT_ID.pipe(
-        Config.option,
-        Config.map(Option.getOrUndefined),
-      );
-      return { account: accountId } as any;
-    }),
+    CLOUDFLARE_ACCOUNT_ID.pipe(
+      Effect.map(runtimeIdentity),
+      Effect.orDie,
+      Effect.cached,
+    ),
   );
 
 export const fromProfile = () =>
