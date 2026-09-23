@@ -1,8 +1,10 @@
 import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as zones from "@distilled.cloud/cloudflare/zones";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
+import { cachedFunction } from "../../Util/cached-function.ts";
 
 /**
  * Reference to an existing Cloudflare Zone. Accepts:
@@ -20,6 +22,16 @@ export const matchesZoneHostname = (
   hostname: string,
 ): boolean => hostname === zoneName || hostname.endsWith(`.${zoneName}`);
 
+/**
+ * No zone in the account matches the requested name or any parent label of
+ * the hostname. `name` is the name the lookup walked: the explicit zone name
+ * when one was given, otherwise the hostname.
+ */
+export class ZoneNotFound extends Data.TaggedError("ZoneNotFound")<{
+  readonly name: string;
+  readonly message: string;
+}> {}
+
 export const resolveZoneId = ({
   accountId,
   zone,
@@ -28,7 +40,11 @@ export const resolveZoneId = ({
   accountId: string;
   zone: Reference | undefined;
   hostname: string;
-}) =>
+}): Effect.Effect<
+  string,
+  ZoneNotFound | zones.ListZonesError,
+  Credentials | HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     if (typeof zone === "object") return zone.zoneId;
     if (typeof zone === "string" && isId(zone)) return zone;
@@ -38,9 +54,26 @@ export const resolveZoneId = ({
       const match = yield* findZoneByName({ accountId, name: candidate });
       if (match) return match.id;
     }
-    return yield* Effect.fail(
-      new Error(`Cloudflare zone not found for ${lookup}`),
-    );
+    return yield* new ZoneNotFound({
+      name: lookup,
+      message: `Cloudflare zone not found for ${lookup}`,
+    });
+  });
+
+/**
+ * A memoized {@link resolveZoneId}, keyed by account, hostname and zone pin.
+ * Concurrent calls with the same key share one in-flight lookup; failures are
+ * not cached. Build one per reconcile pass so a recreated zone is never served
+ * from a stale entry.
+ */
+export const cachedResolveZoneId = () =>
+  cachedFunction(resolveZoneId, {
+    key: ([{ accountId, zone, hostname }]) =>
+      JSON.stringify([
+        accountId,
+        hostname,
+        typeof zone === "object" ? zone.zoneId : (zone ?? null),
+      ]),
   });
 
 type ZoneListItem = {

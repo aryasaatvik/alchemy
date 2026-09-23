@@ -32,7 +32,7 @@ import { localRuntimeServices } from "../LocalRuntime.ts";
 import { detachQueueConsumersOfScript } from "../Queues/Consumer.ts";
 import { CloudflareLogs } from "../Logs.ts";
 import {
-  resolveZoneId,
+  cachedResolveZoneId,
   type Reference as ZoneReference,
 } from "../Zone/lookup.ts";
 import {
@@ -1390,30 +1390,6 @@ export const LiveWorkerProvider = () =>
           );
         });
 
-      /**
-       * Resolve a hostname to a Cloudflare zone id. An explicit pin
-       * (`zoneId` / zone name / `{ zoneId }`) wins. Otherwise look the
-       * hostname up with {@link resolveZoneId} (`GET /zones?name=` per
-       * parent label) — never by listing the account's first page of zones.
-       */
-      const inferZoneIdForHostname = (
-        hostname: string,
-        zoneCache: Map<string, string>,
-        zone?: ZoneReference,
-      ) =>
-        Effect.gen(function* () {
-          const cacheKey =
-            zone === undefined
-              ? hostname
-              : `${hostname}:${typeof zone === "string" ? zone : zone.zoneId}`;
-          const cached = zoneCache.get(cacheKey);
-          if (cached) return cached;
-          const { accountId } = yield* yield* CloudflareEnvironment;
-          const zoneId = yield* resolveZoneId({ accountId, zone, hostname });
-          zoneCache.set(cacheKey, zoneId);
-          return zoneId;
-        });
-
       const reconcileDomains = (
         scriptName: string,
         desired: string[],
@@ -1469,7 +1445,12 @@ export const LiveWorkerProvider = () =>
 
           if (desired.length === 0) return [];
 
-          const zoneCache = new Map<string, string>();
+          // One memo for the pinned and inferred lookups of this pass.
+          // `attachDomain` runs concurrently, so a hostname's lookup is
+          // shared rather than raced. Inference walks the hostname's labels
+          // with exact `GET /zones?name=` lookups — never the account's first
+          // page of zones.
+          const resolveZone = yield* cachedResolveZoneId();
 
           // Attach `hostname` to this Worker. Skip the PUT entirely if
           // the hostname is already attached to *this* Worker — that's a
@@ -1481,7 +1462,7 @@ export const LiveWorkerProvider = () =>
             const desiredZoneId =
               zone === undefined
                 ? undefined
-                : yield* inferZoneIdForHostname(hostname, zoneCache, zone);
+                : yield* resolveZone({ accountId, zone, hostname });
             if (
               live &&
               !shouldRecreateWorkerDomainAttachment(
@@ -1534,7 +1515,7 @@ export const LiveWorkerProvider = () =>
 
             const zoneId =
               desiredZoneId ??
-              (yield* inferZoneIdForHostname(hostname, zoneCache));
+              (yield* resolveZone({ accountId, zone: undefined, hostname }));
             // Same eventual-consistency window as `setWorkerSubdomain`:
             // PUT /accounts/.../workers/domains right after `putScript`
             // can return `WorkerNotFound` until Cloudflare's script
@@ -1914,23 +1895,18 @@ export const LiveWorkerProvider = () =>
         Effect.gen(function* () {
           if (!routes?.length) return [] as NormalizedWorkerRoute[];
           const { accountId } = yield* yield* CloudflareEnvironment;
-          const zoneCache = new Map<string, string>();
+          const resolveZone = yield* cachedResolveZoneId();
           const normalized: NormalizedWorkerRoute[] = [];
           const seen = new Set<string>();
           for (const route of routes) {
             const pattern = route.pattern.trim();
-            const zoneId = route.zoneId
-              ? route.zoneId
-              : route.zone || route.zoneName
-                ? yield* resolveZoneId({
-                    accountId,
-                    zone: route.zone ?? route.zoneName!,
-                    hostname: hostnameFromPattern(pattern),
-                  })
-                : yield* inferZoneIdForHostname(
-                    hostnameFromPattern(pattern),
-                    zoneCache,
-                  );
+            const zoneId =
+              route.zoneId ||
+              (yield* resolveZone({
+                accountId,
+                zone: route.zone || route.zoneName || undefined,
+                hostname: hostnameFromPattern(pattern),
+              }));
             const key = routeKey({ pattern, zoneId });
             if (seen.has(key)) continue;
             seen.add(key);
