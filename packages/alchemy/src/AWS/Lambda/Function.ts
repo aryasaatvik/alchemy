@@ -1830,6 +1830,60 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         } satisfies PreparedFunctionCode;
       });
 
+      // Best-effort cleanup for a precreate that failed before its function
+      // existed. The role name is instance-scoped, so no other generation
+      // shares it; once the function exists, `delete` owns the role instead.
+      const releasePrecreatedRole = ({
+        roleName,
+        functionName,
+      }: {
+        roleName: string;
+        functionName: string;
+      }) =>
+        Effect.gen(function* () {
+          const fn = yield* Lambda.getFunction({
+            FunctionName: functionName,
+          }).pipe(
+            Effect.catchTag("ResourceNotFoundException", () =>
+              Effect.succeed(undefined),
+            ),
+          );
+          if (fn !== undefined) return;
+          const attached = yield* iam
+            .listAttachedRolePolicies({ RoleName: roleName })
+            .pipe(
+              Effect.catchTag("NoSuchEntityException", () =>
+                Effect.succeed(undefined),
+              ),
+            );
+          if (attached === undefined) return;
+          for (const policy of attached.AttachedPolicies ?? []) {
+            yield* iam
+              .detachRolePolicy({
+                RoleName: roleName,
+                PolicyArn: policy.PolicyArn!,
+              })
+              .pipe(
+                Effect.catchTag("NoSuchEntityException", () => Effect.void),
+              );
+          }
+          yield* iam.deleteRole({ RoleName: roleName }).pipe(
+            Effect.catchTag("NoSuchEntityException", () => Effect.void),
+            Effect.retry({
+              while: (error) =>
+                error._tag === "DeleteConflictException" ||
+                error._tag === "ConcurrentModificationException",
+              schedule: Schedule.spaced("2 seconds"),
+              times: 5,
+            }),
+          );
+        }).pipe(
+          Effect.ignoreCause({
+            log: "Warn",
+            message: `Failed to release the execution role ${roleName} of a failed precreate`,
+          }),
+        );
+
       const createOrUpdateFunction: (input: {
         id: string;
         news: FunctionProps;
@@ -1847,6 +1901,10 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         // and the stub doesn't need connectivity — `reconcile` attaches the
         // resolved VPC config afterwards.
         vpc?: FunctionProps["vpc"];
+        // Attached layers. `undefined` omits `Layers` (precreate stub: a
+        // layer created in the same deploy is still an unresolved Output
+        // and would fail to serialize); `[]` explicitly detaches all.
+        layers?: LayerRef[];
         session: { note: (note: string) => Effect.Effect<void> };
       }) => Effect.Effect<
         void,
@@ -1862,6 +1920,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         preferUpdate,
         fileSystemConfigs,
         vpc,
+        layers,
         session,
       }: {
         id: string;
@@ -1873,6 +1932,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         preferUpdate?: boolean;
         fileSystemConfigs?: Lambda.FileSystemConfig[];
         vpc?: FunctionProps["vpc"];
+        layers?: LayerRef[];
         session: { note: (note: string) => Effect.Effect<void> };
       }) {
         yield* Effect.logDebug(`creating function ${id}`);
@@ -1965,12 +2025,13 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
               }),
           Architectures: [news.architecture ?? "x86_64"],
           MemorySize: news.memorySize,
-          // Always explicit: `UpdateFunctionConfiguration` treats an omitted
-          // `Layers` as "leave as-is", so removing the prop would strand the
+          // Reconcile always passes an explicit list:
+          // `UpdateFunctionConfiguration` treats an omitted `Layers` as
+          // "leave as-is", so removing the prop would strand the
           // previously-attached layers.
           Layers: isFunctionImageProps(news)
             ? undefined
-            : (news.layers ?? []).map(layerVersionArnOf),
+            : layers?.map(layerVersionArnOf),
           Environment: { Variables: environmentVariables },
           Tags: tags,
           Timeout: toTimeoutSeconds(news.timeout),
@@ -2537,21 +2598,31 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             vpc: news.vpc,
           });
 
-          const prepared = yield* preparePrecreatedFunctionCode({
-            id,
-            props: news,
-            session,
-          });
+          const prepared = yield* Effect.gen(function* () {
+            const prepared = yield* preparePrecreatedFunctionCode({
+              id,
+              props: news,
+              session,
+            });
 
-          yield* createOrUpdateFunction({
-            id,
-            news,
-            roleArn: role.Role.Arn,
-            code: prepared.deployment,
-            functionName,
-            env: undefined,
-            session,
-          });
+            yield* createOrUpdateFunction({
+              id,
+              news,
+              roleArn: role.Role.Arn,
+              code: prepared.deployment,
+              functionName,
+              env: undefined,
+              session,
+            });
+            return prepared;
+          }).pipe(
+            // A failed precreate records no Attributes, so destroy's recovery
+            // `read` finds no function and drops the row. Release the
+            // instance-scoped role now, or it is stranded.
+            Effect.onError(() =>
+              releasePrecreatedRole({ roleName, functionName }),
+            ),
+          );
 
           return {
             functionArn: `arn:aws:lambda:${region}:${accountId}:function:${functionName}`,
@@ -2705,6 +2776,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             },
             functionName,
             vpc,
+            layers: news.layers ?? [],
             preferUpdate: output !== undefined,
             // `[]` (when the prop/bindings were removed on a function that
             // previously had mounts) explicitly clears the file-system
