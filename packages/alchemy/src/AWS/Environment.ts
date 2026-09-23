@@ -87,6 +87,11 @@ export interface AWSEnvironmentShape {
   credentials: Effect.Effect<ResolvedCredentials, CredentialsError>;
   endpoint?: string;
   profile?: string;
+  /**
+   * Set by the local emulator context (see `AWS/Local/FlociServices.ts`),
+   * whatever account the emulator was given.
+   */
+  emulator?: boolean;
 }
 
 export class AWSEnvironment extends Context.Service<
@@ -95,14 +100,14 @@ export class AWSEnvironment extends Context.Service<
 >()("AWS::Environment") {
   static current = AWSEnvironment.use((env) => env);
   /**
-   * Whether this environment is the floci emulator
-   * (dummy account {@link LOCAL_ACCOUNT_ID}). A set `endpoint` is not
-   * enough: `AWS_ENDPOINT_URL` and explicit endpoint overrides also
-   * populate it on real-account credentials.
+   * Whether this environment is the floci emulator: marked by the local
+   * emulator context, or on the dummy account {@link LOCAL_ACCOUNT_ID}. A
+   * set `endpoint` is not enough: explicit endpoint overrides also populate
+   * it on real-account credentials.
    */
   static isLocalEmulator = Effect.map(
     AWSEnvironment.current,
-    (env) => env.accountId === LOCAL_ACCOUNT_ID,
+    (env) => env.emulator === true || env.accountId === LOCAL_ACCOUNT_ID,
   );
   readonly kind = "Environment" as const;
 }

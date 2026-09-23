@@ -27,7 +27,12 @@ import {
   captureAwsEnvironment,
   pinCollectionEnvironment,
 } from "./Local/ProviderContext.ts";
-import { flociDual, flociServices } from "./Local/FlociServices.ts";
+import {
+  awsSessionConfig,
+  flociDual,
+  flociServices,
+  type LocalProfile,
+} from "./Local/FlociServices.ts";
 import * as Provider from "../Provider.ts";
 import { Random, RandomProvider } from "../Random.ts";
 import {
@@ -256,6 +261,23 @@ export interface ProvidersOptions {
    * ```
    */
   readonly serviceEndpoints?: Endpoint.ServiceEndpoints;
+  /**
+   * The emulator account, region and endpoint of local-mode (`alchemy dev`)
+   * AWS resources. Reaches every local provider, including the ones the dev
+   * sidecar hosts. Omitted fields keep the managed `alchemy-floci` defaults.
+   *
+   * @example
+   * ```ts
+   * AWS.providers({
+   *   local: {
+   *     accountId: "100000000001",
+   *     region: "us-east-1",
+   *     endpoint: "http://127.0.0.1:4566",
+   *   },
+   * });
+   * ```
+   */
+  readonly local?: LocalProfile;
 }
 
 export const providers = (options: ProvidersOptions = {}) =>
@@ -2041,6 +2063,17 @@ export const providers = (options: ProvidersOptions = {}) =>
           return mode === "local" ? Layer.merge(base, flociServices()) : base;
         }),
       ),
+    // The local emulator configuration, below everything above so every
+    // local variant (and the dev-mode ambient override) reads it, and
+    // merged out so the dev sidecar receives it with the session.
+    Layer.provideMerge(
+      options.local === undefined && options.serviceEndpoints === undefined
+        ? Layer.empty
+        : awsSessionConfig({
+            local: options.local,
+            serviceEndpoints: options.serviceEndpoints,
+          }),
+    ),
     Layer.orDie,
   );
 

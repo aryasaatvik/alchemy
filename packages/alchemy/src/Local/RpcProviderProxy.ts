@@ -4,12 +4,14 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as HttpBody from "effect/unstable/http/HttpBody";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import { AlchemyContext } from "../AlchemyContext.ts";
 import type { ProviderService } from "../Provider.ts";
 import type { ResourceLike } from "../Resource.ts";
 import { Stack } from "../Stack.ts";
+import { ProviderSessionConfig } from "./ProviderSessionConfig.ts";
 import { unwrapRpcHandlers } from "./RpcSerialization.ts";
 import type { RpcProxyApi } from "./RpcServer.ts";
 import {
@@ -121,9 +123,17 @@ const make = Effect.fn(function* (spawnerUrl: string) {
     get: Effect.fn(function* (providersUrl, providerName) {
       const alchemyContext = yield* AlchemyContext;
       const stack = yield* Stack;
+      // Provider-group configuration (e.g. AWS's local emulator profile)
+      // rides the session so sidecar-built providers see what the stack
+      // configured. It is part of the session key: stacks configured
+      // differently never share a sidecar provider context.
+      const providers = yield* Effect.serviceOption(ProviderSessionConfig);
       const key = encodeSessionEnvironment({
         alchemyContext,
         stack: { name: stack.name, stage: stack.stage },
+        ...(Option.isSome(providers) && Object.keys(providers.value).length > 0
+          ? { providers: providers.value }
+          : {}),
       });
       const fetchProvider = Effect.gen(function* () {
         const session = yield* Cache.get(cache, key);
