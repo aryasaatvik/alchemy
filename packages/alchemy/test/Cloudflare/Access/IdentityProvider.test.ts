@@ -1,7 +1,6 @@
 import { adopt, OwnedBySomeoneElse } from "@/AdoptPolicy";
 import * as Cloudflare from "@/Cloudflare";
 import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
-import { findZoneByName } from "@/Cloudflare/Zone/lookup";
 import * as Provider from "@/Provider";
 import * as Test from "@/Test/Alchemy";
 import * as zeroTrust from "@distilled.cloud/cloudflare/zero-trust";
@@ -14,6 +13,11 @@ import { MinimumLogLevel } from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
+import {
+  requireStandingZone,
+  StandingZone,
+  StandingZoneName,
+} from "../StandingZone.ts";
 import IdpLookupWorker from "./fixtures/idp-lookup-worker.ts";
 
 const { test } = Test.make({ providers: Cloudflare.providers() });
@@ -23,19 +27,9 @@ const logLevel = Effect.provideService(
   process.env.DEBUG ? "Debug" : "Info",
 );
 
-const zoneName =
-  process.env.CLOUDFLARE_TEST_DNS_ZONE_NAME ?? "alchemy-test-2.us";
+const zoneName = StandingZoneName;
 
-const resolveZoneId = Effect.gen(function* () {
-  const { accountId } = yield* yield* CloudflareEnvironment;
-  const zone = yield* findZoneByName({ accountId, name: zoneName });
-  if (!zone) {
-    return yield* Effect.die(
-      new Error(`zone "${zoneName}" not found in account`),
-    );
-  }
-  return zone.id;
-});
+const resolveZoneId = requireStandingZone().pipe(Effect.map((zone) => zone.id));
 
 // Ride out 403 blips (`Forbidden`) while the harness-minted token
 // propagates across Cloudflare's edge. Zone-level when `zoneId` is set,
@@ -591,9 +585,7 @@ test.provider(
             type: "oidc",
             config: oidcConfig,
           });
-          yield* Cloudflare.Zone.Zone("TestZone", {
-            name: zoneName,
-          }).pipe(adopt(true));
+          yield* StandingZone("TestZone");
           const app = yield* Cloudflare.Access.Application("LookupGatedApp", {
             type: "self_hosted",
             domain: `alchemy-test-idp-lookup.${zoneName}`,

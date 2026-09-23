@@ -1,19 +1,17 @@
 import * as ACME from "@/ACME";
-import * as AdoptPolicy from "@/AdoptPolicy";
-import { retain } from "@/RemovalPolicy";
-import * as Cloudflare from "@/Cloudflare";
 import * as Output from "@/Output";
 import * as ZeroSsl from "@distilled.cloud/zerossl";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import { StandingZoneResource } from "../../Cloudflare/StandingZone.ts";
 
-export const ZONE_NAME = "alchemy-test-2.us";
-
-/** The standing test zone, adopted (never deleted on destroy). */
-export const Zone = Cloudflare.Zone.Zone("AcmeZone", {
-  name: ZONE_NAME,
-}).pipe(AdoptPolicy.adopt(), retain());
+/**
+ * The standing test zone, bound in the issuing Workers' init phase. The stacks
+ * that deploy those Workers resolve it with `requireStandingZone` first, so it
+ * is adopted, never created, and retained on destroy.
+ */
+export const Zone = StandingZoneResource("AcmeZone");
 
 export const Staging = ACME.Account("Staging", {
   ca: ACME.LetsEncryptStaging,

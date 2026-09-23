@@ -1,14 +1,16 @@
 import { Action } from "@/Action";
-import { adopt } from "@/AdoptPolicy";
 import * as Cloudflare from "@/Cloudflare";
-import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
-import { findZoneByName } from "@/Cloudflare/Zone/lookup";
 import * as Test from "@/Test/Alchemy";
 import * as dns from "@distilled.cloud/cloudflare/dns";
 import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
 import * as Stream from "effect/Stream";
+import {
+  requireStandingZone,
+  StandingZone,
+  StandingZoneName,
+} from "../StandingZone.ts";
 
 const { test } = Test.make({ providers: Cloudflare.providers() });
 
@@ -17,8 +19,7 @@ const logLevel = Effect.provideService(
   process.env.DEBUG ? "Debug" : "Info",
 );
 
-const zoneName =
-  process.env.CLOUDFLARE_TEST_DNS_ZONE_NAME ?? "alchemy-test-2.us";
+const zoneName = StandingZoneName;
 
 // Deterministic record name — reused on every run (never derive from
 // Date.now()/random), owns its own subdomain so it never collides with the
@@ -27,16 +28,7 @@ const RECORD_NAME = `alchemy-dnslocal.${zoneName}`;
 const RECORD_TYPE = "TXT";
 const RECORD_CONTENT = '"alchemy-dnslocal-seed"';
 
-const resolveZoneId = Effect.gen(function* () {
-  const { accountId } = yield* yield* CloudflareEnvironment;
-  const zone = yield* findZoneByName({ accountId, name: zoneName });
-  if (!zone) {
-    return yield* Effect.die(
-      new Error(`zone "${zoneName}" not found in account`),
-    );
-  }
-  return zone.id;
-});
+const resolveZoneId = requireStandingZone().pipe(Effect.map((zone) => zone.id));
 
 // Delete every record matching (name, type) — used to clear leftovers from
 // interrupted runs and to guarantee cleanup on finish.
@@ -87,11 +79,8 @@ test.provider(
       const out = yield* stack
         .deploy(
           Effect.gen(function* () {
-            // Adopt the standing test zone. Zones default to `retain` on
-            // removal, so `stack.destroy()` never deletes it.
-            const zone = yield* Cloudflare.Zone.Zone("DnsLocalZone", {
-              name: zoneName,
-            }).pipe(adopt(true));
+            // Adopt the standing test zone; it is retained on destroy.
+            const zone = yield* StandingZone("DnsLocalZone");
 
             const Seed = Action(
               "Seed",

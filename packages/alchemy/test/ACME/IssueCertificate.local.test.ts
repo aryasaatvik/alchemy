@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import Stack from "./fixtures/issue-stack.ts";
-import { ZONE_NAME } from "./fixtures/shared.ts";
+import { StandingZoneName } from "../Cloudflare/StandingZone.ts";
 
 /**
  * The same runtime issuance as `IssueCertificate.test.ts`, but the Worker
@@ -22,7 +22,7 @@ const { test, beforeAll, afterAll, deploy, destroy } = Test.make({
 const stack = beforeAll(deploy(Stack));
 afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
 
-const NAME = `alchemy-acme-worker-local.${ZONE_NAME}`;
+const NAME = `alchemy-acme-worker-local.${StandingZoneName}`;
 
 test(
   "a local Worker issues a certificate at runtime through the bound account",
