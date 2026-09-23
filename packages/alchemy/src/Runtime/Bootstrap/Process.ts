@@ -26,6 +26,7 @@ import * as Layer from "effect/Layer";
 import { makeEntrypointLayer } from "../../Runtime.ts";
 import { Self } from "../../Self.ts";
 import { Stack } from "../../Stack.ts";
+import { Stage } from "../../Stage.ts";
 import { provideProcessTelemetry } from "../../Telemetry.ts";
 import { withManagedHttpShutdown } from "./ManagedHttpShutdown.ts";
 
@@ -45,36 +46,45 @@ export const entrypointTag = Context.Service<any, any>(Self.key);
 export const entrypointLayer = (entrypoint: unknown): Layer.Layer<any> =>
   makeEntrypointLayer(entrypointTag, entrypoint);
 
-/** `Stack` from the `ALCHEMY_STACK_NAME` / `ALCHEMY_STAGE` the host injects. */
-export const stackFromEnv: Layer.Layer<Stack, Config.ConfigError> =
-  Layer.effect(
-    Stack,
-    Effect.all([
-      Config.String("ALCHEMY_STACK_NAME"),
-      Config.String("ALCHEMY_STAGE"),
-    ]).pipe(
-      Effect.map(([name, stage]) => ({
-        name,
-        stage,
-        bindings: {},
-        resources: {},
-        actions: {},
-      })),
+/**
+ * `Stack` (and its `Stage`) from the `ALCHEMY_STACK_NAME` / `ALCHEMY_STAGE`
+ * the host injects.
+ */
+export const stackFromEnv: Layer.Layer<Stack | Stage, Config.ConfigError> =
+  Layer.mergeAll(
+    Layer.effect(
+      Stack,
+      Effect.all([
+        Config.String("ALCHEMY_STACK_NAME"),
+        Config.String("ALCHEMY_STAGE"),
+      ]).pipe(
+        Effect.map(([name, stage]) => ({
+          name,
+          stage,
+          bindings: {},
+          resources: {},
+          actions: {},
+        })),
+      ),
     ),
+    Layer.effect(Stage, Config.String("ALCHEMY_STAGE")),
   );
 
-/** `Stack` from constants baked in at deploy time. */
+/** `Stack` (and its `Stage`) from constants baked in at deploy time. */
 export const stackConstant = (
   name: string,
   stage: string,
-): Layer.Layer<Stack> =>
-  Layer.succeed(Stack, {
-    name,
-    stage,
-    bindings: {},
-    resources: {},
-    actions: {},
-  });
+): Layer.Layer<Stack | Stage> =>
+  Layer.mergeAll(
+    Layer.succeed(Stack, {
+      name,
+      stage,
+      bindings: {},
+      resources: {},
+      actions: {},
+    }),
+    Layer.succeed(Stage, stage),
+  );
 
 /**
  * Resolve the program the bundled platform registered under `exportKey`

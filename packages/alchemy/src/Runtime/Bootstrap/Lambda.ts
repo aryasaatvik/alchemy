@@ -8,7 +8,6 @@ import * as Credentials from "@distilled.cloud/aws/Credentials";
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import * as Region from "@distilled.cloud/aws/Region";
 import { getCallerIdentity } from "@distilled.cloud/aws/sts";
-import * as Config from "effect/Config";
 import { layer as nodeServicesLayer } from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
@@ -21,7 +20,6 @@ import { layer as fetchHttpClientLayer } from "effect/unstable/http/FetchHttpCli
 import { AWSEnvironment } from "../../AWS/Environment.ts";
 import { registerLambdaExtension } from "../../AWS/Lambda/RuntimeExtension.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
-import { Stage } from "../../Stage.ts";
 import { entrypointLayer, entrypointTag, stackFromEnv } from "./Process.ts";
 
 /**
@@ -78,7 +76,6 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
 
   const entryLayer = entrypointLayer(entrypoint).pipe(
     Layer.provideMerge(stackFromEnv),
-    Layer.provideMerge(Layer.effect(Stage, Config.String("ALCHEMY_STAGE"))),
     Layer.provideMerge(awsEnvironment),
     Layer.provideMerge(platform),
     Layer.provideMerge(

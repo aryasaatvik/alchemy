@@ -11,7 +11,6 @@ import * as Logger from "effect/Logger";
 import { MinimumLogLevel } from "effect/References";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import { BunHttpServer } from "../../Http.ts";
-import { Stage } from "../../Stage.ts";
 import {
   entrypointLayer,
   resolveProgram,
@@ -39,10 +38,7 @@ export const bootstrap = (
     Logger.layer([Logger.consolePretty()]),
   );
 
-  const stack = Layer.mergeAll(
-    stackConstant(options.stack.name, options.stack.stage),
-    Layer.succeed(Stage, options.stack.stage),
-  );
+  const stack = stackConstant(options.stack.name, options.stack.stage);
 
   const program = resolveProgram("default").pipe(
     Effect.provide(
