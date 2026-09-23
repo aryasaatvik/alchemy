@@ -104,6 +104,49 @@ export interface Secret extends Resource<
 > {}
 
 /**
+ * A Secrets Manager secret owned outside this stack (e.g. by an operator)
+ * that a Function may bind to but Alchemy never manages. Create one with
+ * {@link external}.
+ */
+export interface SecretReference {
+  readonly LogicalId: string;
+  /** The `SecretId` sent at runtime (name or ARN). */
+  readonly secretId: string;
+  /**
+   * The IAM resource the binding grants, typically the secret's ARN or an
+   * ARN pattern such as `arn:aws:secretsmanager:…:secret:my-secret-*`.
+   */
+  readonly secretArn: string;
+}
+
+/**
+ * Reference an existing secret by its runtime id and IAM resource ARN (or
+ * ARN pattern). The reference creates no state, and Alchemy never reads,
+ * writes, or deletes the secret; binding it only grants the capability's
+ * actions on `secretArn`.
+ *
+ * Both values are plain strings the init code computes identically at plan
+ * time and at runtime, so the runtime client addresses `secretId` directly
+ * instead of carrying it through the Function's environment.
+ *
+ * ```typescript
+ * const secret = SecretsManager.external("ApiSecrets", {
+ *   secretId: "my-api-secrets",
+ *   secretArn: `arn:aws:secretsmanager:${region}:${accountId}:secret:my-api-secrets-*`,
+ * });
+ * const getSecretValue = yield* SecretsManager.GetSecretValue(secret);
+ * ```
+ */
+export const external = (
+  logicalId: string,
+  input: { readonly secretId: string; readonly secretArn: string },
+): SecretReference => ({
+  LogicalId: logicalId,
+  secretId: input.secretId,
+  secretArn: input.secretArn,
+});
+
+/**
  * An AWS Secrets Manager secret.
  *
  * `Secret` owns the lifecycle of the secret metadata and current value. It can

@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Binding from "../../Binding.ts";
 import { isBindingHost } from "../Lambda/Function.ts";
-import type { Secret } from "./Secret.ts";
+import type { Secret, SecretReference } from "./Secret.ts";
 
 /**
  * Shared scaffolding for the AWS Secrets Manager HTTP bindings.
@@ -14,9 +14,9 @@ import type { Secret } from "./Secret.ts";
 
 /**
  * Build the impl Effect for a Secrets Manager operation scoped to a bound
- * {@link Secret}: the deploy-time half grants `actions` on the secret's ARN,
- * and the runtime half injects the secret ARN as `SecretId` into every
- * request.
+ * {@link Secret} or {@link SecretReference}: the deploy-time half grants
+ * `actions` on the secret's ARN, and the runtime half injects the secret's id
+ * as `SecretId` into every request.
  */
 export const makeSecretHttpBinding = <
   I extends { SecretId?: string },
@@ -34,8 +34,14 @@ export const makeSecretHttpBinding = <
   Effect.gen(function* () {
     const op = yield* options.operation;
 
-    return Effect.fn(function* (secret: Secret) {
-      const SecretId = yield* secret.secretArn;
+    return Effect.fn(function* (secret: Secret | SecretReference) {
+      // A managed Secret is addressed by its ARN Output; an external
+      // reference by its declared id (its `secretArn` may be an IAM pattern),
+      // which the init code already knows at runtime.
+      const SecretId =
+        "secretId" in secret
+          ? Effect.succeed(secret.secretId)
+          : yield* secret.secretArn;
       if (!globalThis.__ALCHEMY_RUNTIME__) {
         const host = yield* Binding.Host;
         if (isBindingHost(host)) {
