@@ -1,3 +1,5 @@
+import * as Cause from "effect/Cause";
+import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Stdio from "effect/Stdio";
@@ -22,7 +24,7 @@ import type {
  * Protocol: V8-serialized {@link ViteBuildChildConfig} on stdin; the child
  * writes the V8-serialized {@link ViteBuildChildResult} to
  * `config.outputPath` and exits 0. Build logs stream over stdout/stderr;
- * a failed build exits non-zero with the error on stderr.
+ * a failed build exits non-zero with its cause printed once on stderr.
  */
 
 const readConfig = Effect.gen(function* () {
@@ -54,9 +56,23 @@ const program = Effect.gen(function* () {
   yield* fs.writeFile(config.outputPath, NodeV8.serialize(result));
 });
 
-// The parent streams this child's output and turns its exit code into the
-// resource-scoped build error. Do not print a second Effect failure report
-// (the extra `✖` block) from the child itself.
-runMain(program.pipe(Effect.provide(PlatformServices)), {
+// The parent streams this child's output and turns its exit code plus the
+// output tail into the resource-scoped build error, so the failure cause must
+// reach stderr: Vite logs only `✗ Build failed in …` for a failed build, and
+// an error thrown while resolving the config (e.g. a plugin's
+// `configResolved`) is logged by nothing at all. Print the cause exactly
+// once here and keep `runMain`'s reporter off, which would print a second
+// Effect failure report (the extra `✖` block). Interrupts (the parent killing
+// the child) are not failures worth reporting.
+const reportFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.tapCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.void
+        : Console.error(Cause.pretty(cause)),
+    ),
+  );
+
+runMain(reportFailure(program).pipe(Effect.provide(PlatformServices)), {
   disableErrorReporting: true,
 });
