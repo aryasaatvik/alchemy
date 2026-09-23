@@ -141,10 +141,10 @@
       "import": "./dist/core/node/bindings/analytics-engine/AnalyticsEngine.mjs"
     },
     "./core/bindings/Artifacts": {
-      "types": "./dist/core/node/bindings/Artifacts.d.mts",
-      "bun": "./src/core/bindings/Artifacts.ts",
-      "worker": "./src/core/bindings/Artifacts.ts",
-      "import": "./dist/core/node/bindings/Artifacts.mjs"
+      "types": "./dist/core/node/bindings/artifacts/Artifacts.d.mts",
+      "bun": "./src/core/bindings/artifacts/Artifacts.ts",
+      "worker": "./src/core/bindings/artifacts/Artifacts.ts",
+      "import": "./dist/core/node/bindings/artifacts/Artifacts.mjs"
     },
     "./core/bindings/assets/Assets": {
       "types": "./dist/core/node/bindings/assets/Assets.d.mts",

@@ -1,9 +1,12 @@
 import { newWorkersRpcResponse } from "capnweb";
 import { EmailMessage } from "cloudflare:email";
+import { ArtifactsBindingProxy } from "../../bindings/artifacts/ArtifactsRpc.ts";
 import { ConfigError, SystemError } from "../../RuntimeError.shared.ts";
 import { makeErrorResponse } from "../../internal/response.shared.ts";
 
-interface Env extends Record<string, unknown> {}
+interface Env extends Record<string, unknown> {
+  __ALCHEMY_REMOTE_ACCOUNT_ID?: string;
+}
 
 class BindingNotFoundError extends Error {
   readonly bindingName?: string;
@@ -28,6 +31,9 @@ class BindingNotFoundError extends Error {
  *  - SendEmail bindings need to take EmailMessage as their first parameter,
  *    which is not serialisable. As such, we reconstruct it before sending it
  *    on to the binding. See packages/miniflare/src/workers/email/email.worker.ts
+ *  - Artifacts bindings return RPC objects Cap'n Web cannot copy, so they are
+ *    exposed through {@link ArtifactsBindingProxy}, which serializes records
+ *    and repository metadata. See bindings/artifacts/ArtifactsRpc.ts
  *  - Dispatch Namespace bindings have a synchronous .get() method. Since we
  *    can't emulate that over an async boundary, we mock it locally and _actually_
  *    perform the .get() remotely at the first appropriate async point. See
@@ -69,6 +75,15 @@ function getExposedJSRPCBinding(request: Request, env: Env) {
         }
       },
     };
+  }
+
+  const artifactsNamespace = url.searchParams.get("MF-Artifacts-Namespace");
+  if (artifactsNamespace !== null) {
+    return new ArtifactsBindingProxy(
+      targetBinding as Artifacts,
+      env.__ALCHEMY_REMOTE_ACCOUNT_ID,
+      artifactsNamespace,
+    );
   }
 
   if (url.searchParams.has("MF-Dispatch-Namespace-Options")) {
