@@ -7,9 +7,15 @@
  * Function's init must run that Layer for itself — a build reused from the
  * other Function would leave this one without the grant or the env. A
  * Function declared inside another Function's init is the case that would
- * otherwise see the enclosing Function's builds.
+ * otherwise see the enclosing Function's builds; a Worker declared inside
+ * another Worker's init is the same case on Cloudflare.
+ *
+ * At runtime nothing host-scoped happens, so nested hosts share the builds
+ * of the ambient memo map.
  */
 import * as AWS from "@/AWS";
+import type { RuntimeContext } from "@/RuntimeContext.ts";
+import * as Cloudflare from "@/Cloudflare";
 import { isResolved } from "@/Diff.ts";
 import * as Provider from "@/Provider.ts";
 import { inMemoryState } from "@/State/index.ts";
@@ -51,8 +57,37 @@ const queueProvider = Provider.succeed(AWS.SQS.Queue, {
   delete: () => Effect.void,
 });
 
+const workerProvider = Provider.succeed(
+  Cloudflare.Worker as any,
+  {
+    list: () => Effect.succeed([]),
+    diff: Effect.fn(function* ({ news }) {
+      if (!isResolved(news)) return undefined;
+    }),
+    reconcile: Effect.fn(function* () {
+      return yield* Effect.die("plan-only");
+    }),
+    delete: () => Effect.void,
+  } as any,
+);
+
+const namespaceProvider = Provider.succeed(Cloudflare.KV.Namespace, {
+  list: () => Effect.succeed([]),
+  diff: Effect.fn(function* () {}),
+  reconcile: Effect.fn(function* () {
+    return yield* Effect.die("plan-only");
+  }),
+  delete: () => Effect.void,
+} as any);
+
 const { test } = Test.make({
-  providers: Layer.mergeAll(functionProvider, queueProvider, Credentials.mock),
+  providers: Layer.mergeAll(
+    functionProvider,
+    queueProvider,
+    workerProvider,
+    namespaceProvider,
+    Credentials.mock,
+  ),
   state: inMemoryState(),
 });
 
@@ -79,6 +114,34 @@ const init = Effect.gen(function* () {
 });
 
 const main = import.meta.filename;
+
+class Cache extends Context.Service<
+  Cache,
+  {
+    readonly get: (
+      key: string,
+    ) => Effect.Effect<unknown, unknown, RuntimeContext>;
+  }
+>()("Cache") {}
+
+/** One module-level KV Layer, provided to both Workers. */
+const CacheKV = Layer.effect(
+  Cache,
+  Effect.gen(function* () {
+    const namespace = yield* Cloudflare.KV.Namespace("SharedKV");
+    const kv = yield* Cloudflare.KV.ReadWriteNamespace(namespace);
+    return Cache.of({ get: (key) => kv.get(key) });
+  }),
+);
+
+const CacheLive = CacheKV.pipe(
+  Layer.provide(Cloudflare.KV.ReadWriteNamespaceBinding),
+);
+
+const workerInit = Effect.gen(function* () {
+  const cache = yield* Cache;
+  return { fetch: cache.get("key").pipe(Effect.orDie) as any };
+});
 
 const sendStatements = (plan: any, id: string) =>
   (plan.resources[id]?.bindings ?? [])
@@ -200,5 +263,90 @@ describe("a binding Layer shared by two Functions", () => {
         );
         expectGranted(plan, ["ProducerA", "ProducerB"]);
       }),
+  );
+
+  test.provider("a Worker declared inside another Worker's init", (stack) =>
+    Effect.gen(function* () {
+      const plan = yield* stack.plan(
+        Cloudflare.Worker(
+          "OuterWorker",
+          { main },
+          Effect.gen(function* () {
+            const cache = yield* Cache;
+            yield* Cloudflare.Worker(
+              "InnerWorker",
+              { main },
+              workerInit.pipe(Effect.provide(CacheLive)),
+            );
+            return {
+              fetch: cache.get("key").pipe(Effect.orDie) as any,
+            };
+          }).pipe(Effect.provide(CacheLive)),
+        ),
+      );
+      for (const id of ["OuterWorker", "InnerWorker"]) {
+        const kv = (plan.resources[id]?.bindings ?? [])
+          .flatMap((row: any) => row.data?.bindings ?? [])
+          .filter((binding: any) => binding.type === "kv_namespace");
+        expect({ id, kv: kv.map((b: any) => b.name) }).toEqual({
+          id,
+          kv: ["SharedKV"],
+        });
+      }
+    }),
+  );
+});
+
+describe("a Layer shared by nested hosts", () => {
+  const nested = Effect.gen(function* () {
+    let builds = 0;
+    const Counted = Layer.effect(
+      Notifier,
+      Effect.sync(() => {
+        builds++;
+        return Notifier.of({ send: () => Effect.void });
+      }),
+    );
+    const program = AWS.Lambda.Function(
+      "Outer",
+      { main },
+      Effect.gen(function* () {
+        yield* Notifier;
+        yield* AWS.Lambda.Function(
+          "Inner",
+          { main },
+          init.pipe(Effect.provide(Counted)),
+        );
+        return {};
+      }).pipe(Effect.provide(Counted)),
+    );
+    return { program, builds: () => builds };
+  });
+
+  test.provider("builds it once per nested host at plan", (stack) =>
+    Effect.gen(function* () {
+      const { program, builds } = yield* nested;
+      yield* stack.plan(program);
+      expect(builds()).toBe(2);
+    }),
+  );
+
+  test.provider("builds it once for all nested hosts at runtime", (stack) =>
+    Effect.gen(function* () {
+      const { program, builds } = yield* nested;
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = globalThis.__ALCHEMY_RUNTIME__;
+          globalThis.__ALCHEMY_RUNTIME__ = true;
+          return previous;
+        }),
+        () => stack.plan(program),
+        (previous) =>
+          Effect.sync(() => {
+            globalThis.__ALCHEMY_RUNTIME__ = previous;
+          }),
+      );
+      expect(builds()).toBe(1);
+    }),
   );
 });
