@@ -855,6 +855,18 @@ importers:
         specifier: 4.0.0-rc.117
         version: 4.0.0-rc.117
 
+  examples/aws-lambda-shared-binding-layer:
+    dependencies:
+      '@distilled.cloud/aws':
+        specifier: workspace:*
+        version: link:../../submodules/distilled/packages/aws
+      alchemy:
+        specifier: workspace:*
+        version: link:../../packages/alchemy
+      effect:
+        specifier: 4.0.0-rc.117
+        version: 4.0.0-rc.117
+
   examples/aws-rds:
     dependencies:
       '@distilled.cloud/aws':
