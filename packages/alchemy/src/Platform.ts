@@ -682,18 +682,23 @@ export const Platform = <
                     Layer.provideMerge(Layer.succeedContext(outerServices)),
                   ),
                 ),
-                // A host's bindings are built for that host. A binding
-                // Layer records its grant and env on the ambient host when
-                // it builds, so init builds Layers into a memo map of its
-                // own: a module-level Layer provided to several hosts builds
-                // once per host rather than resolving from the stack's map
-                // or an enclosing host's. Stack-level provider Layers are
-                // already built into the context init inherits, so they
-                // stay shared.
-                Effect.provideService(
-                  Layer.CurrentMemoMap,
-                  Layer.makeMemoMapUnsafe(),
-                ),
+                // At plan, a host's bindings are built for that host. A
+                // binding Layer records its grant and env on the ambient
+                // host when it builds, so init builds Layers into a memo map
+                // of its own: a module-level Layer provided to several hosts
+                // builds once per host rather than resolving from the
+                // stack's map or an enclosing host's. Stack-level provider
+                // Layers are already built into the context init inherits,
+                // so they stay shared. At runtime, init shares the ambient
+                // memo map: nothing host-scoped happens there, and a nested
+                // host reuses its parent's builds instead of rebuilding them
+                // during the parent's cold start.
+                globalThis.__ALCHEMY_RUNTIME__
+                  ? (effect) => effect
+                  : Effect.provideService(
+                      Layer.CurrentMemoMap,
+                      Layer.makeMemoMapUnsafe(),
+                    ),
               );
 
               instance.Props = {
