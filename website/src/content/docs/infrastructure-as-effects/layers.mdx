@@ -166,7 +166,7 @@ export default Cloudflare.Worker(
 The Stack ends up with one `MyKV` namespace, bound to both `Api` and
 `Admin`.
 
-A host's bindings are built for that host. Each Worker or Function builds
+A host's bindings are built for that host. At plan, each Worker or Function builds
 the Layers its init provides for itself, so every host that provides
 `JobServiceKV` gets its own binding, including a host declared inside
 another host's init. Provide a binding Layer in the init of each host that
