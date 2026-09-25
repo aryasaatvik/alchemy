@@ -71,6 +71,7 @@ import {
   StateStoreError,
 } from "./State/index.ts";
 import { type ResourceOp, recordResourceOp } from "./Telemetry/Metrics.ts";
+import { stronglyConnectedComponents } from "./Util/scc.ts";
 import { hashInput } from "./Util/sha256.ts";
 
 export type AppliedPlan<P extends Plan> = {
@@ -429,25 +430,40 @@ const executePlan = Effect.fn(function* (
       Object.entries(tracker).map(([fqn, t]) => [fqn, t.output]),
     );
 
-  const waitForDeps = (fqns: string[]) =>
+  // SCC of each resource node over the edges apply actually waits on. Only
+  // peers inside the same SCC may rendezvous on each other's early signal.
+  const componentOf = new Map<string, number>();
+  stronglyConnectedComponents(Object.keys(plan.resources), (fqn) =>
+    resourceUpstreamFqns(plan.resources[fqn]).filter(
+      (upstream) => upstream in plan.resources,
+    ),
+  ).forEach((component, index) => {
+    for (const fqn of component) componentOf.set(fqn, index);
+  });
+
+  const waitForDeps = (downstream: string, fqns: string[]) =>
     Effect.all(
       fqns
         .filter((fqn) => fqn in ready)
         .map((fqn) =>
-          // Non-cycle upstreams must be observed at their TERMINAL output
-          // (`readyStable`), not their early precreate signal (`ready`). This
-          // is what makes a failed upstream actually interrupt its downstream:
-          // a resource with `precreate` resolves `ready` before its real
-          // `reconcile` runs, so a downstream waiting on `ready` would proceed
-          // (and even finish) even though the upstream's reconcile later
-          // failed. Waiting on `readyStable` means the downstream's
-          // `waitForDeps` short-circuits with the upstream's failure cause.
+          // Upstreams must be observed at their TERMINAL output
+          // (`readyStable`), not their early signal (`ready`). This is what
+          // makes a failed upstream actually interrupt its downstream: a
+          // resource with `precreate` resolves `ready` before its real
+          // `reconcile` runs, and an updating cycle member resolves it with
+          // its prior attr, so a downstream waiting on `ready` would proceed
+          // (and even finish) against stale outputs or before the upstream's
+          // reconcile failed.
           //
-          // Cycle members are the exception: peers in an SCC depend on each
-          // other, so they must rendezvous on the early `ready`/precreate
-          // signal to break the deadlock. Phase 3 (`converge`) re-runs them
-          // against final outputs once the cycle settles.
-          plan.cycleMembers.has(fqn)
+          // Peers in the same SCC are the exception: they depend on each
+          // other, so they must rendezvous on the early `ready` signal to
+          // break the deadlock. Phase 3 (`converge`) re-runs them against
+          // final outputs once the cycle settles. A downstream outside the
+          // SCC (e.g. a Lambda Version of a self-binding Function) is not
+          // part of that rendezvous and waits for the terminal output.
+          plan.cycleMembers.has(fqn) &&
+          componentOf.get(fqn) !== undefined &&
+          componentOf.get(fqn) === componentOf.get(downstream)
             ? Deferred.await(ready[fqn])
             : Deferred.await(readyStable[fqn]),
         ),
@@ -534,7 +550,7 @@ const executePlan = Effect.fn(function* (
             stackName,
             stage,
             getOutputs,
-            waitForDeps,
+            (fqns) => waitForDeps(fqn, fqns),
             failures,
             plan.cycleMembers.has(fqn),
             (fqns) => fqns.every(isSettled),

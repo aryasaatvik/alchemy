@@ -1215,6 +1215,54 @@ describe("linear update propagation", { tags: ["unit", "local"] }, () => {
       }),
   );
 
+  // A resource that binds to itself sits in a size-1 SCC, so its update
+  // publishes the prior attr early for its own rendezvous. A dependent
+  // outside that SCC (e.g. a Lambda Version of a self-binding Function) must
+  // still wait for the upstream's reconcile: observing the early prior attr
+  // lets it act on the upstream before the update lands.
+  test.provider(
+    "downstream of a self-binding upstream waits for the upstream's update",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = (revision: string) =>
+          Effect.gen(function* () {
+            const A = yield* BindingTarget("A", { string: revision });
+            yield* A.bind("Self", { env: { SELF: A.name } });
+            const B = yield* TestResource("B", { string: A.string });
+            return { A, B };
+          });
+
+        yield* stack.deploy(program("v1"));
+
+        const events: string[] = [];
+        const recordHooks = {
+          create: () => Effect.succeed(undefined),
+          update: (id: string, props: TestResourceProps) =>
+            Effect.gen(function* () {
+              events.push(`${id}:start:${props.string}`);
+              // Give a racing dependent time to run before A finishes.
+              if (id === "A") yield* Effect.sleep("50 millis");
+              events.push(`${id}:end:${props.string}`);
+            }),
+          delete: () => Effect.succeed(undefined),
+          read: () => Effect.succeed(undefined),
+        };
+
+        const output = yield* program("v2").pipe(
+          stack.deploy,
+          hook(recordHooks),
+        );
+
+        expect(output.B.string).toEqual("v2");
+        expect(events).toEqual([
+          "A:start:v2",
+          "A:end:v2",
+          "B:start:v2",
+          "B:end:v2",
+        ]);
+      }),
+  );
+
   // Regression: a dependent that repins from upstream A to upstream B updates
   // *itself*, while A and B are both noops. The noop pass must still persist
   // their new `downstream` — delete ordering reads it from the persisted row,
