@@ -18,6 +18,7 @@ interface ConfigHost extends Resource<
 > {}
 
 const boundKeys: string[] = [];
+const reconciledEnv: Array<Record<string, unknown> | undefined> = [];
 
 const ConfigHost: any = Platform<ConfigHost>("Test.ConfigHost", {
   createRuntimeContext: (id) => ({
@@ -38,7 +39,8 @@ const providers = Provider.succeed(ConfigHost, {
   diff: Effect.fn(function* () {
     return undefined;
   }),
-  reconcile: Effect.fn(function* () {
+  reconcile: Effect.fn(function* ({ news }) {
+    reconciledEnv.push(news.env);
     return { ready: true as const };
   }),
   delete: Effect.fn(function* () {}),
@@ -126,6 +128,41 @@ test.provider(
       Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromUnknown({ ALCHEMY_PHASE: "runtime" }),
+        ),
+      ),
+    ),
+);
+
+test.provider(
+  "a key the host's env declares keeps its declared value instead of the captured read",
+  (stack) =>
+    Effect.gen(function* () {
+      boundKeys.length = 0;
+      reconciledEnv.length = 0;
+
+      yield* stack.deploy(
+        ConfigHost(
+          "DeclaredEnvHost",
+          { env: { ALCHEMY_TEST_DECLARED_CONFIG: "declared" } },
+          Effect.gen(function* () {
+            yield* Config.String("ALCHEMY_TEST_DECLARED_CONFIG");
+            yield* Config.String("ALCHEMY_TEST_PRESENT_CONFIG");
+            return {};
+          }),
+        ),
+      );
+
+      expect(boundKeys).toEqual(["ALCHEMY_TEST_PRESENT_CONFIG"]);
+      expect(reconciledEnv).toEqual([
+        { ALCHEMY_TEST_DECLARED_CONFIG: "declared" },
+      ]);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromUnknown({
+            ALCHEMY_TEST_DECLARED_CONFIG: "deploy-machine",
+            ALCHEMY_TEST_PRESENT_CONFIG: "present",
+          }),
         ),
       ),
     ),

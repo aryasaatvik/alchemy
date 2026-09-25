@@ -50,6 +50,18 @@ const isBindableRuntimeConfigNode = (
 ): boolean => path.length > 0 && value !== undefined;
 
 /**
+ * A key the host's props already set in `env` is bound by that declaration.
+ * Capturing an init-time read of it as well would replace the declared value
+ * with a Redacted copy of the deploy machine's value, and a Redacted value
+ * reaches the platform marker-packed, which anything reading the variable
+ * without `unpackEnvValue` (a sidecar, an extension) sees verbatim.
+ */
+const declaresEnvKey = (props: unknown, key: string): boolean => {
+  const env = (props as { env?: Record<string, unknown> } | undefined)?.env;
+  return env !== undefined && env[key] !== undefined;
+};
+
+/**
  * Provide the platform class's layer (`cls.make(props, impl)`) with a
  * lifetime that matches the phase.
  *
@@ -594,7 +606,8 @@ export const Platform = <
                           if (
                             phase === "plan" &&
                             node &&
-                            isBindableRuntimeConfigNode(path, node.value)
+                            isBindableRuntimeConfigNode(path, node.value) &&
+                            !declaresEnvKey(props, key)
                           ) {
                             // bind it to the RuntimeContext if running in plan phase
                             const output = Output.literal(
