@@ -288,6 +288,15 @@ export interface FunctionCommonProps extends PlatformProps {
    */
   reservedConcurrentExecutions?: number;
   /**
+   * Fail before any Lambda mutation when the resolved environment exceeds
+   * this many bytes, measured the way AWS measures its aggregate limit. Set
+   * it below that limit to keep headroom for variables whose values grow
+   * between deploys; a value above it is rejected.
+   *
+   * @default 4096 (AWS's aggregate limit)
+   */
+  maxEnvironmentBytes?: number;
+  /**
    * AWS X-Ray tracing mode for the function.
    *
    * `"Active"` samples and records incoming requests as X-Ray traces and
@@ -570,14 +579,27 @@ export const lambdaEnvironmentSize = (
 
 /**
  * Fail before an AWS mutation when the final Lambda environment exceeds
- * {@link LambdaEnvironmentMaxBytes}, naming the largest entries by key.
+ * `limitBytes` (at most {@link LambdaEnvironmentMaxBytes}), naming the
+ * largest entries by key.
  */
 export const validateLambdaEnvironment = (
   environment: Record<string, unknown> | undefined,
+  limitBytes: number = LambdaEnvironmentMaxBytes,
 ): Effect.Effect<void, LambdaEnvironmentTooLarge> => {
+  if (
+    !Number.isInteger(limitBytes) ||
+    limitBytes <= 0 ||
+    limitBytes > LambdaEnvironmentMaxBytes
+  ) {
+    return Effect.die(
+      new RangeError(
+        `maxEnvironmentBytes must be a positive integer no greater than AWS's ${LambdaEnvironmentMaxBytes}-byte limit; received ${limitBytes}.`,
+      ),
+    );
+  }
   const serialized = serializeLambdaEnvironment(environment);
   const sizeBytes = encodedSize(serialized);
-  if (sizeBytes <= LambdaEnvironmentMaxBytes) return Effect.void;
+  if (sizeBytes <= limitBytes) return Effect.void;
 
   const entries = Object.entries(serialized);
   const largestEntries = entries
@@ -591,12 +613,14 @@ export const validateLambdaEnvironment = (
   return Effect.fail(
     new LambdaEnvironmentTooLarge({
       sizeBytes,
-      limitBytes: LambdaEnvironmentMaxBytes,
+      limitBytes,
       entryCount: entries.length,
       largestEntries,
       message:
         `Lambda environment has ${entries.length} entries totaling ${sizeBytes} bytes; ` +
-        `AWS limits the aggregate to ${LambdaEnvironmentMaxBytes} bytes. ` +
+        (limitBytes === LambdaEnvironmentMaxBytes
+          ? `AWS limits the aggregate to ${LambdaEnvironmentMaxBytes} bytes. `
+          : `the function's budget is ${limitBytes} bytes of AWS's ${LambdaEnvironmentMaxBytes}. `) +
         `Largest entries: ${largestEntries.map(({ key, bytes }) => `${key} (${bytes} bytes)`).join(", ")}.`,
     }),
   );
@@ -2001,7 +2025,10 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           ...runtimeEnv,
           ...(yield* resolveFunctionRuntimeEnv),
         };
-        yield* validateLambdaEnvironment(environmentVariables);
+        yield* validateLambdaEnvironment(
+          environmentVariables,
+          news.maxEnvironmentBytes,
+        );
 
         const createFunctionRequest: CreateFunctionRequest = {
           FunctionName: functionName,

@@ -53,6 +53,36 @@ it.effect("rejects an oversized environment without exposing values", () =>
   }),
 );
 
+it.effect(
+  "rejects an environment over a function's budget below the limit",
+  () =>
+    Effect.gen(function* () {
+      const environment = { SMALL: "x", LARGE: "y".repeat(3_000) };
+      yield* validateLambdaEnvironment(environment);
+      const result = yield* Effect.result(
+        validateLambdaEnvironment(environment, 2_048),
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure.limitBytes).toBe(2_048);
+        expect(result.failure.largestEntries.map(({ key }) => key)).toEqual([
+          "LARGE",
+          "SMALL",
+        ]);
+        expect(result.failure.message).toContain("budget is 2048 bytes");
+      }
+    }),
+);
+
+it.effect("refuses a budget above AWS's limit", () =>
+  Effect.gen(function* () {
+    const exit = yield* Effect.exit(
+      validateLambdaEnvironment({}, LambdaEnvironmentMaxBytes + 1),
+    );
+    expect(exit._tag).toBe("Failure");
+  }),
+);
+
 const provideDeployIdentity = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.provideService(
