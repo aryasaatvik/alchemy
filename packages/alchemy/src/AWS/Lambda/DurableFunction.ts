@@ -479,12 +479,13 @@ const makeDurableListRequest = (
   const name = options?.name;
   const qualifier = options?.qualifier;
 
-  // Lambda scopes a DurableExecutionName to the function, not one version.
-  // It rejects the exact-name filter when Qualifier is supplied separately.
-  // Preserve the requested version/alias by embedding it in FunctionName.
-  if (name !== undefined && qualifier !== undefined) {
+  // Lambda scopes a DurableExecutionName to the function, not one version, and
+  // rejects the exact-name filter whenever the request is qualified — as a
+  // separate Qualifier or as a `name:qualifier` FunctionName alike. The name
+  // already identifies at most one execution, so the lookup drops the qualifier.
+  if (name !== undefined) {
     return {
-      FunctionName: `${functionName}:${qualifier}`,
+      FunctionName: functionName,
       DurableExecutionName: name,
       Statuses: options?.statuses,
     };

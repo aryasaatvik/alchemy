@@ -185,6 +185,24 @@ test.provider(
               const executionName = url.searchParams.get(
                 "DurableExecutionName",
               );
+              // Lambda refuses the exact-name filter on any qualified request,
+              // whether the qualifier is a parameter or part of FunctionName.
+              if (
+                executionName !== null &&
+                (url.searchParams.has("Qualifier") ||
+                  /\/functions\/[^/]+:[^/]+\/durable-executions/.test(
+                    decodeURIComponent(url.pathname),
+                  ))
+              ) {
+                return Response.json(
+                  {
+                    __type: "InvalidParameterValueException",
+                    message:
+                      "Cannot filter by DurableExecutionName when both FunctionName and Qualifier are provided",
+                  },
+                  { status: 400 },
+                );
+              }
               const lookup =
                 (exactNameLookups.get(executionName ?? "") ?? 0) + 1;
               exactNameLookups.set(executionName ?? "", lookup);
@@ -308,7 +326,7 @@ test.provider(
         request.pathname.includes("/durable-executions"),
       )) {
         expect(decodeURIComponent(request.pathname)).toContain(
-          "/functions/NestedDurable-deployed:live/durable-executions",
+          "/functions/NestedDurable-deployed/durable-executions",
         );
         expect(request.searchParams.has("Qualifier")).toBe(false);
       }
