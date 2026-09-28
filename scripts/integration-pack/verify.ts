@@ -520,6 +520,12 @@ export const verifyFreshConsumer = async (
             effect: dependencies.effect,
             "@effect/platform-node": dependencies.effect,
           },
+          // `@effect/platform-node` ranges its shared package, so a newer
+          // Effect family release would otherwise land beside the pinned
+          // `effect` and fail to resolve modules that version adds.
+          overrides: {
+            "@effect/platform-node-shared": dependencies.effect,
+          },
         },
         null,
         2,
