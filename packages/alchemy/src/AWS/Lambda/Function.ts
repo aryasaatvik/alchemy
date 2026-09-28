@@ -64,6 +64,14 @@ import {
   makeFunctionImage,
 } from "./FunctionImage.ts";
 import { makeFunctionHttpHandler } from "./HttpServer.ts";
+import {
+  DefaultRuntimeManagementConfig,
+  isSameRuntimeManagementConfig,
+  managesRuntime,
+  observeRuntimeManagementConfig,
+  syncRuntimeManagementConfig,
+  type RuntimeManagementConfig,
+} from "./RuntimeManagementConfig.ts";
 
 export type { FunctionImageSource } from "./FunctionImage.ts";
 
@@ -343,6 +351,14 @@ export interface FunctionZipProps extends FunctionCommonProps {
   // TODO(sam): use a Layer instead so we can manage Effect platform?
   runtime?: "nodejs22.x" | "nodejs24.x";
   /**
+   * When Lambda moves the function onto a new version of its managed
+   * runtime. `{ updateRuntimeOn: "Manual", runtimeVersionArn }` pins an exact
+   * runtime version. Omit to leave the function on AWS's default (`"Auto"`)
+   * without any runtime-management API calls; removing it from a function
+   * that set it returns the function to `"Auto"`.
+   */
+  runtimeManagementConfig?: RuntimeManagementConfig;
+  /**
    * Lambda layers to attach — pass an `AWS.Lambda.LayerVersion` resource
    * directly, or a raw layer version ARN (e.g. an AWS-managed layer). Layers
    * are extracted into `/opt` in the order given. Omit or pass `[]` to detach
@@ -386,6 +402,8 @@ export interface FunctionImageProps extends FunctionCommonProps {
   image: FunctionImageSource;
   handler?: never;
   runtime?: never;
+  // An image carries its own runtime; Lambda manages none for it.
+  runtimeManagementConfig?: never;
   layers?: never;
   build?: never;
   uploadSourceMap?: never;
@@ -640,6 +658,11 @@ export interface Function extends Resource<
       image?: Omit<FunctionImageAttributes, "hash">;
     };
     reservedConcurrentExecutions?: number;
+    /**
+     * The observed runtime management config, recorded only for a function
+     * whose props set `runtimeManagementConfig`.
+     */
+    runtimeManagementConfig?: RuntimeManagementConfig;
   },
   {
     env?: Record<string, any>;
@@ -973,6 +996,20 @@ export const normalizeFunctionUrl = (
  *         Destination: queue.queueArn,
  *       },
  *     },
+ *   },
+ * });
+ * ```
+ *
+ * **Example:** Pin the managed runtime version
+ * A function whose artifact depends on an exact Node build stays on one
+ * runtime version until the ARN changes.
+ * ```typescript
+ * const func = yield* AWS.Lambda.Function("ApiFunction", {
+ *   main: "./src/handler.ts",
+ *   runtimeManagementConfig: {
+ *     updateRuntimeOn: "Manual",
+ *     runtimeVersionArn:
+ *       "arn:aws:lambda:us-east-1::runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
  *   },
  * });
  * ```
@@ -2480,14 +2517,36 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           ) {
             return { action: "update" };
           }
+          if (
+            !isFunctionImageProps(olds) &&
+            !isFunctionImageProps(news) &&
+            managesRuntime(
+              news.runtimeManagementConfig,
+              olds.runtimeManagementConfig,
+            )
+          ) {
+            // Compared against the live config, so a runtime moved
+            // out-of-band (or a pin applied by hand) is repaired.
+            const desired =
+              news.runtimeManagementConfig ?? DefaultRuntimeManagementConfig;
+            const observed = yield* observeRuntimeManagementConfig(
+              output.functionName,
+            );
+            if (!isSameRuntimeManagementConfig(observed, desired)) {
+              return { action: "update" };
+            }
+          }
           // `layers` accepts a LayerVersion resource or a raw ARN, and the
           // two forms are structurally different props even when they name
           // the same layer. Compare them normalized so switching between the
           // forms isn't a phantom change; everything else still falls through
-          // to the engine's default props comparison.
+          // to the engine's default props comparison. `runtimeManagementConfig`
+          // is excluded: it was compared against the live config above, where
+          // an omitted config and an explicit `"Auto"` are the same.
           const normalizeLayers = (props: FunctionProps) => ({
             ...props,
             layers: (props.layers ?? []).map(layerVersionArnOf),
+            runtimeManagementConfig: undefined,
           });
           if (!havePropsChanged(normalizeLayers(olds), normalizeLayers(news))) {
             return { action: "noop" };
@@ -2531,6 +2590,13 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           );
           const reservedConcurrentExecutions =
             yield* getReservedConcurrentExecutions(fn.FunctionName);
+          const runtimeManagementConfig =
+            output?.runtimeManagementConfig !== undefined ||
+            (olds !== undefined &&
+              !isFunctionImageProps(olds) &&
+              olds.runtimeManagementConfig !== undefined)
+              ? yield* observeRuntimeManagementConfig(fn.FunctionName)
+              : undefined;
           // Reuse the persisted output where we have it (e.g. code hash) so
           // diff doesn't see drift it can't reconstruct from the API.
           const attrs = {
@@ -2546,6 +2612,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
               observed: result?.Code,
             }),
             reservedConcurrentExecutions,
+            runtimeManagementConfig,
           } satisfies Function["Attributes"];
           return (yield* hasAlchemyTags(id, tagsResult))
             ? attrs
@@ -2848,6 +2915,29 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             config: news.eventInvokeConfig,
           });
 
+          // Applied after the code and configuration update settles: Lambda
+          // rejects the put while the function is mid-update.
+          const runtimeManagementConfig =
+            !isFunctionImageProps(news) &&
+            managesRuntime(
+              news.runtimeManagementConfig,
+              olds !== undefined && !isFunctionImageProps(olds)
+                ? olds.runtimeManagementConfig
+                : output?.runtimeManagementConfig,
+            )
+              ? yield* syncRuntimeManagementConfig({
+                  functionName,
+                  desired: news.runtimeManagementConfig,
+                })
+              : undefined;
+          if (runtimeManagementConfig !== undefined) {
+            yield* waitForFunctionUpdate(
+              functionName,
+              session,
+              vpc !== undefined,
+            );
+          }
+
           const functionUrl = yield* createOrUpdateFunctionUrl({
             functionName,
             url: news.functionUrl,
@@ -2866,6 +2956,10 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             roleArn,
             code: prepared.attributes,
             reservedConcurrentExecutions,
+            runtimeManagementConfig:
+              news.runtimeManagementConfig === undefined
+                ? undefined
+                : runtimeManagementConfig,
           };
         }),
         delete: Effect.fn(function* ({ output }) {
