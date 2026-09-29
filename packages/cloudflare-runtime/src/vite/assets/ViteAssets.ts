@@ -7,7 +7,9 @@ import * as Loopback from "../../core/globals/Loopback.ts";
 import { PluginContext } from "../../core/PluginContext.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import mime from "mime";
 import * as NodeFs from "node:fs/promises";
+import * as NodePath from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type * as vite from "vite";
 const AssetsWorker = {
@@ -136,9 +138,34 @@ export const ViteAssetsLive = (viteDevServer: vite.ViteDevServer) =>
   );
 
 /**
- * Returns the resolved on-disk path for an HTML pathname (or `null`).
- * Files under Vite's `publicDir` are prefixed with `PUBLIC_DIR_PREFIX` so
- * the companion handler knows to skip `transformIndexHtml`.
+ * Resolves a request pathname to a file inside `dir`, or `null` when the
+ * decoded path escapes `dir` or is not a regular file.
+ */
+const resolveFileInDir = async (dir: string, pathname: string) => {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const base = NodePath.resolve(dir);
+  const resolved = NodePath.resolve(base, `.${decoded}`);
+  if (!resolved.startsWith(withTrailingSlash(base))) {
+    return null;
+  }
+  try {
+    return (await NodeFs.stat(resolved)).isFile() ? resolved : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Returns the resolved on-disk path for a pathname (or `null`). HTML is
+ * looked up under the root and `publicDir`; every other file is served only
+ * from `publicDir`. Files under `publicDir` are prefixed with
+ * `PUBLIC_DIR_PREFIX` so the companion handler serves them verbatim, without
+ * running `transformIndexHtml`.
  */
 const viteHtmlExistsHandler =
   (viteDevServer: vite.ViteDevServer) =>
@@ -149,11 +176,15 @@ const viteHtmlExistsHandler =
       res.end(JSON.stringify(body));
     };
 
-    if (!pathname.endsWith(".html")) {
-      return json(null);
-    }
-
     const { root, publicDir } = viteDevServer.config;
+
+    if (!pathname.endsWith(".html")) {
+      // `publicDir` is an empty string when Vite's public directory is disabled.
+      const publicFile = publicDir
+        ? await resolveFileInDir(publicDir, pathname)
+        : null;
+      return json(publicFile ? `${PUBLIC_DIR_PREFIX}${pathname}` : null);
+    }
     const publicDirInRoot = publicDir.startsWith(withTrailingSlash(root));
     const publicPath = withTrailingSlash(publicDir.slice(root.length));
 
@@ -183,26 +214,44 @@ const viteHtmlExistsHandler =
   };
 
 /**
- * Returns the HTML body for a path previously resolved by
+ * Returns the body for a path previously resolved by
  * {@link viteHtmlExistsHandler}. Non-public HTML is run through
  * `viteDevServer.transformIndexHtml` so that HMR and plugin transforms
- * apply.
+ * apply; `publicDir` files are returned as raw bytes with their own
+ * content type.
  */
 const viteFetchHtmlHandler =
   (viteDevServer: vite.ViteDevServer) =>
   async (req: IncomingMessage, res: ServerResponse) => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    // The asset worker passes the eTag as a URL path, which adds a leading `/`.
+    const pathname = new URL(
+      req.url ?? "/",
+      "http://localhost",
+    ).pathname.replace(/^\//, "");
     const { root, publicDir } = viteDevServer.config;
     const isInPublicDir = pathname.startsWith(PUBLIC_DIR_PREFIX);
-    const resolved = isInPublicDir
-      ? `${publicDir}${pathname.slice(PUBLIC_DIR_PREFIX.length)}`
-      : `${root}${pathname}`;
 
     try {
-      let html = await NodeFs.readFile(resolved, "utf-8");
-      if (!isInPublicDir) {
-        html = await viteDevServer.transformIndexHtml(resolved, html);
+      if (isInPublicDir) {
+        const resolved = await resolveFileInDir(
+          publicDir,
+          pathname.slice(PUBLIC_DIR_PREFIX.length),
+        );
+        if (!resolved) {
+          throw new Error("Not a file in publicDir");
+        }
+        const body = await NodeFs.readFile(resolved);
+        res.writeHead(200, {
+          "content-type": mime.getType(resolved) ?? "application/octet-stream",
+        });
+        res.end(body);
+        return;
       }
+      const resolved = `${root}/${pathname}`;
+      const html = await viteDevServer.transformIndexHtml(
+        resolved,
+        await NodeFs.readFile(resolved, "utf-8"),
+      );
       res.writeHead(200, { "content-type": "text/html" });
       res.end(html);
     } catch {
