@@ -1,3 +1,4 @@
+import type { CloudflareVitePluginOptions } from "@alchemy.run/cloudflare-runtime/vite";
 import type * as cf from "@cloudflare/workers-types";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import type { ConfigError } from "effect/Config";
@@ -1034,6 +1035,12 @@ export interface WorkerSourceDescriptor {
 }
 
 export interface ViteOptions {
+  /**
+   * Separate build-only Worker for prerender previews. Its modules are excluded
+   * from deployment. It shares this Worker's compatibility settings and is
+   * selected by preview while `TSS_PRERENDERING` is `"true"`.
+   */
+  prerenderWorker?: CloudflareVitePluginOptions["prerenderWorker"];
   /**
    * Overrides the module that becomes the deployed Worker entry, forwarded
    * to the Cloudflare Vite plugin's `main` option. File paths resolve from

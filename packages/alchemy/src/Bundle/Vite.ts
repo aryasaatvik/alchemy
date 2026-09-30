@@ -57,8 +57,10 @@ interface EnvironmentLike {
  */
 export const viteBuildOutputPlugin = Effect.fn(function* ({
   entryEnvironment = "ssr",
+  excludeEnvironments = [],
 }: {
   entryEnvironment?: string;
+  excludeEnvironments?: ReadonlyArray<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -136,6 +138,8 @@ export const viteBuildOutputPlugin = Effect.fn(function* ({
         base = this.environment.config.base;
         return;
       }
+      // Capture code exists only in the build-time Worker, never in deployment.
+      if (excludeEnvironments.includes(this.environment.name)) return;
       const files = Object.values(bundle);
       if (this.environment.name === entryEnvironment) {
         const entryChunk = files.find(

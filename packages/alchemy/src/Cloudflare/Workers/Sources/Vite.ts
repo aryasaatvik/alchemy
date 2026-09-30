@@ -1,5 +1,6 @@
 import cloudflare, {
   type CloudflareVitePluginOptions,
+  PRERENDER_ENVIRONMENT,
 } from "@alchemy.run/cloudflare-runtime/vite";
 import * as ConsoleService from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -189,6 +190,7 @@ export const viteBuild = (
           Object.entries(env).filter(([key]) => key.startsWith("VITE_")),
         ),
         main: pluginOptions.main,
+        prerenderWorker: pluginOptions.prerenderWorker,
         compatibilityDate: pluginOptions.compatibilityDate,
         compatibilityFlags: pluginOptions.compatibilityFlags,
         viteEnvironments: pluginOptions.viteEnvironments,
@@ -217,6 +219,9 @@ export const viteBuildInProcess = (
   Effect.gen(function* () {
     const outputPlugin = yield* viteBuildOutputPlugin({
       entryEnvironment: pluginOptions.viteEnvironments?.entry ?? "ssr",
+      excludeEnvironments: pluginOptions.prerenderWorker
+        ? [PRERENDER_ENVIRONMENT]
+        : [],
     });
     const console = yield* ConsoleService.Console;
     // Nested Vite servers started from the app's config file during this
@@ -424,6 +429,7 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
         env,
         {
           main: vite.main,
+          prerenderWorker: vite.prerenderWorker,
           compatibilityDate: ctx.compatibility.date,
           compatibilityFlags: ctx.compatibility.flags,
           viteEnvironments: vite.viteEnvironments,

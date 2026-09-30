@@ -109,6 +109,24 @@ export interface ViteProps<Bindings extends WorkerBindingProps = {}>
  * });
  * ```
  *
+ * ### Build-only Prerender Worker
+ * Framework prerender previews can use a separate Worker entry that has
+ * capture handlers and access to the built client assets. It shares the
+ * deployed Worker's compatibility settings; its modules are never deployed.
+ * The framework sets `TSS_PRERENDERING` in the build process before preview.
+ *
+ * **Example:** Separate prerender entry
+ * ```typescript
+ * const app = yield* Cloudflare.Website.Vite("App", {
+ *   main: "src/server.ts",
+ *   prerenderWorker: {
+ *     main: "src/prerender.ts",
+ *     env: { TSS_PRERENDERING: "true" },
+ *     assets: { runWorkerFirst: true },
+ *   },
+ * });
+ * ```
+ *
  * ### Single-Page Applications
  * For SPAs (React, Vue, etc.), configure asset handling so unmatched
  * routes fall back to `index.html` and the client router takes over.
@@ -274,6 +292,7 @@ export const Vite: {
             main: undefined!,
             vite: {
               main: props?.main,
+              prerenderWorker: props?.prerenderWorker,
               rootDir: props?.rootDir,
               memo: props?.memo,
               viteEnvironments: props?.viteEnvironments,

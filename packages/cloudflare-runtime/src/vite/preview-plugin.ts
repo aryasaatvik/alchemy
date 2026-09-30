@@ -8,6 +8,7 @@ import { URL as NodeURL } from "node:url";
 import type * as vite from "vite";
 import { proxyRequestHeaders } from "./forwarded-host.ts";
 import type { CloudflareVitePluginOptions } from "./plugin.ts";
+import { PRERENDER_ENVIRONMENT } from "./prerender.ts";
 import { handleWebSocket } from "./websockets.ts";
 
 /**
@@ -54,7 +55,14 @@ export function preview(options: CloudflareVitePluginOptions): vite.Plugin {
           `Expected exactly one entry in the input, got ${inputNames.length} entries: ${JSON.stringify(input)}`,
         );
       }
-      const [entryEnvironmentName] = parseViteEnvironments(options);
+      const prerenderWorker =
+        process.env.TSS_PRERENDERING === "true"
+          ? options.prerenderWorker
+          : undefined;
+      const [deployedEnvironment] = parseViteEnvironments(options);
+      const entryEnvironmentName = prerenderWorker
+        ? PRERENDER_ENVIRONMENT
+        : deployedEnvironment;
       const entryEnvironment = config.environments[entryEnvironmentName!];
       if (!entryEnvironment) {
         throw new Error(
@@ -65,21 +73,33 @@ export function preview(options: CloudflareVitePluginOptions): vite.Plugin {
         config.root,
         entryEnvironment.build.outDir,
       );
-      const entryModule = findEntryModule(directory, inputNames[0]!);
+      const entryModule = findEntryModule(
+        directory,
+        prerenderWorker
+          ? NodePath.parse(prerenderWorker.main).name
+          : inputNames[0]!,
+      );
       const clientEnvironment = config.environments["client"];
       const assetsDirectory = clientEnvironment
         ? NodePath.resolve(config.root, clientEnvironment.build.outDir)
         : undefined;
 
       const { startPreviewServer } = await import("./preview-server.ts");
-      const handle = await startPreviewServer(options, {
-        directory,
-        entryModule,
-        assetsDirectory:
-          assetsDirectory !== undefined && NodeFs.existsSync(assetsDirectory)
-            ? assetsDirectory
-            : undefined,
-      });
+      const handle = await startPreviewServer(
+        {
+          ...options,
+          worker: prerenderWorker ? undefined : options.worker,
+          prerenderWorker,
+        },
+        {
+          directory,
+          entryModule,
+          assetsDirectory:
+            assetsDirectory !== undefined && NodeFs.existsSync(assetsDirectory)
+              ? assetsDirectory
+              : undefined,
+        },
+      );
       const address = handle.address;
       const removeUpgradeListener = server.httpServer
         ? handleWebSocket(server.httpServer, address, handle.proxySharedSecret)
