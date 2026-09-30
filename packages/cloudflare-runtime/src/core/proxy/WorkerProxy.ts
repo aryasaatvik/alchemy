@@ -266,9 +266,12 @@ const makeRelay = (pendingTimeout: Duration.Duration): Relay => {
       socket.pipe(upstream);
       socket.resume();
       upstream.pipe(socket);
-      // The upstream going away ends the client; the finalizers do the rest.
+      // Orderly EOF must drain the pipe's queued writes before the client closes.
+      // A premature upstream close cannot complete that response.
       upstream.on("error", () => socket.destroy());
-      upstream.on("close", () => socket.destroy());
+      upstream.on("close", () => {
+        if (!upstream.readableEnded) socket.destroy();
+      });
     }
     // From here the socket does the talking; the client closing ends the
     // fiber (see `accept`), and the finalizers destroy both ends.
