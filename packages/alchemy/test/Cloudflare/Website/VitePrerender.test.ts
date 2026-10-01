@@ -1,4 +1,5 @@
 import { viteBuild } from "@/Cloudflare/Workers/Sources/Vite.ts";
+import { resolveWorkerVitePluginOptions } from "@/Cloudflare/Workers/WorkerViteOptions.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, layer } from "alchemy-test";
 import * as Effect from "effect/Effect";
@@ -6,6 +7,29 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 layer(NodeServices.layer)("Website.Vite prerender Worker", (it) => {
+  it.effect("preserves ordinary build options without a prerender Worker", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const rootDir = path.resolve("ordinary-vite-app");
+      const options = resolveWorkerVitePluginOptions(path, {
+        compatibility: { date: "2026-09-20", flags: ["nodejs_compat"] },
+        vite: {
+          rootDir,
+          main: "./server.mjs",
+          viteEnvironments: { entry: "rsc", children: ["ssr"] },
+        },
+      });
+      expect(options.main).toBe(path.join(rootDir, "server.mjs"));
+      expect(options.compatibilityDate).toBe("2026-09-20");
+      expect(options.compatibilityFlags).toContain("nodejs_compat");
+      expect(options.viteEnvironments).toEqual({
+        entry: "rsc",
+        children: ["ssr"],
+      });
+      expect(options.prerenderWorker).toBeUndefined();
+    }),
+  );
+
   it.effect(
     "builds and previews with ASSETS without deploying capture modules",
     () =>
@@ -28,16 +52,21 @@ layer(NodeServices.layer)("Website.Vite prerender Worker", (it) => {
           const result = yield* viteBuild(
             rootDir,
             {},
-            {
-              main: "server.mjs",
-              compatibilityDate: "2026-09-20",
-              compatibilityFlags: ["nodejs_compat"],
-              prerenderWorker: {
-                main: "capture.mjs",
-                env: { TSS_PRERENDERING: "true" },
-                assets: { runWorkerFirst: true },
+            resolveWorkerVitePluginOptions(path, {
+              compatibility: {
+                date: "2026-09-20",
+                flags: ["nodejs_compat"],
               },
-            },
+              vite: {
+                rootDir,
+                main: "server.mjs",
+                prerenderWorker: {
+                  main: "capture.mjs",
+                  env: { TSS_PRERENDERING: "true" },
+                  assets: { runWorkerFirst: true },
+                },
+              },
+            }),
             "Website.Vite.Prerender",
           );
           expect(
