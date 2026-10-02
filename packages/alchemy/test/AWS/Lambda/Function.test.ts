@@ -369,6 +369,61 @@ test.provider(
   { tags: ["provider:aws", "provider:aws:lambda", "live"], timeout: 360_000 },
 );
 
+test.provider(
+  "pins, keeps, and releases the managed runtime version",
+  (stack) =>
+    Effect.gen(function* () {
+      yield* stack.destroy();
+
+      const deploy = (
+        runtimeManagementConfig?: AWS.Lambda.RuntimeManagementConfig,
+      ) =>
+        stack.deploy(
+          AWS.Lambda.Function("RuntimeFn", {
+            main: timeoutHandlerPath,
+            handler: "handler",
+            isExternal: true,
+            functionUrl: false,
+            runtimeManagementConfig,
+          }),
+        );
+
+      const initial = yield* deploy();
+      expect(initial.runtimeManagementConfig).toBeUndefined();
+      const runtimeVersionArn = (yield* Lambda.getFunction({
+        FunctionName: initial.functionName,
+      })).Configuration?.RuntimeVersionConfig?.RuntimeVersionArn;
+      expect(runtimeVersionArn).toBeTruthy();
+
+      const pin = {
+        updateRuntimeOn: "Manual",
+        runtimeVersionArn: runtimeVersionArn!,
+      } as const;
+      const pinned = yield* deploy(pin);
+      expect(pinned.functionName).toBe(initial.functionName);
+      expect(pinned.runtimeManagementConfig).toEqual(pin);
+      const observed = yield* Lambda.getRuntimeManagementConfig({
+        FunctionName: pinned.functionName,
+      });
+      expect(observed.UpdateRuntimeOn).toBe("Manual");
+      expect(observed.RuntimeVersionArn).toBe(runtimeVersionArn);
+
+      const released = yield* deploy();
+      expect(released.runtimeManagementConfig).toBeUndefined();
+      const reverted = yield* Lambda.getRuntimeManagementConfig({
+        FunctionName: released.functionName,
+      });
+      expect(reverted.UpdateRuntimeOn).toBe("Auto");
+
+      yield* stack.destroy();
+      yield* assertFunctionDeleted(initial.functionName);
+    }).pipe(
+      Effect.tap(() => stack.destroy()),
+      Effect.onError(() => stack.destroy().pipe(Effect.ignore)),
+    ),
+  { tags: ["provider:aws", "provider:aws:lambda", "live"], timeout: 360_000 },
+);
+
 // Canonical `list()` test (AWS account/region-scoped collection): deploy a
 // real function, resolve the provider from context via the typed
 // `Provider.findProvider`, call `list()`, and assert the deployed function

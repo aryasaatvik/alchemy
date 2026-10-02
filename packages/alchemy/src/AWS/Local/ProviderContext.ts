@@ -66,10 +66,11 @@ export const withProviderContext = <R extends ResourceLike>(
 
 /**
  * Capture the ambient AWS environment — the exact tag set a local data
- * plane overrides: {@link Endpoint}, {@link Region}, {@link Credentials},
- * {@link AWSEnvironment} — as a layer that reproduces it verbatim. An
- * absent Endpoint is pinned as `undefined` (the SDK default resolver), so
- * a later ambient override cannot leak in.
+ * plane overrides: {@link Endpoint}, the per-service endpoint resolver,
+ * {@link Region}, {@link Credentials}, {@link AWSEnvironment} — as a layer
+ * that reproduces it verbatim. An absent Endpoint or service resolver is
+ * pinned as "no override" (the SDK default resolver), so a later ambient
+ * override cannot leak in.
  */
 export const captureAwsEnvironment: Effect.Effect<
   Layer.Layer<any, never, never>
@@ -80,6 +81,12 @@ export const captureAwsEnvironment: Effect.Effect<
     ctx,
     Endpoint.Endpoint,
     Option.getOrElse(endpoint, () => Effect.succeed(undefined)),
+  );
+  const serviceEndpoint = yield* Effect.serviceOption(Endpoint.ServiceEndpoint);
+  ctx = Context.add(
+    ctx,
+    Endpoint.ServiceEndpoint,
+    Option.getOrElse(serviceEndpoint, () => ({ resolve: () => undefined })),
   );
   const region = yield* Effect.serviceOption(Region);
   if (Option.isSome(region)) ctx = Context.add(ctx, Region, region.value);

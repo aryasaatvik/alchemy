@@ -102,7 +102,8 @@
     "./State": "./src/State/index.ts",
     "./Util": "./src/Util/index.ts",
     "./bin/alchemy.js": "./bin/alchemy.js",
-    "./bin/exec.js": "./bin/exec.js"
+    "./bin/exec.js": "./bin/exec.js",
+    "./Cloudflare/CloudflareEnvironment": "./src/Cloudflare/CloudflareEnvironment.ts"
   },
   "publishConfig": {
     "access": "public",
@@ -387,7 +388,12 @@
         "default": "./lib/Util/index.js"
       },
       "./bin/alchemy.js": "./bin/alchemy.js",
-      "./bin/exec.js": "./bin/exec.js"
+      "./bin/exec.js": "./bin/exec.js",
+      "./Cloudflare/CloudflareEnvironment": {
+        "types": "./lib/Cloudflare/CloudflareEnvironment.d.ts",
+        "bun": "./src/Cloudflare/CloudflareEnvironment.ts",
+        "default": "./lib/Cloudflare/CloudflareEnvironment.js"
+      }
     }
   },
   "dependencies": {

@@ -9,6 +9,7 @@ import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileStoreLive } from "../Auth/Profile.ts";
 import { withProfileOverride } from "../Auth/Resolve.ts";
 import { Stack } from "../Stack.ts";
+import { ProviderSessionConfig } from "./ProviderSessionConfig.ts";
 import { Stage } from "../Stage.ts";
 import { loadConfigProvider } from "../Util/ConfigProvider.ts";
 
@@ -25,6 +26,11 @@ export interface SessionEnvironment {
     name: string;
     stage: string;
   };
+  /**
+   * The stack's {@link ProviderSessionConfig}, when any provider group set
+   * one. Provided to every provider group built for this session.
+   */
+  providers?: Readonly<Record<string, unknown>>;
 }
 
 export interface RpcServerEnvironment {
@@ -75,6 +81,7 @@ export const layer = (
       actions: {},
     }),
     Layer.succeed(Stage, environment.stack.stage),
+    Layer.succeed(ProviderSessionConfig, environment.providers ?? {}),
   );
 
 export const RPC_SERVER_ENVIRONMENT_KEY =
