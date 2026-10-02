@@ -496,6 +496,37 @@ export interface ConsumerDependencies {
   readonly effect: string;
 }
 
+/** Host dependencies required by the public integrations exercised below. */
+export const freshConsumerManifest = (
+  artifact: string,
+  manifest: PackageManifest,
+  dependencies: ConsumerDependencies,
+): PackageManifest => {
+  const vite = manifest.peerDependencies?.vite;
+  if (vite === undefined || vite.length === 0) {
+    throw new Error("Packed Alchemy must declare its Vite host peer");
+  }
+  assertPublishableManifest("alchemy", manifest);
+  return {
+    private: true,
+    type: "module",
+    dependencies: {
+      alchemy: `file:${artifact}`,
+      effect: dependencies.effect,
+      "@effect/platform-node": dependencies.effect,
+      // The VitePlugin subpath requires the application's Vite host. Its
+      // optional peer is not installed automatically by Bun.
+      vite,
+    },
+    // `@effect/platform-node` ranges its shared package, so a newer
+    // Effect family release would otherwise land beside the pinned
+    // `effect` and fail to resolve modules that version adds.
+    overrides: {
+      "@effect/platform-node-shared": dependencies.effect,
+    },
+  };
+};
+
 /**
  * Install into a new consumer and exercise the source, declaration, and
  * compiled surfaces Samva imports.
@@ -504,6 +535,17 @@ export const verifyFreshConsumer = async (
   artifact: string,
   dependencies: ConsumerDependencies,
 ): Promise<void> => {
+  const manifest = JSON.parse(
+    await run(["tar", "-xOf", artifact, "package/package.json"], {
+      cwd: process.cwd(),
+      quiet: true,
+    }),
+  ) as PackageManifest;
+  const consumerManifest = freshConsumerManifest(
+    artifact,
+    manifest,
+    dependencies,
+  );
   const consumer = await mkdtemp(
     join(tmpdir(), "alchemy-integration-consumer-"),
   );
@@ -511,25 +553,7 @@ export const verifyFreshConsumer = async (
     await mkdir(consumer, { recursive: true });
     await writeFile(
       join(consumer, "package.json"),
-      `${JSON.stringify(
-        {
-          private: true,
-          type: "module",
-          dependencies: {
-            alchemy: `file:${artifact}`,
-            effect: dependencies.effect,
-            "@effect/platform-node": dependencies.effect,
-          },
-          // `@effect/platform-node` ranges its shared package, so a newer
-          // Effect family release would otherwise land beside the pinned
-          // `effect` and fail to resolve modules that version adds.
-          overrides: {
-            "@effect/platform-node-shared": dependencies.effect,
-          },
-        },
-        null,
-        2,
-      )}\n`,
+      `${JSON.stringify(consumerManifest, null, 2)}\n`,
     );
     await writeFile(join(consumer, "consumer.ts"), bunConsumer());
     await writeFile(

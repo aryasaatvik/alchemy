@@ -96,7 +96,9 @@ Top-level directories without tracked files (`lib/`, `dist/`) and the copied `LI
 is refused too. The error lists each path; remove them and pack again.
 
 Consumer verification installs the artifact beside the workspace's exact `overrides.effect`
-version, type-checks and runs every `alchemy` subpath Samva imports under Bun and Node, boots the
+version and the packed manifest's declared Vite host peer. Vite is an optional application peer,
+but exercising `alchemy/Cloudflare/VitePlugin` requires it. Verification type-checks and runs
+every `alchemy` subpath Samva imports under Bun and Node, boots the
 packaged Lambda bootstrap, and exercises local Lambda placement and per-service endpoint routing.
 The subpath list is `consumerSubpaths` in `scripts/integration-pack/verify.ts`. When Samva imports a
 new `alchemy` subpath, add it there; the archive check then resolves it through the packed export

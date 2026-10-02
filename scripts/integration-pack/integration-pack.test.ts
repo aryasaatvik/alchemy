@@ -29,10 +29,37 @@ import {
   assertBundledFiles,
   assertConsumerSubpaths,
   consumerSubpaths,
+  freshConsumerManifest,
   resolveExportSubpath,
 } from "./verify.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
+
+describe("fresh integration consumer", () => {
+  test("installs the declared Vite host peer for the public Vite integration", () => {
+    const manifest = freshConsumerManifest(
+      "/tmp/alchemy.tgz",
+      { peerDependencies: { vite: "^7.0.0 || ^8.0.0" } },
+      { effect: "4.0.0" },
+    );
+    expect(manifest.dependencies?.vite).toBe("^7.0.0 || ^8.0.0");
+    expect(manifest.dependencies?.alchemy).toBe("file:/tmp/alchemy.tgz");
+    expect(manifest.overrides?.["@effect/platform-node-shared"]).toBe("4.0.0");
+  });
+
+  test("rejects a missing or unresolved Vite peer instead of inventing a host", () => {
+    expect(() =>
+      freshConsumerManifest("/tmp/alchemy.tgz", {}, { effect: "4.0.0" }),
+    ).toThrow("must declare its Vite host peer");
+    expect(() =>
+      freshConsumerManifest(
+        "/tmp/alchemy.tgz",
+        { peerDependencies: { vite: "catalog:" } },
+        { effect: "4.0.0" },
+      ),
+    ).toThrow("unresolved peerDependencies.vite");
+  });
+});
 
 describe("integration package graph", () => {
   test("returns the complete current closure in dependency order", async () => {
