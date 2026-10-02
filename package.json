@@ -63,7 +63,9 @@
     "test:dev": "cd ./examples/dev-stress && bun test",
     "test:examples": "bun scripts/test-examples.ts",
     "typecheck:cloudflare-packages": "turbo run typecheck --filter=@alchemy.run/cloudflare-runtime --filter=@alchemy.run/frontend-frameworks --filter=@alchemy.run/cloudflare-test-tools",
-    "validate:publish-packages": "bun scripts/validate-publish-packages.ts"
+    "validate:publish-packages": "bun scripts/validate-publish-packages.ts",
+    "pack:integration": "bun scripts/integration-pack/cli.ts",
+    "checkpoint:integration": "bun scripts/integration-pack/checkpoint.ts"
   },
   "devDependencies": {
     "@alchemy.run/pkg": "workspace:*",
