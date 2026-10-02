@@ -116,10 +116,18 @@ export interface Ports {
    */
   readonly waitFor: (port: number) => Effect.Effect<number, ConfigError>;
   /**
-   * Marks a port as occupied for the lifetime of the cache, preventing it from being assigned to another worker.
+   * Marks a port as occupied until it is released or the reservation
+   * expires, preventing it from being assigned to another worker.
    * Note that this is best-effort; the caller should include retry logic to handle race conditions.
    */
   readonly reserve: (port: number) => Effect.Effect<void>;
+  /**
+   * Releases a port this allocator reserved, once its listener is closed,
+   * so the same port can be claimed again right away (e.g. a strict port
+   * served again by a restarted proxy). A reservation another allocator has
+   * since taken over is left alone.
+   */
+  readonly release: (port: number) => Effect.Effect<void>;
 }
 
 const HOSTS: Set<string> = new Set([
@@ -146,7 +154,7 @@ interface PortsOptions {
  * two workerd processes — and near-simultaneous `bind()`s BOTH succeed on
  * macOS (the SO_REUSEADDR bind/listen window), leaving two listeners
  * silently splitting the port's traffic. A shared search lock plus a
- * shared reservation table (port → expiry) makes allocation atomic across
+ * shared reservation table (port → expiry, owner) makes allocation atomic across
  * instances; the reservation outlives the probe long enough for the
  * winning workerd to establish its listener, after which real binds fail
  * cleanly for everyone else.
@@ -160,11 +168,15 @@ const RESERVATION_TTL_MS = 30_000;
 const WAIT_FOR_INTERVAL = "250 millis";
 const WAIT_FOR_ATTEMPTS = 12;
 const globalSearchLock = Semaphore.makeUnsafe(1);
-const globalReservations = new Map<number, number>();
+interface Reservation {
+  readonly expiresAt: number;
+  readonly owner: symbol;
+}
+const globalReservations = new Map<number, Reservation>();
 const isReserved = (port: number) => {
-  const expiry = globalReservations.get(port);
-  if (expiry === undefined) return false;
-  if (expiry <= Date.now()) {
+  const reservation = globalReservations.get(port);
+  if (reservation === undefined) return false;
+  if (reservation.expiresAt <= Date.now()) {
     globalReservations.delete(port);
     return false;
   }
@@ -173,6 +185,7 @@ const isReserved = (port: number) => {
 
 export const make = (options: PortsOptions) =>
   Effect.gen(function* () {
+    const owner = Symbol("Ports");
     const addressInUseError = (port: number) =>
       new ConfigError({
         subtag: "AddressInUse",
@@ -232,8 +245,17 @@ export const make = (options: PortsOptions) =>
     const reserveLocal = (port: number) => Cache.set(cache, port, false);
     const reserve = (port: number) =>
       Effect.sync(() => {
-        globalReservations.set(port, Date.now() + RESERVATION_TTL_MS);
+        globalReservations.set(port, {
+          expiresAt: Date.now() + RESERVATION_TTL_MS,
+          owner,
+        });
       }).pipe(Effect.andThen(reserveLocal(port)));
+    const release = (port: number) =>
+      Effect.sync(() => {
+        if (globalReservations.get(port)?.owner === owner) {
+          globalReservations.delete(port);
+        }
+      }).pipe(Effect.andThen(Cache.invalidate(cache, port)));
     // Serializes the search loop so that concurrent lookups for the same
     // starting port each reserve a distinct port. Without this, concurrent
     // callers all observe the starting port as available and return it. On
@@ -309,5 +331,6 @@ export const make = (options: PortsOptions) =>
               ),
         ),
       reserve,
+      release,
     } as Ports;
   });

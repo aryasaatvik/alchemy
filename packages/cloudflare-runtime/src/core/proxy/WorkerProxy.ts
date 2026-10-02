@@ -280,9 +280,12 @@ const makeRelay = (pendingTimeout: Duration.Duration): Relay => {
       socket.pipe(upstream);
       socket.resume();
       upstream.pipe(socket);
-      // The upstream going away ends the client; the finalizers do the rest.
+      // Orderly EOF must drain the pipe's queued writes before the client closes.
+      // A premature upstream close cannot complete that response.
       upstream.on("error", () => socket.destroy());
-      upstream.on("close", () => socket.destroy());
+      upstream.on("close", () => {
+        if (!upstream.readableEnded) socket.destroy();
+      });
     }
     // From here the socket does the talking; the client closing ends the
     // fiber (see `accept`), and the finalizers destroy both ends.
@@ -421,6 +424,10 @@ export const WorkerProxyLive = Layer.effect(
       pendingTimeout,
     }: ResolvedOptions) {
       const relay = makeRelay(pendingTimeout);
+      // Registered before the listeners so it runs AFTER they close: the
+      // port's reservation must outlive the listener, or a concurrent
+      // allocation could be handed a port that is still bound.
+      yield* Effect.addFinalizer(() => ports.release(port));
       yield* listen(relay, host, port);
       if (ipv6) {
         // The IPv6 half of `localhost` (see `ipv6Loopback` above). The port

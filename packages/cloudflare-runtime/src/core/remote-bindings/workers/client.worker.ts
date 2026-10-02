@@ -1,9 +1,80 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import type {
+  ArtifactsRepositoryMetadataResult,
+  ArtifactsRepositoryWireOperations,
+} from "../../bindings/artifacts/ArtifactsRpc.ts";
 
 interface Props {
   binding: string;
+  /** Set for Artifacts bindings; the remote worker rebuilds Git remotes from it. */
+  artifactsNamespace?: string;
 }
+
+/**
+ * Repository methods behind a workerd `RpcTarget`: a Cap'n Web stub cannot
+ * cross workerd RPC to the local `artifacts.worker.ts` wrapper. Records arrive
+ * as JSON and are parsed here.
+ */
+class ArtifactsRepositoryMethodsBridge extends RpcTarget {
+  readonly #methods: ArtifactsRepositoryWireOperations;
+
+  constructor(methods: ArtifactsRepositoryWireOperations) {
+    super();
+    this.#methods = methods;
+  }
+
+  async createToken(scope?: "write" | "read", ttl?: number) {
+    return JSON.parse(await this.#methods.createToken(scope, ttl));
+  }
+
+  async listTokens() {
+    return JSON.parse(await this.#methods.listTokens());
+  }
+
+  async revokeToken(tokenOrId: string) {
+    return await this.#methods.revokeToken(tokenOrId);
+  }
+
+  async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
+    return JSON.parse(await this.#methods.fork(name, options));
+  }
+}
+
+/**
+ * The operations the local Artifacts wrapper calls, adapted from the remote
+ * `ArtifactsBindingProxy`. Every result is awaited here so no Cap'n Web
+ * promise crosses workerd RPC.
+ */
+const artifactsOperation = (getStub: () => Fetcher, prop: string | symbol) => {
+  const call = (name: string, args: Array<unknown>) =>
+    (Reflect.get(getStub(), name) as (...args: Array<unknown>) => unknown)(
+      ...args,
+    );
+  switch (prop) {
+    case "create":
+    case "import":
+    case "list":
+      return async (...args: Array<unknown>) =>
+        JSON.parse((await call(prop, args)) as string);
+    case "delete":
+      return async (...args: Array<unknown>) => await call(prop, args);
+    case "artifactsGetMetadata":
+      return async (name: string) =>
+        (await call("getMetadata", [
+          name,
+        ])) as ArtifactsRepositoryMetadataResult;
+    case "artifactsGetMethods":
+      return async (name: string) =>
+        new ArtifactsRepositoryMethodsBridge(
+          (await call("getMethods", [
+            name,
+          ])) as ArtifactsRepositoryWireOperations,
+        );
+    default:
+      return undefined;
+  }
+};
 
 /** Generic remote proxy client for bindings. */
 export default class Client extends WorkerEntrypoint<unknown, Props> {
@@ -13,11 +84,22 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
 
   constructor(ctx: ExecutionContext<Props>, env: unknown) {
     super(ctx, env);
+    const { binding, artifactsNamespace } = ctx.props;
     let stub: Fetcher | undefined;
-    const getStub = () => (stub ??= makeRemoteProxyStub(ctx.props.binding));
+    const getStub = () =>
+      (stub ??= makeRemoteProxyStub(
+        binding,
+        artifactsNamespace === undefined
+          ? undefined
+          : { "MF-Artifacts-Namespace": artifactsNamespace },
+      ));
 
     return new Proxy(this, {
       get: (target, prop) => {
+        if (artifactsNamespace !== undefined) {
+          const operation = artifactsOperation(getStub, prop);
+          if (operation) return operation;
+        }
         if (Reflect.has(target, prop)) {
           return Reflect.get(target, prop);
         }
@@ -51,6 +133,7 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
 /** Headers sent alongside proxy requests to provide additional context. */
 export type ProxyMetadata = {
   "MF-Dispatch-Namespace-Options"?: string;
+  "MF-Artifacts-Namespace"?: string;
 };
 
 export function makeFetch(bindingName: string, extraHeaders?: Headers) {

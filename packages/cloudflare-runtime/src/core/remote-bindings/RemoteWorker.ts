@@ -97,6 +97,7 @@ export const make: (
     options: RemoteWorkerConfig,
     cfPreviewUploadConfigToken: string,
   ) {
+    const resolvedAccountId = yield* accountId;
     // Salt the main module with a hash of the session's CONFIG. The edge
     // preview dedupes deployments by script content and IGNORES changed
     // bindings metadata: re-uploading byte-identical files under the same
@@ -109,7 +110,7 @@ export const make: (
     // line numbers (stack traces) are untouched.
     const configSalt = yield* Effect.sync(() =>
       NodeCrypto.createHash("sha256")
-        .update(JSON.stringify(options))
+        .update(JSON.stringify({ options, accountId: resolvedAccountId }))
         .digest("hex"),
     );
     const files = yield* Effect.promise(RemoteWorkerScript.worker).pipe(
@@ -130,13 +131,22 @@ export const make: (
       "PreviewUpload",
       `Failed to upload the script preview for "${options.name}".`,
       createScriptEdgePreview({
-        accountId: yield* accountId,
+        accountId: resolvedAccountId,
         scriptName: options.name,
         cfPreviewUploadConfigToken,
         wranglerSessionConfig: { workersDev: true, minimalMode: true },
         metadata: {
           compatibilityDate: DEFAULT_COMPATIBILITY_DATE,
-          bindings: options.bindings,
+          bindings: [
+            ...options.bindings,
+            // Artifacts list records omit the Git remote; the remote worker
+            // rebuilds it from the account id.
+            {
+              type: "plain_text",
+              name: "__ALCHEMY_REMOTE_ACCOUNT_ID",
+              text: resolvedAccountId,
+            },
+          ],
           mainModule: files[0].name,
         },
         files,

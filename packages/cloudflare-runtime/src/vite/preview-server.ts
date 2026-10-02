@@ -1,3 +1,5 @@
+import * as Assets from "../core/bindings/assets/Assets.ts";
+import * as Text from "../core/bindings/Text.ts";
 import { DEFAULT_COMPATIBILITY_DATE } from "../core/internal/constants.ts";
 import type { BindingHooks, Module } from "../core/index.ts";
 import * as Runtime from "../core/Runtime.ts";
@@ -158,21 +160,33 @@ const serve = Effect.fn(function* (
 ) {
   const runtime = yield* Runtime.Runtime;
   const modules = yield* Effect.promise(() => readWorkerModules(build));
-  const assetsDirectory =
-    options.worker?.assets?.directory ?? build.assetsDirectory;
+  const prerenderWorker = options.prerenderWorker;
+  const assetsDirectory = prerenderWorker
+    ? (prerenderWorker.assets?.directory ?? build.assetsDirectory)
+    : (options.worker?.assets?.directory ?? build.assetsDirectory);
   return yield* runtime.start({
     name: options.worker?.name ?? `vite-preview-${crypto.randomUUID()}`,
     modules,
     proxySharedSecret,
     compatibilityDate: options.compatibilityDate ?? DEFAULT_COMPATIBILITY_DATE,
     compatibilityFlags: options.compatibilityFlags ?? [],
-    bindings: options.worker?.bindings ?? [],
+    bindings: prerenderWorker
+      ? [
+          ...Object.entries(prerenderWorker.env ?? {}).map(([name, value]) =>
+            Text.local(name, value),
+          ),
+          Assets.local("ASSETS"),
+        ]
+      : (options.worker?.bindings ?? []),
     durableObjectNamespaces: options.worker?.durableObjectNamespaces,
     hyperdrives: options.worker?.hyperdrives,
     queueConsumers: options.worker?.queueConsumers,
     assets:
       options.worker?.assets !== undefined || assetsDirectory !== undefined
-        ? { ...options.worker?.assets, directory: assetsDirectory }
+        ? {
+            ...(prerenderWorker?.assets ?? options.worker?.assets),
+            directory: assetsDirectory,
+          }
         : undefined,
     logging: options.worker?.logging,
     unsafe: options.worker?.unsafe,

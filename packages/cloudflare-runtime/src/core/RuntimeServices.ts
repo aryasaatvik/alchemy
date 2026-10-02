@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
   AnalyticsEngine,
+  Artifacts,
   Assets,
   Browser,
   Cache,
@@ -69,6 +70,7 @@ export const layerLoopback = () =>
 export const layerLocalBindings = () =>
   Layer.mergeAll(
     AnalyticsEngine.AnalyticsEngineLive,
+    Artifacts.ArtifactsLive,
     Assets.AssetsLive,
     Browser.BrowserLive,
     Cache.CacheLive,
@@ -88,6 +90,7 @@ export const layerLocalBindings = () =>
 
 export type BindingServices =
   | AnalyticsEngine.AnalyticsEngine
+  | Artifacts.Artifacts
   | Assets.Assets
   | Browser.Browser
   | Cache.Cache

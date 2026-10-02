@@ -31,6 +31,26 @@ describe("Port.find", () => {
   );
 });
 
+describe("Port.release", () => {
+  it.effect("does not release another allocator's reservation", () =>
+    Effect.gen(function* () {
+      const port = yield* PortHelpers.find(0);
+      const stale = yield* Port.make({ cache: false });
+      const owner = yield* Port.make({ cache: false });
+      const observer = yield* Port.make({ cache: false });
+
+      yield* stale.reserve(port);
+      yield* owner.reserve(port);
+      yield* stale.release(port);
+      expect(yield* observer.check(port).pipe(Effect.flip)).toBeDefined();
+
+      yield* owner.release(port);
+      expect(yield* observer.check(port)).toBe(port);
+      yield* observer.release(port);
+    }),
+  );
+});
+
 describe("Port.isUnsupportedHostError", () => {
   it("recognizes coded unsupported-host errors", () => {
     expect(
