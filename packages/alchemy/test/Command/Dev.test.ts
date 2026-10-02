@@ -28,6 +28,7 @@ const { test: inProcessTest } = Test.make({
 
 const fixtureDir = pathe.resolve(import.meta.dirname, "fixture");
 const fixtureScript = pathe.join(fixtureDir, "long-running.cjs");
+const cleanupScript = pathe.join(fixtureDir, "cleanup.cjs");
 const urlServerScript = pathe.join(fixtureDir, "url-server.cjs");
 const dieScript = pathe.join(fixtureDir, "die.cjs");
 
@@ -35,12 +36,25 @@ const dieScript = pathe.join(fixtureDir, "die.cjs");
 // fixture path must not contain spaces. The in-repo path doesn't, but a CI
 // clone under e.g. `C:\Program Files\...` would. Fail loudly with a clear
 // message instead of letting the test hang on a misparsed argv.
-if (fixtureScript.includes(" ") || urlServerScript.includes(" ")) {
+if (
+  fixtureScript.includes(" ") ||
+  cleanupScript.includes(" ") ||
+  urlServerScript.includes(" ")
+) {
   throw new Error(
     `DevServer test fixture path contains a space, which the provider's ` +
-      `argv split cannot represent: ${fixtureScript} / ${urlServerScript}`,
+      `argv split cannot represent: ${fixtureScript} / ${cleanupScript} / ${urlServerScript}`,
   );
 }
+
+const cleanupProps = (
+  file: string,
+  marker: string,
+): Command.CommandRunProps => ({
+  command: `node ${cleanupScript}`,
+  env: { CLEANUP_FILE: file, MARKER: marker },
+  timeout: "5 seconds",
+});
 
 const isAlive = (pid: number) =>
   Effect.sync(() => {
@@ -441,6 +455,105 @@ test.provider(
       yield* stack.destroy();
       yield* waitForDeath(pid);
       expect(yield* isAlive(pid)).toBe(false);
+    }),
+  { tags: ["local"], timeout: 30_000 },
+);
+
+test.provider(
+  "runs cleanup after the process stops on restart and destroy",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const pidFile = pathe.join(tmp, "pid.json");
+      const firstCleanup = pathe.join(tmp, "cleanup-v1.json");
+      const secondCleanup = pathe.join(tmp, "cleanup-v2.json");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "v1" },
+          cleanup: cleanupProps(firstCleanup, "cleanup-v1"),
+        }),
+      );
+      const first = yield* waitForPidFile(pidFile, "v1");
+      expect(yield* fs.exists(firstCleanup)).toBe(false);
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "v2" },
+          cleanup: cleanupProps(secondCleanup, "cleanup-v2"),
+        }),
+      );
+      // The restart ran the previous generation's cleanup, not the new one.
+      yield* waitForPidFile(firstCleanup, "cleanup-v1");
+      const second = yield* waitForPidFile(pidFile, "v2");
+      yield* waitForDeath(first.pid);
+      expect(yield* fs.exists(secondCleanup)).toBe(false);
+
+      yield* stack.destroy();
+      yield* waitForPidFile(secondCleanup, "cleanup-v2");
+      yield* waitForDeath(second.pid);
+    }),
+  { tags: ["local"], timeout: 30_000 },
+);
+
+test.provider(
+  "replays cleanup on destroy after the process was killed",
+  (stack) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const pidFile = pathe.join(tmp, "pid.json");
+      const cleanupFile = pathe.join(tmp, "cleanup.json");
+
+      yield* stack.deploy(
+        Command.Dev("Dev", {
+          command: `node ${fixtureScript}`,
+          env: { PID_FILE: pidFile, MARKER: "killed" },
+          cleanup: cleanupProps(cleanupFile, "cleanup-killed"),
+        }),
+      );
+      const child = yield* waitForPidFile(pidFile, "killed");
+      yield* Effect.sync(() => process.kill(child.pid, "SIGKILL"));
+      yield* waitForDeath(child.pid);
+
+      yield* stack.destroy();
+      yield* waitForPidFile(cleanupFile, "cleanup-killed");
+    }),
+  { tags: ["local"], timeout: 30_000 },
+);
+
+inProcessTest.provider(
+  "delete replays persisted cleanup when no process is registered",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tmp = yield* fs.makeTempDirectoryScoped({ prefix: "devcmd-" });
+      const cleanupFile = pathe.join(tmp, "cleanup.json");
+      const provider = yield* Provider.findProvider(Command.Dev);
+
+      // A sidecar that died took its instance registry with it: the delete
+      // only has the persisted props.
+      yield* provider.delete({
+        id: "Lost",
+        fqn: "Lost",
+        instanceId: "lost-instance",
+        olds: {
+          command: "never-started",
+          cleanup: cleanupProps(cleanupFile, "cleanup-lost"),
+        },
+        output: { url: undefined },
+        bindings: [],
+        session: {
+          note: () => Effect.void,
+          emit: () => Effect.void,
+          done: () => Effect.void,
+        },
+      });
+
+      yield* waitForPidFile(cleanupFile, "cleanup-lost");
     }),
   { tags: ["local"], timeout: 30_000 },
 );

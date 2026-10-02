@@ -5,6 +5,7 @@ export const DevOptions = Schema.Struct({
   main: Schema.String,
   stage: Schema.String,
   envFile: Schema.OptionFromOptional(Schema.String),
+  dataDir: Schema.optional(Schema.String),
   profile: Schema.optional(Schema.String),
   force: Schema.Boolean,
   include: Schema.optional(Schema.Array(Schema.String)),
