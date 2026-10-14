@@ -168,6 +168,93 @@ test.provider(
 );
 
 test.provider(
+  "leaves rules unmanaged when omitted and clears them when empty",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+
+      yield* stack.destroy();
+
+      const program = (props: {
+        description?: string;
+        rules?: Cloudflare.Flagship.FlagRule[];
+      }) =>
+        Effect.gen(function* () {
+          const app = yield* Cloudflare.Flagship.App("RulesApp", {
+            name: "alchemy-test-flagship-rules",
+          });
+          const flag = yield* Cloudflare.Flagship.Flag("RulesFlag", {
+            appId: app.appId,
+            key: "alchemy-test-flag-rules",
+            defaultVariation: "off",
+            variations: { off: false, on: true },
+            ...props,
+          });
+          return { app, flag };
+        });
+
+      const initial = yield* stack.deploy(program({}));
+      expect(initial.flag.rules).toEqual([]);
+
+      // Target an organization out of band, as an operator would in the
+      // dashboard.
+      const outOfBand = {
+        priority: 1,
+        conditions: [
+          {
+            attribute: "organizationId",
+            operator: "in" as const,
+            value: ["org_a", "org_b"],
+          },
+        ],
+        serveVariation: "on",
+      };
+      yield* flagship.updateAppFlag({
+        accountId,
+        appId: initial.app.appId,
+        flagKey: "alchemy-test-flag-rules",
+        key: "alchemy-test-flag-rules",
+        enabled: true,
+        defaultVariation: "off",
+        variations: { off: false, on: true },
+        rules: [outOfBand],
+      });
+
+      // A prop change forces a reconcile; omitting rules leaves the
+      // out-of-band rule in place.
+      const kept = yield* stack.deploy(program({ description: "staged" }));
+      expect(kept.flag.rules).toEqual([outOfBand]);
+      const liveKept = yield* flagship.getAppFlag({
+        accountId,
+        appId: initial.app.appId,
+        flagKey: "alchemy-test-flag-rules",
+      });
+      expect(liveKept.rules).toHaveLength(1);
+
+      // An explicit empty list takes ownership and clears them.
+      const cleared = yield* stack.deploy(
+        program({ description: "staged", rules: [] }),
+      );
+      expect(cleared.flag.rules).toEqual([]);
+      const liveCleared = yield* flagship.getAppFlag({
+        accountId,
+        appId: initial.app.appId,
+        flagKey: "alchemy-test-flag-rules",
+      });
+      expect(liveCleared.rules).toEqual([]);
+
+      yield* stack.destroy();
+
+      yield* expectFlagGone(
+        accountId,
+        initial.app.appId,
+        "alchemy-test-flag-rules",
+      );
+    }).pipe(logLevel),
+  { tags: ["provider:cloudflare", "provider:cloudflare:flagship", "live"] },
+);
+
+test.provider(
   "replaces the flag when the key changes",
   (stack) =>
     Effect.gen(function* () {
