@@ -144,9 +144,10 @@ export type FlagProps = {
   variations: Record<string, unknown>;
   /**
    * Targeting rules evaluated in ascending `priority`; the first matching
-   * rule wins. An empty array means the flag always serves
-   * `defaultVariation`.
-   * @default []
+   * rule wins. An empty array clears every rule, so the flag always serves
+   * `defaultVariation`. When omitted, the flag is created without rules and
+   * the live rules are left unmanaged: rules edited in the dashboard or
+   * through the API survive every deploy.
    */
   rules?: FlagRule[];
   /**
@@ -362,7 +363,6 @@ export const FlagProvider = () =>
         enabled: news.enabled ?? true,
         defaultVariation: news.defaultVariation,
         variations: news.variations,
-        rules: news.rules ?? [],
         description: news.description,
       };
 
@@ -384,6 +384,7 @@ export const FlagProvider = () =>
             appId,
             key,
             ...desired,
+            rules: news.rules ?? [],
             type: news.type,
           })
           .pipe(
@@ -400,6 +401,9 @@ export const FlagProvider = () =>
       // a PUT that takes the full body, so send everything, but skip the
       // call entirely on a no-op.
       const live = observed ?? (yield* getFlag(accountId, appId, key));
+      // Omitted rules are unmanaged: the full-body PUT carries the live
+      // rules back unchanged, so rules edited outside Alchemy survive.
+      const rules = normalizeRules(news.rules ?? live?.rules ?? []);
       if (live) {
         const observedShape = {
           enabled: live.enabled,
@@ -408,11 +412,7 @@ export const FlagProvider = () =>
           rules: normalizeRules(live.rules),
           description: live.description ?? undefined,
         };
-        const desiredShape = {
-          ...desired,
-          rules: normalizeRules(desired.rules),
-        };
-        if (deepEqual(observedShape, desiredShape)) {
+        if (deepEqual(observedShape, { ...desired, rules })) {
           return toAttributes(live, accountId, appId);
         }
       }
@@ -422,6 +422,7 @@ export const FlagProvider = () =>
         flagKey: key,
         key,
         ...desired,
+        rules,
         type: news.type,
       });
       return toAttributes(updated, accountId, appId);
