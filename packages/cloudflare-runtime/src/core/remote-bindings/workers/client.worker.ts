@@ -11,33 +11,81 @@ interface Props {
   artifactsNamespace?: string;
 }
 
+/** Opens a Cap'n Web session for the Artifacts binding. */
+type OpenArtifactsSession = () => Fetcher & Disposable;
+
+/**
+ * Run one operation on its own Cap'n Web session and close it afterwards.
+ *
+ * A session holds a WebSocket to the preview worker until its main stub is
+ * disposed, so a session per operation keeps none open between calls, and a
+ * dropped WebSocket fails only the operation in flight.
+ */
+const withArtifactsSession = async <A>(
+  open: OpenArtifactsSession,
+  operation: (stub: Fetcher) => Promise<A>,
+): Promise<A> => {
+  const stub = open();
+  try {
+    return await operation(stub);
+  } finally {
+    stub[Symbol.dispose]();
+  }
+};
+
+const callArtifacts = (stub: Fetcher, name: string, args: Array<unknown>) =>
+  (Reflect.get(stub, name) as (...args: Array<unknown>) => Promise<unknown>)(
+    ...args,
+  );
+
 /**
  * Repository methods behind a workerd `RpcTarget`: a Cap'n Web stub cannot
- * cross workerd RPC to the local `artifacts.worker.ts` wrapper. Records arrive
- * as JSON and are parsed here.
+ * cross workerd RPC to the local `artifacts.worker.ts` wrapper. Each method
+ * resolves the repository on a session of its own, so a repository handle
+ * outlives any one WebSocket. Records arrive as JSON and are parsed here.
  */
 class ArtifactsRepositoryMethodsBridge extends RpcTarget {
-  readonly #methods: ArtifactsRepositoryWireOperations;
+  readonly #name: string;
+  readonly #open: OpenArtifactsSession;
 
-  constructor(methods: ArtifactsRepositoryWireOperations) {
+  constructor(name: string, open: OpenArtifactsSession) {
     super();
-    this.#methods = methods;
+    this.#name = name;
+    this.#open = open;
+  }
+
+  #withMethods<A>(
+    operation: (methods: ArtifactsRepositoryWireOperations) => Promise<A>,
+  ): Promise<A> {
+    return withArtifactsSession(this.#open, async (stub) =>
+      operation(
+        (await callArtifacts(stub, "getMethods", [
+          this.#name,
+        ])) as ArtifactsRepositoryWireOperations,
+      ),
+    );
   }
 
   async createToken(scope?: "write" | "read", ttl?: number) {
-    return JSON.parse(await this.#methods.createToken(scope, ttl));
+    return JSON.parse(
+      await this.#withMethods((methods) => methods.createToken(scope, ttl)),
+    );
   }
 
   async listTokens() {
-    return JSON.parse(await this.#methods.listTokens());
+    return JSON.parse(
+      await this.#withMethods((methods) => methods.listTokens()),
+    );
   }
 
   async revokeToken(tokenOrId: string) {
-    return await this.#methods.revokeToken(tokenOrId);
+    return await this.#withMethods((methods) => methods.revokeToken(tokenOrId));
   }
 
   async fork(name: string, options?: Parameters<ArtifactsRepo["fork"]>[1]) {
-    return JSON.parse(await this.#methods.fork(name, options));
+    return JSON.parse(
+      await this.#withMethods((methods) => methods.fork(name, options)),
+    );
   }
 }
 
@@ -46,11 +94,12 @@ class ArtifactsRepositoryMethodsBridge extends RpcTarget {
  * `ArtifactsBindingProxy`. Every result is awaited here so no Cap'n Web
  * promise crosses workerd RPC.
  */
-const artifactsOperation = (getStub: () => Fetcher, prop: string | symbol) => {
+const artifactsOperation = (
+  open: OpenArtifactsSession,
+  prop: string | symbol,
+) => {
   const call = (name: string, args: Array<unknown>) =>
-    (Reflect.get(getStub(), name) as (...args: Array<unknown>) => unknown)(
-      ...args,
-    );
+    withArtifactsSession(open, (stub) => callArtifacts(stub, name, args));
   switch (prop) {
     case "create":
     case "import":
@@ -66,11 +115,7 @@ const artifactsOperation = (getStub: () => Fetcher, prop: string | symbol) => {
         ])) as ArtifactsRepositoryMetadataResult;
     case "artifactsGetMethods":
       return async (name: string) =>
-        new ArtifactsRepositoryMethodsBridge(
-          (await call("getMethods", [
-            name,
-          ])) as ArtifactsRepositoryWireOperations,
-        );
+        new ArtifactsRepositoryMethodsBridge(name, open);
     default:
       return undefined;
   }
@@ -86,18 +131,18 @@ export default class Client extends WorkerEntrypoint<unknown, Props> {
     super(ctx, env);
     const { binding, artifactsNamespace } = ctx.props;
     let stub: Fetcher | undefined;
-    const getStub = () =>
-      (stub ??= makeRemoteProxyStub(
-        binding,
-        artifactsNamespace === undefined
-          ? undefined
-          : { "MF-Artifacts-Namespace": artifactsNamespace },
-      ));
+    const getStub = () => (stub ??= makeRemoteProxyStub(binding));
 
     return new Proxy(this, {
       get: (target, prop) => {
         if (artifactsNamespace !== undefined) {
-          const operation = artifactsOperation(getStub, prop);
+          const operation = artifactsOperation(
+            () =>
+              makeRemoteProxyStub(binding, {
+                "MF-Artifacts-Namespace": artifactsNamespace,
+              }),
+            prop,
+          );
           if (operation) return operation;
         }
         if (Reflect.has(target, prop)) {
@@ -174,7 +219,7 @@ export function makeFetch(bindingName: string, extraHeaders?: Headers) {
 export function makeRemoteProxyStub(
   bindingName: string,
   metadata?: ProxyMetadata,
-): Fetcher {
+): Fetcher & Disposable {
   const url = new URL("ws://stub");
   url.searchParams.set("MF-Binding", bindingName);
   if (metadata) {
@@ -207,5 +252,5 @@ export function makeRemoteProxyStub(
       }
       return Reflect.get(stub, p);
     },
-  });
+  }) as unknown as Fetcher & Disposable;
 }
