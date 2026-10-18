@@ -324,7 +324,7 @@ describe("integration package staging", () => {
         manifest: { name: "fixture" },
         localDependencies: [],
       };
-      for (const input of [
+      const inputs = [
         "scripts/package-build.ts",
         "tsconfig.base.json",
         "tsconfig.cloudflare.json",
@@ -340,11 +340,123 @@ describe("integration package staging", () => {
         "packages/fixture/.gitignore",
         ".npmignore",
         ".gitignore",
-      ]) {
+      ];
+      for (const input of inputs) {
+        const path = join(directory, input);
+        await mkdir(resolve(path, ".."), { recursive: true });
+        await writeFile(path, "authored input\n");
+      }
+      await trackAll(directory);
+      for (const input of inputs) {
         const before = await packageFingerprint(directory, workspace, {});
         const path = join(directory, input);
         await mkdir(resolve(path, ".."), { recursive: true });
         await writeFile(path, "changed input\n");
+        expect(await packageFingerprint(directory, workspace, {})).not.toBe(before);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps native metadata copies out of the input guard while hashing their canonical sources", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "integration-generated-metadata-"));
+    try {
+      const packageDirectory = join(directory, "packages", "fixture");
+      const metadata = ["README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"];
+      await mkdir(join(packageDirectory, "scripts"), { recursive: true });
+      await mkdir(join(directory, "scripts"));
+      await cp(
+        join(repositoryRoot, "scripts", "package-build.ts"),
+        join(directory, "scripts", "package-build.ts"),
+      );
+      await symlink(join(repositoryRoot, "node_modules"), join(directory, "node_modules"), "dir");
+      await writeFile(
+        join(directory, ".gitignore"),
+        ["node_modules", ".cache", ...metadata.map((name) => `/packages/fixture/${name}`)].join(
+          "\n",
+        ) + "\n",
+      );
+      await writeFile(join(directory, "package.json"), '{"private":true}');
+      const manifest = { name: "metadata-fixture", version: "1.0.0" };
+      await writeFile(join(packageDirectory, "package.json"), JSON.stringify(manifest));
+      for (const name of metadata) await writeFile(join(directory, name), `canonical ${name}\n`);
+      await writeFile(
+        join(packageDirectory, "scripts", "build.ts"),
+        `import { build } from "../../../scripts/package-build.ts";
+build(import.meta.dirname, { readme: true, thirdPartyLicenses: true, steps: [] });
+`,
+      );
+      await trackAll(directory);
+      await run(
+        [
+          "git",
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.test",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "--no-gpg-sign",
+          "--quiet",
+          "-m",
+          "fixture",
+        ],
+        { cwd: directory },
+      );
+      const workspace = {
+        name: manifest.name,
+        directory: packageDirectory,
+        manifest,
+        localDependencies: [],
+      };
+      for (const state of ["absent", "stale"]) {
+        for (const name of metadata) {
+          await rm(join(packageDirectory, name), { force: true });
+          if (state === "stale") await writeFile(join(packageDirectory, name), `old ${name}\n`);
+        }
+        const before = await snapshotBuildInputs(directory, [workspace], "fixture");
+        await run([process.execPath, "scripts/build.ts"], { cwd: packageDirectory });
+        await assertBuildInputsUnchanged(directory, [workspace], "fixture", before);
+        for (const name of metadata)
+          expect(await readFile(join(packageDirectory, name), "utf8")).toBe(`canonical ${name}\n`);
+        const fingerprint = await packageFingerprint(directory, workspace, {});
+        await writeFile(join(directory, "LICENSE"), "changed canonical license\n");
+        expect(await packageFingerprint(directory, workspace, {})).not.toBe(fingerprint);
+        await writeFile(join(directory, "LICENSE"), "canonical LICENSE\n");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("hashes authored SDK README files and Distilled root publication metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "integration-authored-metadata-"));
+    try {
+      const distilled = join(directory, "submodules", "distilled");
+      const packageDirectory = join(distilled, "packages", "sdk");
+      await mkdir(packageDirectory, { recursive: true });
+      await writeFile(
+        join(packageDirectory, "package.json"),
+        '{"name":"@distilled.cloud/fixture"}',
+      );
+      await writeFile(join(packageDirectory, "README.md"), "authored SDK guide\n");
+      const metadata = ["README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"];
+      for (const name of metadata) await writeFile(join(distilled, name), `Distilled ${name}\n`);
+      await trackAll(distilled);
+      const workspace = {
+        name: "@distilled.cloud/fixture",
+        directory: packageDirectory,
+        manifest: { name: "@distilled.cloud/fixture" },
+        localDependencies: [],
+      };
+      for (const input of [
+        join(packageDirectory, "README.md"),
+        ...metadata.map((name) => join(distilled, name)),
+      ]) {
+        const before = await packageFingerprint(directory, workspace, {});
+        await writeFile(input, "changed authored publication input\n");
         expect(await packageFingerprint(directory, workspace, {})).not.toBe(before);
       }
     } finally {
@@ -365,6 +477,7 @@ describe("integration package staging", () => {
         manifest: { name: "fixture" },
         localDependencies: [],
       } as const;
+      await trackAll(directory);
       const before = await packageFingerprint(directory, workspace, {});
       await writeFile(
         join(directory, "tsconfig.json"),

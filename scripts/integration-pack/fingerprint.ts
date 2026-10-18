@@ -6,11 +6,8 @@ import { run } from "./io.ts";
 import type { WorkspacePackage } from "./types.ts";
 
 const sourceRoots = ["src", "bin", "scripts", "patches", "skills"];
+const publicationMetadata = ["README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"];
 const packageBuildInputs = [
-  "README.md",
-  "LICENSE",
-  "NOTICE",
-  "THIRD_PARTY_LICENSES.md",
   ".npmignore",
   ".gitignore",
   "tsconfig.json",
@@ -67,7 +64,17 @@ export const packageFingerprint = async (
   hash.update(await readFile(join(workspace.directory, "package.json")));
   for (const root of sourceRoots)
     await updateTree(hash, workspace.directory, join(workspace.directory, root));
-  for (const path of packageBuildInputs) {
+  // Authored publication metadata is tracked. Ignored package copies are
+  // build outputs; their canonical repository sources are hashed below.
+  const authoredMetadata = (
+    await run(["git", "ls-files", "-z", "--", ...publicationMetadata], {
+      cwd: workspace.directory,
+      quiet: true,
+    })
+  )
+    .split("\0")
+    .filter(Boolean);
+  for (const path of [...packageBuildInputs, ...authoredMetadata]) {
     try {
       hash.update(`package-input:${path}\0`);
       hash.update(await readFile(join(workspace.directory, path)));
@@ -90,6 +97,10 @@ export const packageFingerprint = async (
     "scripts/typescript-source.ts",
     "tsconfig.base.json",
     "tsconfig.cloudflare.json",
+    "submodules/distilled/README.md",
+    "submodules/distilled/LICENSE",
+    "submodules/distilled/NOTICE",
+    "submodules/distilled/THIRD_PARTY_LICENSES.md",
     "submodules/distilled/tsconfig.base.json",
     "submodules/distilled/package.json",
     "submodules/distilled/pnpm-workspace.yaml",
