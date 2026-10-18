@@ -197,8 +197,20 @@ Treat each of these as a separate action requiring its own scope or approval:
 | Artifact packing | Local distributable plus verification evidence |
 | Checkpoint publication | Immutable hosted artifact |
 | Samva repin | Selected consumer dependency change |
-| Provider plan | Read-only proposed infrastructure changes |
+| Provider plan | Proposed infrastructure changes without Apply; state-backend writes require authorization |
 | Deploy/apply | Provider and state mutation |
 | Customer-path verification | Observed application behavior |
 
 Success at one gate does not authorize the next.
+
+A native `plan` or `deploy --dry-run` skips infrastructure Apply, but its state backend can write.
+The S3 state store acquires a stack/stage lease with `PutObject` before reading persisted state,
+renews it while the scope is open, and attempts `DeleteObject` on close. First use also ensures the
+state bucket exists and reconciles versioning, encryption, public-access blocking, and ownership
+controls when absent or different. Bucket reconciliation affects the shared state bucket, beyond
+the stage's lease key.
+
+Before planning against S3 state, obtain explicit authorization for the resolved account, region,
+bucket, stack/stage prefix, lease acquisition/renewal/release, and any required bucket reconciliation.
+A strict no-provider-writes grant does not cover this path. The native S3 state store has no supported
+strict-read-only plan mode; stop for a scope decision when those backend writes are not authorized.
