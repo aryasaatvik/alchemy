@@ -279,8 +279,21 @@ ${modules}.forEach((module, index) => {
   }
 });`;
 
+/** One credential boundary for the typed declaration probe and Node routing probe. */
+const checkpointCredentialsLayer = (): string => `Credentials.fromCredentials(
+  {
+    accessKeyId: Redacted.make("checkpoint-test"),
+    secretAccessKey: Redacted.make("checkpoint-test"),
+  },
+  "us-east-1",
+)`;
+
 /** Bun source surface (`bun` condition) plus the published declarations. */
-const bunConsumer = (): string => `${moduleImports("static")}
+const bunConsumer = (): string => `import * as Credentials from "alchemy/AWS/Credentials";
+import * as Redacted from "effect/Redacted";
+${moduleImports("static")}
+
+${checkpointCredentialsLayer()};
 
 ${assertModulesLoaded("Bun", `[${consumerSubpaths.map(m).join(", ")}]`)}
 
@@ -437,12 +450,7 @@ try {
       return yield* listServices({});
     }).pipe(
       Effect.provide(AWS.ServiceQuotas.ListServicesHttp),
-      Effect.provide(
-        Credentials.fromCredentials(
-          { accessKeyId: "checkpoint-test", secretAccessKey: "checkpoint-test" },
-          "us-east-1",
-        ),
-      ),
+      Effect.provide(${checkpointCredentialsLayer()}),
       Effect.provide(Endpoint.services({ "Service Quotas": \`http://127.0.0.1:\${address.port}\` })),
       Effect.provide(FetchHttpClient.layer),
     ),
