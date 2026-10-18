@@ -9635,6 +9635,77 @@ describe("planned noops re-evaluate after upstream updates", { tags: ["unit", "l
       return { version, alias };
     });
 
+  interface DeliberateNoopSink extends Resource<
+    "Test.DeliberateNoopSink",
+    { value: string; ignored: string },
+    { value: string }
+  > {}
+  const DeliberateNoopSink = Resource<DeliberateNoopSink>("Test.DeliberateNoopSink");
+  const sinkReconciles: Array<{
+    news: DeliberateNoopSink["Props"];
+    olds: DeliberateNoopSink["Props"];
+  }> = [];
+  const { test: deliberateNoopTest } = Test.make({
+    providers: Layer.merge(
+      TestLayers(),
+      Provider.succeed(DeliberateNoopSink, {
+        list: () => Effect.succeed([]),
+        diff: () => Effect.succeed({ action: "noop" as const }),
+        reconcile: Effect.fn(function* ({ news, olds }) {
+          if (olds !== undefined) sinkReconciles.push({ news, olds });
+          return { value: news.value };
+        }),
+        delete: () => Effect.void,
+      }),
+    ),
+  });
+
+  deliberateNoopTest.provider(
+    "a late cycle upgrade receives the noop's last applied props as olds",
+    (stack) =>
+      Effect.gen(function* () {
+        sinkReconciles.length = 0;
+        const program = (revision: string, ignored: string) =>
+          Effect.gen(function* () {
+            const A = yield* BindingTarget("A", { string: revision });
+            const B = yield* BindingTarget("B", { string: A.string });
+            yield* A.bind("B", { env: { B: B.string } });
+            const sink = yield* DeliberateNoopSink("Sink", { value: B.string, ignored });
+            return { B, sink };
+          });
+        yield* stack.deploy(program("v1", "ignored-old"));
+        const ignoredPlan = yield* stack.plan(program("v1", "ignored-new"));
+        expect(ignoredPlan.resources.Sink.action).toBe("noop");
+        yield* stack.deploy(program("v1", "ignored-new"));
+        expect(sinkReconciles).toEqual([]);
+        expect((yield* getState("Sink")).props).toEqual({ value: "v1", ignored: "ignored-old" });
+
+        const plan = yield* stack.plan(program("v2", "ignored-new"));
+        expect(plan.resources.Sink.action).toBe("noop");
+        expect(plan.cycleMembers.has("A")).toBe(true);
+        expect(plan.cycleMembers.has("B")).toBe(true);
+        const bReconciled = yield* Deferred.make<void>();
+        const second = yield* apply(plan).pipe(
+          hook({
+            update: (id) =>
+              Effect.gen(function* () {
+                if (id === "A") yield* Deferred.await(bReconciled);
+                if (id === "B") yield* Deferred.succeed(bReconciled, undefined);
+              }),
+          }),
+        );
+        expect(second.sink.value).toBe("v2");
+        expect(sinkReconciles).toEqual([
+          {
+            news: { value: "v2", ignored: "ignored-new" },
+            olds: { value: "v1", ignored: "ignored-old" },
+          },
+        ]);
+        expect((yield* getState("Sink")).props).toEqual({ value: "v2", ignored: "ignored-new" });
+        yield* stack.destroy();
+      }),
+  );
+
   for (const initialUpgrade of [false, true]) {
     test.provider(
       `a cyclic source refreshes a noop chain after convergence (initial upgrade: ${initialUpgrade})`,

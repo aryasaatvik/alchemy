@@ -1670,15 +1670,15 @@ const converge = Effect.fn(function* (
       // tracker records the inputs actually applied, including intermediate
       // cycle outputs that a later convergence pass must revisit.
       const provisionalNoop = node.action === "noop" && !terminalStatuses.has(fqn);
-      const oldProps = provisionalNoop
+      const baselineProps = provisionalNoop
         ? yield* Output.evaluate(node.props, priorOutputs)
         : tracker[fqn].props;
-      const oldBindings = provisionalNoop
+      const baselineBindings = provisionalNoop
         ? excludeDeletedBindings(yield* Output.evaluate(node.bindings, priorOutputs))
         : tracker[fqn].bindings;
 
-      const propsChanged = havePropsChanged(oldProps, newProps);
-      const bindingsChanged = JSON.stringify(oldBindings) !== JSON.stringify(newBindings);
+      const propsChanged = havePropsChanged(baselineProps, newProps);
+      const bindingsChanged = JSON.stringify(baselineBindings) !== JSON.stringify(newBindings);
 
       if (!propsChanged && !bindingsChanged) continue;
 
@@ -1710,7 +1710,7 @@ const converge = Effect.fn(function* (
           instanceId,
           bindings: newBindings,
           session: scopedSession,
-          olds: oldProps,
+          olds: tracker[fqn].props,
           output: tracker[fqn].output,
         })
         .pipe(instrumentLifecycle("update", fqn, node.resource.Type, logicalId, instanceId));
