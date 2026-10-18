@@ -17,9 +17,12 @@ installation, and application-validation boundary.
 - Focused Alchemy changes use their own branches and `wt` worktrees. A Samva delivery worktree does
   not patch Alchemy independently.
 - `~/Developer/distilled-worktrees/` holds independent authoring worktrees from Alchemy's
-  embedded Distilled repository. Every
-  Alchemy worktree keeps its own `submodules/distilled/` submodule checked out at the immutable
-  gitlink recorded by that parent.
+  embedded Distilled repository. Every Alchemy worktree keeps its own `submodules/distilled/`
+  submodule checked out at the immutable gitlink recorded by that parent. The distribution's
+  `.gitmodules` selects the Samva fork so retained integration commits are fetchable.
+- Reconstruction branches are review inputs. Promote the selected candidate to `samva/integration`
+  before packing a consumer artifact; preserved candidate refs are recovery history, not parallel
+  maintained distributions.
 - Samva consumes an exact packed artifact through its root `catalog.alchemy`; it does not link the
   Alchemy workspace or carry Distilled source.
 
@@ -59,6 +62,10 @@ review a fresh candidate instead.
 Author Distilled changes in an independent checkout or worktree, test them in Distilled, and commit
 them there first. The Alchemy parent then records the exact Distilled commit as its submodule gitlink
 and verifies the combined behavior from that Alchemy worktree.
+
+Publish a retained Distilled commit to the repository selected by `.gitmodules` before publishing
+the Alchemy commit that records it. Verify retrieval from that remote independently of the local
+object database.
 
 Never symlink or share one mutable Distilled working directory across Alchemy worktrees. A parent
 checkout's gitlink is its reproducible build input; changing the standalone authoring checkout does
