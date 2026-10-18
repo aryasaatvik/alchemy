@@ -1288,3 +1288,7 @@ Writing style (match the existing beta posts, e.g.
   contributors by name.
 - End with a `## Where to go next` list of doc links plus the
   CHANGELOG and compare links.
+
+# Samva integration distribution
+
+The maintained `samva/integration` distribution follows [docs/samva-integration.md](./docs/samva-integration.md). Reconstruct and promote reviewed source before publishing consumer artifacts; the guide owns packaging and provenance boundaries.

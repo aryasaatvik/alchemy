@@ -88,3 +88,5 @@ examples/cloudflare-worker/src/scratch.ts
 
 # pkg pack output (CI artifact hand-off)
 .pkg
+
+/artifacts/
