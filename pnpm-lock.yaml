@@ -298,7 +298,7 @@ catalogs:
       specifier: 1.20.1
       version: 1.20.1
     '@opentui/core':
-      specifier: latest
+      specifier: 0.6.4
       version: 0.6.4
     '@oxc-project/types':
       specifier: ^0.153.0
@@ -1111,6 +1111,18 @@ importers:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.4(effect@4.0.4)(redis@6.2.1)
+      alchemy:
+        specifier: workspace:*
+        version: link:../../packages/alchemy
+      effect:
+        specifier: 4.0.4
+        version: 4.0.4
+
+  examples/aws-lambda-shared-binding-layer:
+    dependencies:
+      '@distilled.cloud/aws':
+        specifier: workspace:*
+        version: link:../../submodules/distilled/packages/aws
       alchemy:
         specifier: workspace:*
         version: link:../../packages/alchemy

@@ -43,6 +43,25 @@ export interface PlatformProps {
   isExternal?: boolean;
 }
 
+/** Synthetic Config nodes such as an absent `Config.option` have nothing to bind. */
+const isBindableRuntimeConfigNode = (path: ReadonlyArray<unknown>, value: unknown): boolean =>
+  path.length > 0 && value !== undefined;
+
+/**
+ * A key the host's props already set in `env` is bound by that declaration.
+ * Capturing an init-time read of it as well would replace the declared value
+ * with a Redacted copy of the deploy machine's value, and a Redacted value
+ * reaches the platform marker-packed, which anything reading the variable
+ * without `unpackEnvValue` (a sidecar, an extension) sees verbatim.
+ */
+const declaresEnvKey = (
+  props: { env?: Record<string, unknown> } | undefined,
+  key: string,
+): boolean => {
+  const env = props?.env;
+  return env !== undefined && env[key] !== undefined;
+};
+
 /**
  * Provide the platform class's layer (`cls.make(props, impl)`) with a
  * lifetime that matches the phase.
@@ -169,12 +188,7 @@ export interface Platform<
       };
   };
   <Self>(): {
-    <
-      const Id extends string,
-      Shape extends MainShape,
-      PropsReq = never,
-      InitReq extends Services | PlatformServices | Resource = never,
-    >(
+    <const Id extends string, Shape extends MainShape, PropsReq = never, InitReq = never>(
       id: Id,
       props:
         | InputProps<InlineProps>
@@ -197,7 +211,7 @@ export interface Platform<
     ): Effect.Effect<Resource & Rpc<Self>, never, Resource["Providers"]> &
       Named<Id> &
       PlatformIdentity<Id> & {
-        make<PropsReq = never, InitReq extends Services | PlatformServices | Resource = never>(
+        make<PropsReq = never, InitReq = never>(
           props:
             | InputProps<InlineProps>
             | Effect.Effect<InputProps<InlineProps>, ConfigError.ConfigError, PropsReq>,
@@ -211,11 +225,7 @@ export interface Platform<
         new (_: never): BaseShape & Named<Id> & Tag<Resource["Type"]>;
       };
   };
-  <
-    PropsReq = never,
-    InitReq extends Services | PlatformServices = never,
-    const Id extends string = string,
-  >(
+  <PropsReq = never, InitReq = never, const Id extends string = string>(
     id: Id,
     props:
       | InputProps<Resource["Props"]>
@@ -223,26 +233,31 @@ export interface Platform<
   ): Effect.Effect<
     Resource,
     never,
-    Resource["Providers"] | PropsReq | Exclude<InitReq, Services | PlatformServices>
+    Resource["Providers"] | PropsReq | Exclude<InitReq, Services | PlatformServices | Resource>
   > &
     PlatformIdentity<Id>;
-  <
-    const Id extends string,
-    Shape extends MainShape,
-    PropsReq = never,
-    InitReq extends Services | PlatformServices = never,
-  >(
+  <const Id extends string, Shape extends MainShape, PropsReq = never, InitReq = never>(
     id: Id,
     props: InputProps<InlineProps> | Effect.Effect<InputProps<InlineProps>, never, PropsReq>,
     impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
   ): Effect.Effect<
     Resource & Rpc<Shape> & Named<Id>,
     never,
-    Resource["Providers"] | PropsReq | Exclude<InitReq, Services | PlatformServices>
+    Resource["Providers"] | PropsReq | Exclude<InitReq, Services | PlatformServices | Resource>
   > &
     Named<Id> &
     PlatformIdentity<Id>;
 }
+
+/** A value `JSON.parse` can produce: a primitive, array, or plain object. */
+const isParsedJson = (value: unknown): boolean =>
+  value === null ||
+  typeof value === "number" ||
+  typeof value === "boolean" ||
+  Array.isArray(value) ||
+  (typeof value === "object" &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype);
 
 export const Platform = <
   R extends ResourceLike<
@@ -517,18 +532,34 @@ export const Platform = <
                           // handing it to the RuntimeContext.
                           const key = sanitizeKey(path.map((p) => p.toString()).join("_"));
                           const node = yield* configProvider.load(path);
-                          if (phase === "plan" && node) {
+                          if (
+                            phase === "plan" &&
+                            node &&
+                            isBindableRuntimeConfigNode(path, node.value) &&
+                            !declaresEnvKey(props, key)
+                          ) {
                             // bind it to the RuntimeContext if running in plan phase
                             const output = Output.literal(Redacted.make(node.value));
                             yield* ctx?.set(key, output) ?? Effect.void;
                             return node;
-                          } else if (phase === "runtime" && ctx) {
+                          } else if (phase === "runtime" && ctx && key.length > 0) {
                             // retrieve from the RuntimeContext if running in runtime phase
-                            const value = yield* ctx.get<Redacted.Redacted<string>>(key);
-                            if (value) {
-                              return ConfigProvider.makeValue(
-                                Redacted.isRedacted(value) ? Redacted.value(value) : value,
-                              );
+                            const value = yield* ctx.get<unknown>(key);
+                            if (value !== undefined) {
+                              // `get` unpacks the stored env string, so a
+                              // variable holding JSON arrives parsed; config
+                              // leaves are strings, so hand back its JSON.
+                              // Anything else (a platform binding object) is
+                              // not config.
+                              const raw = Redacted.isRedacted(value)
+                                ? Redacted.value(value)
+                                : value;
+                              if (typeof raw === "string") {
+                                return ConfigProvider.makeValue(raw);
+                              }
+                              if (isParsedJson(raw)) {
+                                return ConfigProvider.makeValue(JSON.stringify(raw));
+                              }
                             }
                           }
                           // fallback to the config provider otherwise
@@ -582,6 +613,11 @@ export const Platform = <
                     Layer.provideMerge(Layer.succeedContext(outerServices)),
                   ),
                 ),
+                // Binding layers register grants on their ambient host at plan time.
+                // Nested runtime hosts share the instance's cold-start memo instead.
+                globalThis.__ALCHEMY_RUNTIME__
+                  ? (effect) => effect
+                  : Effect.provideService(Layer.CurrentMemoMap, Layer.makeMemoMapUnsafe()),
               );
 
               instance.Props = {

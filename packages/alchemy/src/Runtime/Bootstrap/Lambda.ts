@@ -8,20 +8,65 @@
 import * as Credentials from "@distilled.cloud/aws/Credentials";
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import * as Region from "@distilled.cloud/aws/Region";
+import { getCallerIdentity } from "@distilled.cloud/aws/sts";
 /* oxlint-enable alchemy/package-boundaries */
 import { layer as nodeServicesLayer } from "@effect/platform-node/NodeServices";
+import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import { layer as fetchHttpClientLayer } from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import { MinimumLogLevel } from "effect/References";
 import * as Scope from "effect/Scope";
-// oxlint-disable-next-line alchemy/package-boundaries -- package split phase 3: per-cloud runtime bootstrap; moves into its provider
+// oxlint-disable-next-line alchemy/package-boundaries -- per-cloud runtime bootstrap
+import { AWSEnvironment } from "../../AWS/Environment.ts";
+// oxlint-disable-next-line alchemy/package-boundaries -- per-cloud runtime bootstrap
 import { registerLambdaExtension } from "../../AWS/Lambda/RuntimeExtension.ts";
+// oxlint-disable-next-line alchemy/package-boundaries -- runtime bindings can reference a Cloudflare account
+import { runtimeIdentityLayer } from "../../Cloudflare/CloudflareEnvironmentService.ts";
 import { reifyBoundConfigProvider } from "../../Runtime.ts";
 import { entrypointLayer, entrypointTag, stackFromEnv } from "./Process.ts";
+
+/**
+ * `AWSEnvironment` for a packaged Lambda: the sandbox's credentials, Region,
+ * and endpoint, plus the account id. The Function provider injects
+ * `ALCHEMY_AWS_ACCOUNT_ID`; when absent the account is resolved with STS. Either way it resolves only
+ * when requested, once per sandbox.
+ */
+export const lambdaAWSEnvironment = Layer.effect(
+  AWSEnvironment,
+  Effect.gen(function* () {
+    const credentials = yield* Credentials.Credentials;
+    const region = yield* yield* Region.Region;
+    const endpoint = yield* yield* Endpoint.Endpoint;
+    const accountId = Config.String("ALCHEMY_AWS_ACCOUNT_ID").pipe(
+      Config.option,
+      Effect.flatMap(
+        Option.match({
+          onSome: Effect.succeed,
+          onNone: () => getCallerIdentity({}).pipe(Effect.map(({ Account }) => Account!)),
+        }),
+      ),
+    );
+    const resolve = accountId.pipe(
+      Effect.map((accountId) => ({
+        accountId,
+        region,
+        credentials,
+        endpoint,
+      })),
+    );
+    const context = yield* Effect.context<Effect.Services<typeof resolve>>();
+    return yield* resolve.pipe(Effect.provideContext(context), Effect.orDie, Effect.cached);
+  }),
+).pipe(
+  Layer.provideMerge(Credentials.fromEnv()),
+  Layer.provideMerge(Region.fromEnv()),
+  Layer.provideMerge(Endpoint.fromEnv()),
+);
 
 /**
  * Build the sandbox-lifetime layer stack and return the Lambda handler the
@@ -49,13 +94,8 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
 
   const entryLayer = entrypointLayer(entrypoint).pipe(
     Layer.provideMerge(stackFromEnv),
-    Layer.provideMerge(Credentials.fromEnv()),
-    Layer.provideMerge(Region.fromEnv()),
-    // AWS_ENDPOINT_URL is the LocalStack-standard override injected by local
-    // emulators (floci) into the Lambda container — without it, runtime
-    // bindings in `alchemy dev` would call REAL AWS with dummy credentials.
-    // Resolves undefined when unset, so live deploys are unaffected.
-    Layer.provideMerge(Endpoint.fromEnv()),
+    Layer.provideMerge(lambdaAWSEnvironment),
+    Layer.provideMerge(runtimeIdentityLayer(process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID)),
     Layer.provideMerge(platform),
     Layer.provideMerge(
       Layer.succeed(

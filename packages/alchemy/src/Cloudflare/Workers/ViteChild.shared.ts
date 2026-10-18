@@ -5,6 +5,7 @@ import type {
   RuntimeWorker,
   Workflow,
 } from "@alchemy.run/cloudflare-runtime/core";
+import type { CloudflareVitePluginOptions } from "@alchemy.run/cloudflare-runtime/vite";
 import type { BundleOutput } from "../../Bundle/Bundle.ts";
 import type { WorkerAssetsConfig, WorkerSourceDescriptor } from "./Worker.ts";
 import type { WorkerBinding } from "./WorkerBinding.ts";
@@ -62,6 +63,7 @@ export const VITE_CHILD_READY_SUFFIX = "</ALCHEMY_VITE_ADDRESS>";
  * workerd runtime, credentials, or binding materialization.
  */
 export interface ViteBuildChildConfig {
+  prerenderWorker?: CloudflareVitePluginOptions["prerenderWorker"];
   /** Absolute project root; also the child process's working directory. */
   rootDir: string;
   /**

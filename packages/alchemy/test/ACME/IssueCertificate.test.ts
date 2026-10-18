@@ -6,8 +6,8 @@ import * as Schedule from "effect/Schedule";
 import * as ACME from "@/ACME";
 import * as Cloudflare from "@/Cloudflare";
 import * as Test from "@/Test/Alchemy";
+import { StandingZoneName } from "../Cloudflare/StandingZone.ts";
 import Stack from "./fixtures/issue-zerossl-stack.ts";
-import { ZONE_NAME } from "./fixtures/shared.ts";
 
 /**
  * Runtime issuance from inside a deployed Worker: the account bound by
@@ -31,7 +31,7 @@ const enabled =
 const stack = beforeAll(enabled ? deploy(Stack) : Effect.succeed({ url: "" } as { url: string }));
 afterAll.skipIf(!enabled || !!process.env.NO_DESTROY)(destroy(Stack));
 
-const NAME = `alchemy-acme-worker.${ZONE_NAME}`;
+const NAME = `alchemy-acme-worker.${StandingZoneName}`;
 
 test.skipIf(!enabled)(
   "a Worker issues a certificate at runtime through the bound account",

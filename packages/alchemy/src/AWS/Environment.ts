@@ -5,6 +5,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import {
   deferUntilFirstUse,
   orDieCredentialsUnavailable,
@@ -24,6 +25,40 @@ export const AWS_ACCOUNT_ID = Config.String("AWS_ACCOUNT_ID");
 export const AWS_ACCESS_KEY_ID = Config.String("AWS_ACCESS_KEY_ID");
 export const AWS_SECRET_ACCESS_KEY = Config.Redacted("AWS_SECRET_ACCESS_KEY");
 export const AWS_SESSION_TOKEN = Config.Redacted("AWS_SESSION_TOKEN");
+
+/**
+ * The global endpoint override (`AWS_ENDPOINT_URL`) visible to application
+ * code at runtime, or `undefined` when unset.
+ */
+export const AWS_ENDPOINT_URL = Config.String("AWS_ENDPOINT_URL").pipe(
+  Config.option,
+  Config.map(Option.getOrUndefined),
+);
+
+/**
+ * Runtime environment variable carrying per-service endpoints as a JSON
+ * object keyed by SDK service ID (see `Endpoint.ServiceEndpoints`). The
+ * local Lambda provider sets it from `providers({ local: { lambda } })`.
+ */
+export const AWS_SERVICE_ENDPOINTS_ENV_VAR = "ALCHEMY_AWS_SERVICE_ENDPOINTS";
+
+const ServiceEndpointsJson = Schema.fromJsonString(
+  Schema.Record(
+    Schema.String.check(Schema.isMinLength(1)),
+    Schema.String.check(Schema.isMinLength(1)),
+  ),
+);
+
+/**
+ * Per-service endpoints visible to application code at runtime (decoded
+ * from {@link AWS_SERVICE_ENDPOINTS_ENV_VAR}), or `undefined` when unset.
+ * Fails with a `ConfigError` when the variable is not a JSON object of
+ * non-empty endpoint strings.
+ */
+export const AWS_SERVICE_ENDPOINTS = Config.schema(
+  ServiceEndpointsJson,
+  AWS_SERVICE_ENDPOINTS_ENV_VAR,
+).pipe(Config.option, Config.map(Option.getOrUndefined));
 
 export type AccountID = string;
 export type RegionID = string;
@@ -49,6 +84,11 @@ export interface AWSEnvironmentShape {
   credentials: Effect.Effect<ResolvedCredentials, CredentialsError>;
   endpoint?: string;
   profile?: string;
+  /**
+   * Set by the local emulator context (see `AWS/Local/FlociServices.ts`),
+   * whatever account the emulator was given.
+   */
+  emulator?: boolean;
 }
 
 export class AWSEnvironment extends Context.Service<
@@ -57,14 +97,14 @@ export class AWSEnvironment extends Context.Service<
 >()("AWS::Environment") {
   static current = AWSEnvironment.use((env) => env);
   /**
-   * Whether this environment is the floci emulator
-   * (dummy account {@link LOCAL_ACCOUNT_ID}). A set `endpoint` is not
-   * enough: `AWS_ENDPOINT_URL` and explicit endpoint overrides also
-   * populate it on real-account credentials.
+   * Whether this environment is the floci emulator: marked by the local
+   * emulator context, or on the dummy account {@link LOCAL_ACCOUNT_ID}. A
+   * set `endpoint` is not enough: explicit endpoint overrides also populate
+   * it on real-account credentials.
    */
   static isLocalEmulator = Effect.map(
     AWSEnvironment.current,
-    (env) => env.accountId === LOCAL_ACCOUNT_ID,
+    (env) => env.emulator === true || env.accountId === LOCAL_ACCOUNT_ID,
   );
   readonly kind = "Environment" as const;
 }

@@ -2,6 +2,8 @@ import { stripVTControlCharacters } from "node:util";
 import * as ConsoleService from "effect/Console";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { FQN_SEPARATOR } from "../FQN.ts";
 import { makeDevLogOpener } from "../Local/DevLog.ts";
@@ -12,10 +14,28 @@ import { Resource } from "../Resource.ts";
 import { Stage } from "../Stage.ts";
 import { moduleExtension } from "../Util/Node.ts";
 import { makeResourceOutput } from "../Util/ResourceOutput.ts";
-import { CommandExecutor, UnexpectedExit, makeCommandError, type CommandProps } from "./Command.ts";
+import {
+  CommandExecutor,
+  UnexpectedExit,
+  makeCommandError,
+  type CommandProps,
+  type CommandRunProps,
+} from "./Command.ts";
+import { guardDevProcessGroup } from "./DevGuardian.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
 
-export interface DevProps extends CommandProps {}
+export interface DevProps extends CommandProps {
+  /**
+   * A finite command that releases external state the dev process owns (a
+   * proxy route, a registered alias). It runs after the process is stopped on
+   * restart and delete, and again from the persisted props on delete, so a
+   * sidecar that died before its finalizers ran still gets cleaned up.
+   *
+   * Must be idempotent and succeed when the state is already gone: it can
+   * run more than once for one process.
+   */
+  cleanup?: CommandRunProps;
+}
 
 export interface Dev extends Resource<
   "Command.Dev",
@@ -109,7 +129,8 @@ export const DevProviderLocal = () =>
     Dev,
     import.meta.resolve(`./Local${moduleExtension(import.meta.url)}`, import.meta.url),
     Effect.gen(function* () {
-      const { spawn } = yield* CommandExecutor;
+      const { run, spawn } = yield* CommandExecutor;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const stage = yield* Stage;
       const openDevLog = yield* makeDevLogOpener;
       const baseConsole = yield* ConsoleService.Console;
@@ -118,8 +139,20 @@ export const DevProviderLocal = () =>
         // The dev process is spawned into the instance scope the helper
         // provides: it keeps running after `start` returns (readiness) and
         // is killed when the helper closes the scope on restart/delete.
-        start: Effect.fn(function* ({ fqn, news: props, invalidate }) {
+        start: Effect.fn(function* ({ fqn, news: props, invalidate, session }) {
+          // Finalizers run in reverse: registered before the spawn, cleanup
+          // runs once the process group is stopped, and the guardian (below)
+          // is retired only after that stop completes.
+          if (props.cleanup !== undefined) {
+            const cleanup = props.cleanup;
+            yield* Effect.addFinalizer(() => run(cleanup, session).pipe(Effect.ignore));
+          }
+          const guardianScope = yield* Scope.fork(yield* Effect.scope, "sequential");
           const child = yield* spawn(props);
+          yield* guardDevProcessGroup(child.pid).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Scope.provide(guardianScope),
+          );
           const redactor = makeCommandRedactor(props.env);
           // One log file per process generation, closed with the instance
           // scope: log/{stage}/{fqn…}/{timestamp}.log (namespaces nest as dirs). Terminal lines
@@ -207,6 +240,13 @@ export const DevProviderLocal = () =>
           );
 
           return { url };
+        }),
+        // A sidecar that was killed never ran the instance finalizers. Delete
+        // replays the cleanup from the persisted props.
+        stop: Effect.fn(function* ({ olds, session }) {
+          if (olds?.cleanup !== undefined) {
+            yield* run(olds.cleanup, session);
+          }
         }),
       } satisfies LocalProvider.LocalProviderSpec<Dev>;
     }),

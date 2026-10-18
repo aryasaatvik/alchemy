@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 import { resolveStackEntrypoint } from "../Alchemist/Entrypoint.ts";
 import * as Stacks from "../Alchemist/routes/stack.ts";
 import { StackModuleLoader } from "../Alchemist/Session.ts";
-import { AlchemyContextLive } from "../AlchemyContext.ts";
+import { AlchemyContextLive, withDataDir } from "../AlchemyContext.ts";
 import { ArtifactStore, createArtifactStore } from "../Artifacts.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileStoreLive } from "../Auth/Profile.ts";
@@ -261,7 +261,7 @@ const makeExec = () => {
       : process.versions.bun !== undefined
         ? runBunDevWatcher(options)
         : runNodeDevWatcher(options);
-  }).pipe(Effect.provide(services), Effect.scoped, handleCliErrors);
+  }).pipe(withDataDir(options.dataDir), Effect.provide(services), Effect.scoped, handleCliErrors);
 };
 
 /** Fully wired sidecar CLI program. */

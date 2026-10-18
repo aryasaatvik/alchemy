@@ -103,7 +103,10 @@
     "./State": "./src/State/index.ts",
     "./Util": "./src/Util/index.ts",
     "./bin/alchemy.js": "./bin/alchemy.js",
-    "./bin/exec.js": "./bin/exec.js"
+    "./bin/exec.js": "./bin/exec.js",
+    "./Cloudflare/CloudflareEnvironment": "./src/Cloudflare/CloudflareEnvironment.ts",
+    "./Cloudflare/CloudflareEnvironmentService": "./src/Cloudflare/CloudflareEnvironmentService.ts",
+    "./Cloudflare/VitePlugin": "./src/Cloudflare/VitePlugin/index.ts"
   },
   "publishConfig": {
     "exports": {
@@ -417,7 +420,22 @@
         "default": "./lib/Util/index.js"
       },
       "./bin/alchemy.js": "./bin/alchemy.js",
-      "./bin/exec.js": "./bin/exec.js"
+      "./bin/exec.js": "./bin/exec.js",
+      "./Cloudflare/CloudflareEnvironment": {
+        "types": "./lib/Cloudflare/CloudflareEnvironment.d.ts",
+        "bun": "./src/Cloudflare/CloudflareEnvironment.ts",
+        "default": "./lib/Cloudflare/CloudflareEnvironment.js"
+      },
+      "./Cloudflare/CloudflareEnvironmentService": {
+        "types": "./lib/Cloudflare/CloudflareEnvironmentService.d.ts",
+        "bun": "./src/Cloudflare/CloudflareEnvironmentService.ts",
+        "default": "./lib/Cloudflare/CloudflareEnvironmentService.js"
+      },
+      "./Cloudflare/VitePlugin": {
+        "types": "./lib/Cloudflare/VitePlugin/index.d.ts",
+        "bun": "./src/Cloudflare/VitePlugin/index.ts",
+        "default": "./lib/Cloudflare/VitePlugin/index.js"
+      }
     },
     "access": "public"
   },

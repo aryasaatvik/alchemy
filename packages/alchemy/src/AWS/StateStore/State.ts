@@ -119,6 +119,41 @@ export interface S3StateOptions {
 /** Context required by the distilled S3 operations. */
 type S3Deps = Credentials | HttpClient | Region;
 
+const s3StateLayer = (options: S3StateOptions) =>
+  Layer.effect(
+    State,
+    Effect.gen(function* () {
+      const scope = yield* Effect.scope;
+      const context = yield* Effect.context<S3Deps | AWSEnvironment>();
+
+      // The lease belongs to the layer, even when its first operation runs in a shorter scope.
+      const make = Scope.provide(makeS3State(options), scope).pipe(
+        recordStateStoreInit,
+        Effect.orDie,
+        Effect.provideContext(context),
+      );
+
+      return yield* Effect.cached(make);
+    }),
+  ).pipe(
+    Layer.provideMerge(Layer.fresh(AwsRegion.fromEnvironment)),
+    Layer.provideMerge(Layer.fresh(AwsCredentials.fromEnvironment)),
+    Layer.provideMerge(Layer.fresh(Endpoint.fromEnvironment)),
+    Layer.provideMerge(providedOrDefault()),
+    Layer.provideMerge(AwsAuth),
+    Layer.provideMerge(CredentialsStoreLive),
+    Layer.orDie,
+  );
+
+/**
+ * Services the S3 state layer needs from the stack. The layer's output is
+ * narrowed to {@link State}: the AWS auth, credential, and region services it
+ * builds internally are implementation details, and leaking them into the
+ * output type made the layer's type unnameable from consumer declaration
+ * files (TS2742) and incompatible with a stage-selected `Layer.unwrap`.
+ */
+export type S3StateRequirements = Layer.Services<ReturnType<typeof s3StateLayer>>;
+
 /**
  * Run with Debug and Trace records switched off.
  *
@@ -236,35 +271,9 @@ const withoutSdkDebugLogs = Effect.updateService(References.MinimumLogLevel, (le
  *
  * @resource
  */
-export const state = (options: S3StateOptions = {}) =>
-  Layer.effect(
-    State,
-    Effect.gen(function* () {
-      const scope = yield* Effect.scope;
-      const context = yield* Effect.context<S3Deps | AWSEnvironment>();
-
-      // Bind the lease to this layer's scope. The cached effect runs on
-      // the first state operation, which may sit in a shorter scope.
-      const make = Scope.provide(makeS3State(options), scope).pipe(
-        recordStateStoreInit,
-        Effect.orDie,
-        Effect.provideContext(context),
-      );
-
-      return yield* Effect.cached(make);
-    }),
-  ).pipe(
-    // Fresh per call: these derive from the environment below, and shared
-    // (memoized) instances built for another environment in the same run
-    // would shadow an `AWSEnvironment` provided to this layer.
-    Layer.provideMerge(Layer.fresh(AwsRegion.fromEnvironment)),
-    Layer.provideMerge(Layer.fresh(AwsCredentials.fromEnvironment)),
-    Layer.provideMerge(Layer.fresh(Endpoint.fromEnvironment)),
-    Layer.provideMerge(providedOrDefault()),
-    Layer.provideMerge(AwsAuth),
-    Layer.provideMerge(CredentialsStoreLive),
-    Layer.orDie,
-  );
+export const state = (
+  options: S3StateOptions = {},
+): Layer.Layer<State, never, S3StateRequirements> => s3StateLayer(options);
 
 /**
  * Construct an S3-backed {@link StateService}.

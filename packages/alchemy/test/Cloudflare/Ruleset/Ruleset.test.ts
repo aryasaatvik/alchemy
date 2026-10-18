@@ -12,6 +12,7 @@ import * as Provider from "@/Provider";
 import * as RemovalPolicy from "@/RemovalPolicy";
 import { isResourceState, State, type ResourceState } from "@/State";
 import * as Test from "@/Test/Alchemy";
+import { StandingZone, StandingZoneName } from "../StandingZone.ts";
 const { test } = Test.make({ providers: Cloudflare.providers() });
 
 // Cloudflare intermittently blocks *all* zone creation on an account with
@@ -49,7 +50,7 @@ const softSkipWhenZoneCreationBlocked = <A, E, R>(
 
 const logLevel = Effect.provideService(MinimumLogLevel, process.env.DEBUG ? "Debug" : "Info");
 
-const zoneName = process.env.CLOUDFLARE_TEST_RULESET_ZONE_NAME ?? "alchemy-test-2.us";
+const zoneName = process.env.CLOUDFLARE_TEST_RULESET_ZONE_NAME ?? StandingZoneName;
 // The unresolved-zone test owns a phase entrypoint on a *separate* zone so it
 // never clobbers the CRUD test's rules.
 const unresolvedZoneName =
@@ -77,9 +78,7 @@ describe.sequential(
 
         const initial = yield* stack.deploy(
           Effect.gen(function* () {
-            const zone = yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(
-              AdoptPolicy.adopt(true),
-            );
+            const zone = yield* StandingZone("TestZone", zoneName);
             return yield* Cloudflare.Ruleset.Ruleset("TestRuleset", {
               zone,
               phase,
@@ -109,9 +108,7 @@ describe.sequential(
 
         const updated = yield* stack.deploy(
           Effect.gen(function* () {
-            const zone = yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(
-              AdoptPolicy.adopt(true),
-            );
+            const zone = yield* StandingZone("TestZone", zoneName);
             return yield* Cloudflare.Ruleset.Ruleset("TestRuleset", {
               zone,
               phase,
@@ -152,9 +149,7 @@ describe.sequential(
 
         const deployed = yield* stack.deploy(
           Effect.gen(function* () {
-            const zone = yield* Cloudflare.Zone.Zone("TestZone", {
-              name: zoneName,
-            }).pipe(AdoptPolicy.adopt(true));
+            const zone = yield* StandingZone("TestZone", zoneName);
             return yield* Cloudflare.Ruleset.Ruleset("OwnedRules", {
               zone,
               phase,
@@ -297,9 +292,7 @@ describe.sequential(
           const deployRuleset = () =>
             stack.deploy(
               Effect.gen(function* () {
-                const zone = yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(
-                  AdoptPolicy.adopt(true),
-                );
+                const zone = yield* StandingZone("TestZone", zoneName);
                 return yield* Cloudflare.Ruleset.Ruleset("WedgedRuleset", {
                   zone,
                   phase,
@@ -375,9 +368,7 @@ describe.sequential(
 
         const deployed = yield* stack.deploy(
           Effect.gen(function* () {
-            const zone = yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(
-              AdoptPolicy.adopt(true),
-            );
+            const zone = yield* StandingZone("TestZone", zoneName);
             return yield* Cloudflare.Ruleset.Ruleset("TestRuleset", {
               zone,
               phase,

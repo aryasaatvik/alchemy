@@ -10,6 +10,7 @@ import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
 import * as Provider from "@/Provider";
 import * as State from "@/State/State";
 import * as Test from "@/Test/Alchemy";
+import { StandingZone, StandingZoneName } from "../StandingZone.ts";
 
 const { test } = Test.make({ providers: Cloudflare.providers() });
 
@@ -21,7 +22,7 @@ const logLevel = Effect.provideService(MinimumLogLevel, process.env.DEBUG ? "Deb
 // nameserver delegation), so we adopt the shared pre-existing active zone.
 // It must stay on the default `retain` removal policy: it's registered via
 // Cloudflare Registrar, and the API refuses to delete registrar zones.
-const zoneName = process.env.CLOUDFLARE_TEST_ACCESS_ZONE_NAME ?? "alchemy-test-2.us";
+const zoneName = process.env.CLOUDFLARE_TEST_ACCESS_ZONE_NAME ?? StandingZoneName;
 
 // Hostname-safe per-stage suffix, so concurrent runs by different users
 // never fight over one application domain.
@@ -38,7 +39,7 @@ test.provider(
       const domain = `alchemy-test-app.${zoneName}`;
       const { app, policy } = yield* stack.deploy(
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           const policy = yield* Cloudflare.Access.Policy("AllowExampleDomain", {
             name: "Allow example.com",
             decision: "allow",
@@ -169,7 +170,7 @@ test.provider(
       const domain = `alchemy-test-list-app.${zoneName}`;
       const app = yield* stack.deploy(
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           const policy = yield* Cloudflare.Access.Policy("ListAllowDomain", {
             name: "Allow example.com",
             decision: "allow",
@@ -228,7 +229,7 @@ test.provider(
 
       const initial = yield* stack.deploy(
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           const allow = yield* Cloudflare.Access.Policy("UpdateAllow", {
             name: "Allow example.com",
             decision: "allow",
@@ -253,7 +254,7 @@ test.provider(
 
       const updated = yield* stack.deploy(
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           const allow = yield* Cloudflare.Access.Policy("UpdateAllow", {
             name: "Allow example.com",
             decision: "allow",
@@ -334,7 +335,7 @@ test.provider(
 
       const domain = `alchemy-test-cold-read.${zoneName}`;
       const program = Effect.gen(function* () {
-        yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+        yield* StandingZone("TestZone", zoneName);
         const policy = yield* Cloudflare.Access.Policy("ColdReadAllow", {
           name: "Allow example.com (cold read)",
           decision: "allow",
@@ -408,7 +409,7 @@ test.provider(
       const domain = `alchemy-test-inline-policies.${zoneName}`;
       const makeApp = (policies: Cloudflare.Access.ApplicationProps["policies"]) =>
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           return yield* Cloudflare.Access.Application("InlinePolicyApp", {
             type: "self_hosted",
             domain,
@@ -466,7 +467,7 @@ test.provider(
       // v3 — switch the application from inline to a reusable Policy
       // resource (passed directly).
       const reusableProgram = Effect.gen(function* () {
-        yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+        yield* StandingZone("TestZone", zoneName);
         const reusable = yield* Cloudflare.Access.Policy("InlineSwapPolicy", {
           name: "Reusable for inline-swap test",
           decision: "allow",
@@ -536,7 +537,7 @@ test.provider(
 
       const program = (applicationId: string, sessionDuration: string) =>
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           return yield* Cloudflare.Access.Application("AdoptById", {
             applicationId,
             type: "self_hosted",
@@ -637,9 +638,7 @@ test.provider(
         // undeclared policy link and hostnames.
         const adopted = yield* stack.deploy(
           Effect.gen(function* () {
-            yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(
-              AdoptPolicy.adopt(true),
-            );
+            yield* StandingZone("TestZone", zoneName);
             return yield* Cloudflare.Access.Application("AdoptKeepsLinks", {
               applicationId: existing.id!,
               type: "self_hosted",
@@ -679,7 +678,7 @@ test.provider(
 
       const program = (props: Partial<Cloudflare.Access.ApplicationProps>) =>
         Effect.gen(function* () {
-          yield* Cloudflare.Zone.Zone("TestZone", { name: zoneName }).pipe(AdoptPolicy.adopt(true));
+          yield* StandingZone("TestZone", zoneName);
           const cors = yield* Cloudflare.Access.Application("CorsApp", {
             type: "self_hosted",
             domain: `alchemy-test-cors-${stageLabel(stack.stage)}.${zoneName}`,

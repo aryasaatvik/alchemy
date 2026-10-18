@@ -75,6 +75,7 @@ import { isPythonMain, watchPythonWorkerBundle } from "./Sources/Python.ts";
 import { WorkerBundle, type WorkerBundleOptions } from "./Sources/Rolldown.ts";
 import { DEFAULT_DEV_PORT, type ViteChildConfig } from "./ViteChild.shared.ts";
 import { startViteChild } from "./ViteChild.ts";
+import { resolveViteMain } from "./ViteMain.ts";
 import { isSelfUrl, Worker } from "./Worker.ts";
 import { getCronBindings } from "./WorkerAsyncBindings.ts";
 import type { WorkerBinding } from "./WorkerBinding.ts";
@@ -520,11 +521,10 @@ export const LocalWorkerProvider = () =>
           rules: props.rules,
           devRemote,
           vite: !!props.vite,
-          // Relative `vite.main` resolves from the Vite root (see the
-          // matching normalization in WorkerProvider's `viteBuild`).
-          viteMain: props.vite?.main
-            ? path.resolve(props.vite.rootDir ?? process.cwd(), props.vite.main)
-            : undefined,
+          // A `./`/`../` `vite.main` resolves from the Vite root; module
+          // ids pass through (see the matching normalization in
+          // WorkerProvider's `viteBuild`).
+          viteMain: resolveViteMain(path, props.vite?.rootDir ?? process.cwd(), props.vite?.main),
           viteEnvironments: props.vite?.viteEnvironments,
           viteRootDir: props.vite?.rootDir,
           bundleOptions: {

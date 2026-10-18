@@ -3,17 +3,10 @@ import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as ACME from "@/ACME";
-import * as AdoptPolicy from "@/AdoptPolicy";
-import * as Cloudflare from "@/Cloudflare";
 import * as Output from "@/Output";
-import { retain } from "@/RemovalPolicy";
+import { StandingZoneResource } from "../../Cloudflare/StandingZone.ts";
 
-export const ZONE_NAME = "alchemy-test-2.us";
-
-/** The standing test zone, adopted (never deleted on destroy). */
-export const Zone = Cloudflare.Zone.Zone("AcmeZone", {
-  name: ZONE_NAME,
-}).pipe(AdoptPolicy.adopt(), retain());
+export const Zone = StandingZoneResource("AcmeZone");
 
 export const Staging = ACME.Account("Staging", {
   ca: ACME.LetsEncryptStaging,

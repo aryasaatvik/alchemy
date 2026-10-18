@@ -4,6 +4,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Layer from "effect/Layer";
 import * as AWS from "@/AWS/index.ts";
+import { makeFunctionHttpHandler } from "@/AWS/Lambda/HttpServer.ts";
 
 /**
  * A service whose Layer performs real async I/O during the sandbox's init
@@ -45,17 +46,22 @@ export default class InitIOProbe extends AWS.Lambda.Function<InitIOProbe>()(
     functionUrl: true,
   },
   Effect.gen(function* () {
-    const config = yield* TraceConfig;
-
-    return {
-      fetch: Effect.gen(function* () {
-        return yield* HttpServerResponse.json({
-          nonce: config.nonce,
-          traceLength: config.trace.length,
-          hasUag: config.trace.includes("uag="),
-          initFetches: (globalThis as any).__initFetches ?? 0,
-        });
+    const host = yield* AWS.Lambda.Function;
+    yield* host.listen(
+      Effect.gen(function* () {
+        const services = yield* Layer.build(TraceConfigLive);
+        return makeFunctionHttpHandler(
+          Effect.gen(function* () {
+            const config = yield* TraceConfig;
+            return yield* HttpServerResponse.json({
+              nonce: config.nonce,
+              traceLength: config.trace.length,
+              hasUag: config.trace.includes("uag="),
+              initFetches: (globalThis as any).__initFetches ?? 0,
+            }).pipe(Effect.orDie);
+          }).pipe(Effect.provide(services)),
+        );
       }),
-    };
-  }).pipe(Effect.provide(TraceConfigLive)),
+    );
+  }),
 ) {}
