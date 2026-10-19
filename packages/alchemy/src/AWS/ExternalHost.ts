@@ -6,6 +6,8 @@ import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import { Region, type RegionName } from "@distilled.cloud/aws/Region";
 import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -140,7 +142,16 @@ export const externalServices = (access: ExternalAwsAccess, region: Effect.Effec
     Layer.succeed(Credentials, access.credentials),
     Layer.succeed(Region, region as Effect.Effect<RegionName>),
     Endpoint.fromEnv(),
-    FetchHttpClient.layer,
+    // Fetch's layer captures its construction context, including Scope. Build
+    // it per request so a bound client never retains a closed init scope.
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.makeWith(
+        (request: Effect.Effect<HttpClientRequest.HttpClientRequest>) =>
+          Effect.flatMap(request, HttpClient.execute).pipe(Effect.provide(FetchHttpClient.layer)),
+        Effect.succeed,
+      ),
+    ),
   );
 
 /**

@@ -1,9 +1,39 @@
+import { Credentials } from "@distilled.cloud/aws/Credentials";
+import { Endpoint, ServiceEndpoint } from "@distilled.cloud/aws/Endpoint";
+import { Region } from "@distilled.cloud/aws/Region";
+import { Retry } from "@distilled.cloud/aws/Retry";
+import { SigningKeyCache } from "@distilled.cloud/aws/SigV4";
+import { ResponseValidation } from "@distilled.cloud/core/response-validation";
+import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
+import { ConfigProvider } from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import { Fetch, RequestInit } from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Binding from "../Binding.ts";
 import type { Input } from "../Input.ts";
 import { externalAwsAccess, externalHost, externalServices } from "./ExternalHost.ts";
 import type { PolicyStatement } from "./IAM/Policy.ts";
 import { isNativeHost, type NativeHost } from "./NativeHost.ts";
+
+// Distilled operations snapshot their acquisition context. Retain the AWS
+// protocol's authority and policies, never the host's initialization scope or
+// resource context. ConfigProvider is needed by lazy credentials/region/endpoint
+// effects; Fetch and RequestInit configure the default external-host transport.
+const operationContext = Context.pick(
+  Credentials,
+  Region,
+  HttpClient.HttpClient,
+  Endpoint,
+  ServiceEndpoint,
+  Retry,
+  SigningKeyCache,
+  ResponseValidation,
+  ServerRetryHintCapMs,
+  ConfigProvider,
+  Fetch,
+  RequestInit,
+);
 
 /**
  * How a binding's host reaches AWS:
@@ -39,7 +69,7 @@ import { isNativeHost, type NativeHost } from "./NativeHost.ts";
 
 /**
  * Resolve a distilled operation (or several, with `Effect.all`) with the
- * host's AWS credentials: as-is on a native host and for the deployer, with
+ * host's AWS credentials: ambient on a native host and for the deployer, with
  * the minted role's assumed credentials on an external host.
  *
  * A bundle built for an AWS host folds `__ALCHEMY_NATIVE_HOST__` to `"AWS"`,
@@ -54,21 +84,25 @@ import { isNativeHost, type NativeHost } from "./NativeHost.ts";
 export const withCredentials = <Op>(
   operation: Effect.Effect<Op, never, any>,
   region?: Effect.Effect<Effect.Effect<string>, never, any>,
-): Effect.Effect<Op> =>
+): Effect.Effect<Op> => {
+  // oxlint-disable-next-line effecttsgo/unnecessary-effect-gen -- Distilled operations implement the yield protocol, not Effect runtime evaluation
+  const resolve = Effect.gen(function* () {
+    return yield* operation as Effect.Effect<Op>;
+  }).pipe(Effect.updateContext((context: Context.Context<never>) => operationContext(context)));
   // The operation's requirements are the host's: ambient on a native host
   // (and for the deployer, with no host), provided here otherwise.
-  globalThis.__ALCHEMY_NATIVE_HOST__ === "AWS"
-    ? (operation as Effect.Effect<Op>)
+  return globalThis.__ALCHEMY_NATIVE_HOST__ === "AWS"
+    ? resolve
     : Effect.gen(function* () {
         const host = yield* Binding.Host;
         if (host === undefined || isNativeHost(host)) {
-          return yield* operation as Effect.Effect<Op>;
+          return yield* resolve;
         }
         // oxlint-disable-next-line effecttsgo/unsafe-effect-type-assertion -- only reached with a host, whose init provides RuntimeContext
         const access = yield* externalAwsAccess(host) as Effect.Effect<
           Effect.Success<ReturnType<typeof externalAwsAccess>>
         >;
-        return yield* (operation as Effect.Effect<Op>).pipe(
+        return yield* resolve.pipe(
           Effect.provide(
             externalServices(
               access,
@@ -77,6 +111,7 @@ export const withCredentials = <Op>(
           ),
         );
       });
+};
 
 /** The VPC a native host must attach to, e.g. to reach a VPC-only database. */
 export interface HostVpc {
