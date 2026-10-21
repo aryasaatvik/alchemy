@@ -16,13 +16,15 @@ installation, and application-validation boundary.
   checkout of `samva/integration`.
 - Focused Alchemy changes use their own branches and `wt` worktrees. A Samva delivery worktree does
   not patch Alchemy independently.
-- `~/Developer/distilled-worktrees/` holds independent authoring worktrees from Alchemy's
-  embedded Distilled repository. Every Alchemy worktree keeps its own `submodules/distilled/`
-  submodule checked out at the immutable gitlink recorded by that parent. The distribution's
+- `~/Developer/distilled-worktrees/` is a conventional location for independent authoring worktrees
+  from Alchemy's embedded Distilled repository. Discover the actual paths with `git worktree list`
+  in that repository; native `wt` can select a nested location. Every Alchemy worktree keeps its own
+  `submodules/distilled/` submodule checked out at the immutable gitlink recorded by that parent. The distribution's
   `.gitmodules` selects the Samva fork so retained integration commits are fetchable.
-- Reconstruction branches are review inputs. Promote the selected candidate to `samva/integration`
-  before packing a consumer artifact; preserved candidate refs are recovery history, not parallel
-  maintained distributions.
+- Reconstruction branches produce candidate-only verification and co-development archives for
+  fresh-consumer checks and local Samva acceptance before promotion. Portable maintained
+  distribution checkpoints come from `samva/integration` after promotion; preserved candidate refs
+  are recovery history, not parallel maintained distributions.
 - Samva consumes the exact core and extracted provider artifacts through its root catalog, with
   overrides selecting the same local dependency closure. It does not link the Alchemy workspace or carry Distilled source.
 
@@ -50,8 +52,11 @@ Use the integration line as a proving and distribution lane:
 5. Compare the candidate with both current upstream and the preserved integration tree using
    merge-base-aware diffs and `git range-diff`, then run the owning focused suites and workspace
    typecheck.
-6. Promote only after review, using an exact `--force-with-lease` against the previously observed
-   fork head. Promotion does not authorize packaging or a consumer repin.
+6. Pack candidate verification archives and complete fresh-consumer checks and local Samva
+   acceptance against their exact bytes before promotion.
+7. Promote only after review and acceptance, using an exact `--force-with-lease` against the
+   previously observed fork head. Promotion does not authorize checkpoint publication or a consumer
+   repin.
 
 Do not conventionally rebase the only validated integration branch when its history contains
 upstreamed work, integration-only packaging, dependency pins, and intermediate fixes. Construct and
@@ -139,7 +144,8 @@ do not expect to recreate it bit-for-bit from a clean cache.
 
 ## Publish a portable checkpoint
 
-A portable checkpoint is an explicit publication step and requires a clean integration worktree:
+A portable checkpoint is an explicit publication step after candidate review, local acceptance and
+promotion. It requires a clean maintained `samva/integration` worktree:
 
 ```bash
 pnpm run checkpoint:integration -- --dry-run

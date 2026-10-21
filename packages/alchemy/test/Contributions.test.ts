@@ -52,6 +52,7 @@ const project = (
         JSON.stringify({ name, type: "module", ...dependency.manifest }),
       );
       for (const [file, contents] of Object.entries(dependency.files ?? {})) {
+        yield* fs.makeDirectory(path.dirname(path.join(directory, file)), { recursive: true });
         yield* fs.writeFileString(path.join(directory, file), contents);
       }
     }
@@ -202,6 +203,88 @@ export default { name: ${JSON.stringify(name)}, devEnv: Effect.succeed(Effect.su
         expect(names).not.toContain("dual-cjs");
       }).pipe(Effect.scoped),
     );
+
+    for (const { name, exports, subpath, selected } of [
+      {
+        name: "prefers the longest wildcard prefix over a broad-first pattern",
+        exports: { "./*": "./lib/*.js", "./plugins/*": "./plugins/*.js" },
+        subpath: "plugins/Contributions",
+        selected: "specific",
+      },
+      {
+        name: "prefers the longest suffix when wildcard prefixes are equal",
+        exports: { "./plugins/*": "./broad.js", "./plugins/*tions": "./specific.js" },
+        subpath: "plugins/Contributions",
+        selected: "specific",
+      },
+      {
+        name: "prefers a longer prefix even when another pattern has a longer suffix",
+        exports: { "./*Contributions": "./broad.js", "./plugins/*": "./specific.js" },
+        subpath: "plugins/Contributions",
+        selected: "specific",
+      },
+      {
+        name: "prefers an exact export over wildcard patterns",
+        exports: { "./plugins/*": "./broad.js", "./plugins/Contributions": "./specific.js" },
+        subpath: "plugins/Contributions",
+        selected: "specific",
+      },
+      {
+        name: "keeps condition insertion order within the winning pattern",
+        exports: {
+          "./*": "./broad.js",
+          "./plugins/*": { default: "./specific.js", import: "./broad.js" },
+        },
+        subpath: "plugins/Contributions",
+        selected: "specific",
+      },
+      {
+        name: "does not fall back from a blocked winning pattern",
+        exports: { "./*": "./broad.js", "./plugins/*": null },
+        subpath: "plugins/Contributions",
+        selected: undefined,
+      },
+      {
+        name: "does not fall back from a blocked exact export",
+        exports: { "./plugins/*": "./broad.js", "./plugins/Contributions": null },
+        subpath: "plugins/Contributions",
+        selected: undefined,
+      },
+      {
+        name: "does not overlap a pattern prefix and suffix",
+        exports: { "./plugins/*plugins/Contributions": "./broad.js" },
+        subpath: "plugins/Contributions",
+        selected: undefined,
+      },
+      {
+        name: "requires a nonempty wildcard match",
+        exports: { "./plugins/*Contributions": "./broad.js" },
+        subpath: "plugins/Contributions",
+        selected: undefined,
+      },
+    ]) {
+      it.effect(name, () =>
+        Effect.gen(function* () {
+          const root = yield* project({
+            "pattern-provider": {
+              manifest: {
+                exports,
+                alchemy: { contributes: [`pattern-provider/${subpath}`] },
+              },
+              files: {
+                "lib/plugins/Contributions.js": `export default { name: "broad" };`,
+                "plugins/Contributions.js": `export default { name: "specific" };`,
+                "broad.js": `export default { name: "broad" };`,
+                "specific.js": `export default { name: "specific" };`,
+              },
+            },
+          });
+          const names = (yield* Contributions.load(root)).map((provider) => provider.name);
+          expect(names).not.toContain("broad");
+          expect(names.includes("specific")).toBe(selected === "specific");
+        }).pipe(Effect.scoped),
+      );
+    }
 
     it.effect("discovers a provider declared by an ancestor package.json", () =>
       Effect.gen(function* () {
