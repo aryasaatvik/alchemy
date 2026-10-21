@@ -99,3 +99,6 @@ examples/cloudflare-worker/src/scratch.ts
 
 # pkg pack output (CI artifact hand-off)
 .pkg
+
+# Local integration archives and their build cache.
+/artifacts/

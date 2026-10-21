@@ -197,18 +197,21 @@ export const verifyPackageArchive = async (archive: string): Promise<void> => {
   if (metadata?.contributes !== undefined)
     assertConsumerSubpaths(entries, manifest, metadata.contributes);
   if (manifest.name?.startsWith("@distilled.cloud/")) {
+    const fullServices = exportTargets(manifest.exports).some((target) =>
+      target.includes("/services.full/"),
+    );
     for (const entry of entries) {
       if (/^package\/src\/services\/[^/]+\.ts$/.test(entry) && !entry.endsWith(".test.ts")) {
         const service = entry.slice("package/src/services/".length, -3);
         for (const target of [
           `lib/services/${service}.d.ts`,
           `lib/services/${service}.js`,
-          `lib/services.full/${service}.js`,
+          ...(fullServices ? [`lib/services.full/${service}.js`] : []),
         ])
           if (!entries.has(`package/${target}`))
             throw new Error(`${manifest.name} is missing service publication ${target}`);
       }
-      if (!/^package\/lib\/services\/[^/]+\.js$/.test(entry)) continue;
+      if (!fullServices || !/^package\/lib\/services\/[^/]+\.js$/.test(entry)) continue;
       if (!entries.has(entry.replace("/services/", "/services.full/")))
         throw new Error(`${manifest.name} is missing the full-service publication for ${entry}`);
     }

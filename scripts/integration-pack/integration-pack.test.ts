@@ -30,6 +30,7 @@ import {
   consumerSubpaths,
   freshConsumerManifest,
   resolveExportSubpath,
+  verifyPackageArchive,
 } from "./verify.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
@@ -61,6 +62,57 @@ describe("fresh integration consumer", () => {
 });
 
 describe("extracted provider collection", () => {
+  test("checks declared full-service twins and referenced chunks without inventing twins for ACME", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "integration-sdk-archive-"));
+    try {
+      const pkg = join(directory, "package");
+      await mkdir(join(pkg, "lib/services"), { recursive: true });
+      await mkdir(join(pkg, "src/services"), { recursive: true });
+      await writeFile(join(pkg, "src/services/acme.ts"), "export const service = true;\n");
+      await writeFile(join(pkg, "lib/services/acme.d.ts"), "export declare const service: true;\n");
+      await writeFile(join(pkg, "lib/services/acme.js"), "export const service = true;\n");
+      const archive = join(directory, "sdk.tgz");
+      const pack = async (exports: unknown) => {
+        await writeFile(
+          join(pkg, "package.json"),
+          JSON.stringify({ name: "@distilled.cloud/acme", version: "1.0.0", exports }),
+        );
+        await run(["tar", "-czf", archive, "package"], { cwd: directory, quiet: true });
+      };
+      await pack({
+        "./*": {
+          types: "./lib/services/*.d.ts",
+          bun: "./src/services/*.ts",
+          default: "./lib/services/*.js",
+        },
+      });
+      await verifyPackageArchive(archive);
+      const full = {
+        "./*": {
+          types: "./lib/services/*.d.ts",
+          bun: "./src/services/*.ts",
+          module: "./lib/services.full/*.js",
+          default: "./lib/services/*.js",
+        },
+      };
+      await pack(full);
+      await expect(verifyPackageArchive(archive)).rejects.toThrow("missing packaged target");
+      await mkdir(join(pkg, "lib/services.full"));
+      await writeFile(
+        join(pkg, "lib/services.full/acme.js"),
+        'export { service } from "../_bundle/sdk.js";\n',
+      );
+      await pack(full);
+      await expect(verifyPackageArchive(archive)).rejects.toThrow("absent archive chunk");
+      await mkdir(join(pkg, "lib/_bundle"));
+      await writeFile(join(pkg, "lib/_bundle/sdk.js"), "export const service = true;\n");
+      await pack(full);
+      await verifyPackageArchive(archive);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("pins direct provider packages and every local override to the same artifacts", () => {
     const packages = [
       {
