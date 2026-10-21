@@ -1,4 +1,4 @@
-import { newWebSocketRpcSession } from "capnweb";
+import { newWebSocketRpcSession, type RpcPromise } from "capnweb";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
   ArtifactsRepositoryMetadataResult,
@@ -58,13 +58,13 @@ class ArtifactsRepositoryMethodsBridge
   #withMethods<A>(
     operation: (methods: ArtifactsRepositoryWireOperations) => Promise<A>,
   ): Promise<A> {
-    return withArtifactsSession(this.#open, async (stub) =>
-      operation(
-        (await callArtifacts(stub, "getMethods", [
-          this.#name,
-        ])) as ArtifactsRepositoryWireOperations,
-      ),
-    );
+    return withArtifactsSession(this.#open, async (stub) => {
+      // Keep the capability promise unresolved so its method shares the same RPC round trip.
+      using methods = callArtifacts(stub, "getMethods", [
+        this.#name,
+      ]) as RpcPromise<ArtifactsRepositoryWireOperations>;
+      return await operation(methods);
+    });
   }
 
   info() {
