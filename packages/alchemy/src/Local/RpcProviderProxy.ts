@@ -5,10 +5,12 @@ import * as Effect from "effect/Effect";
 import * as HttpBody from "effect/http/HttpBody";
 import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { AlchemyContext } from "../AlchemyContext.ts";
 import type { ProviderService } from "../Provider.ts";
 import type { ResourceLike } from "../Resource.ts";
 import { Stack } from "../Stack.ts";
+import { ProviderSessionConfig } from "./ProviderSessionConfig.ts";
 import { unwrapRpcHandlers } from "./RpcSerialization.ts";
 import type { RpcProxyApi, SessionProviderCounts } from "./RpcServer.ts";
 import { encodeSessionEnvironment, SESSION_ENV_PARAM } from "./RpcServerEnvironment.ts";
@@ -204,9 +206,17 @@ const make = Effect.fn(function* (spawnerUrl: string) {
       if (owner?.closed) return yield* Effect.die("Test sidecar handle is closed");
       const alchemyContext = yield* AlchemyContext;
       const stack = yield* Stack;
+      // Provider-group configuration (e.g. AWS's local emulator profile)
+      // rides the session so sidecar-built providers see what the stack
+      // configured. It is part of the session key: stacks configured
+      // differently never share a sidecar provider context.
+      const providers = yield* Effect.serviceOption(ProviderSessionConfig);
       const environment = encodeSessionEnvironment({
         alchemyContext,
         stack: { name: stack.name, stage: stack.stage },
+        ...(Option.isSome(providers) && Object.keys(providers.value).length > 0
+          ? { providers: providers.value }
+          : {}),
       });
       if (owner?.closed) return yield* Effect.die("Test sidecar handle is closed");
       const key = `${owner === undefined ? "dev" : "test"}:${environment}`;

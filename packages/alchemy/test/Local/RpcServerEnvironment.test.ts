@@ -3,8 +3,11 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { AlchemyContext } from "@/AlchemyContext.ts";
+import * as ProviderSessionConfig from "@/Local/ProviderSessionConfig.ts";
 import {
   fromEnv,
+  encodeSessionEnvironment,
+  decodeSessionEnvironment,
   layer,
   RPC_SERVER_ENVIRONMENT_KEY,
   type RpcServerEnvironment,
@@ -70,6 +73,41 @@ describe("Local.RpcServerEnvironment", { tags: ["unit", "local"] }, () => {
       );
       expect(stack.name).toBe(sessionEnv.stack.name);
       expect(stack.stage).toBe(sessionEnv.stack.stage);
+    }),
+  );
+
+  it.effect("preserves provider endpoint and profile options across the session boundary", () =>
+    Effect.gen(function* () {
+      const aws = {
+        profile: "local",
+        endpoint: "http://127.0.0.1:4566",
+        serviceEndpoints: { SESv2: "http://127.0.0.1:8800/ses" },
+      };
+      const encoded = encodeSessionEnvironment({ ...sessionEnv, providers: { AWS: aws } });
+      const configured = layer({
+        profile: "local",
+        envFile: undefined,
+        ...decodeSessionEnvironment(encoded),
+      });
+      const observed = yield* ProviderSessionConfig.get("AWS").pipe(
+        Effect.provide(Layer.provide(configured, PlatformServices)),
+      );
+      expect(observed).toEqual(aws);
+      expect(encodeSessionEnvironment(sessionEnv)).not.toBe(encoded);
+    }),
+  );
+
+  it.effect("merges provider namespaces without requiring unconfigured providers", () =>
+    Effect.gen(function* () {
+      expect(yield* ProviderSessionConfig.get("AWS")).toBeUndefined();
+      const configured = ProviderSessionConfig.layer("AWS", { profile: "local" }).pipe(
+        Layer.provide(ProviderSessionConfig.layer("Cloudflare", { accountId: "test-account" })),
+      );
+      const observed = yield* Effect.all([
+        ProviderSessionConfig.get("AWS"),
+        ProviderSessionConfig.get("Cloudflare"),
+      ]).pipe(Effect.provide(configured));
+      expect(observed).toEqual([{ profile: "local" }, { accountId: "test-account" }]);
     }),
   );
 

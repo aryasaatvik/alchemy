@@ -27,6 +27,8 @@ import { Stack, make as makeStack } from "@/Stack";
 import { Stage } from "@/Stage";
 import {
   type ActionState,
+  type CreatedResourceState,
+  type UpdatedResourceState,
   type CreatingResourceState,
   type ReplacedResourceState,
   type ReplacingResourceState,
@@ -36,6 +38,8 @@ import {
 } from "@/State";
 import * as Test from "@/Test/Alchemy";
 import {
+  AliasTarget,
+  VersionedTarget,
   AliasedWidget,
   aliasedWidgetDeletes,
   aliasedWidgetProvider,
@@ -1040,6 +1044,73 @@ describe("linear update propagation", { tags: ["unit", "local"] }, () => {
       // sequence as long as no stale value leaked through.
       expect(sawByB.length).toBeGreaterThan(0);
       expect(sawByB.every((v) => v === "v2")).toBe(true);
+    }),
+  );
+
+  // A resource that binds to itself sits in a size-1 SCC, so its update
+  // publishes the prior attr early for its own rendezvous. A dependent
+  // outside that SCC (e.g. a Lambda Version of a self-binding Function) must
+  // still wait for the upstream's reconcile: observing the early prior attr
+  // lets it act on the upstream before the update lands.
+  test.provider("downstream of a self-binding upstream waits for the upstream's update", (stack) =>
+    Effect.gen(function* () {
+      const program = (revision: string) =>
+        Effect.gen(function* () {
+          const A = yield* BindingTarget("A", { string: revision });
+          yield* A.bind("Self", { env: { SELF: A.name } });
+          const B = yield* TestResource("B", { string: A.string });
+          return { A, B };
+        });
+
+      yield* stack.deploy(program("v1"));
+
+      const events: string[] = [];
+      const recordHooks = {
+        create: () => Effect.succeed(undefined),
+        update: (id: string, props: TestResourceProps) =>
+          Effect.gen(function* () {
+            events.push(`${id}:start:${props.string}`);
+            // Give a racing dependent time to run before A finishes.
+            if (id === "A") yield* Effect.sleep("50 millis");
+            events.push(`${id}:end:${props.string}`);
+          }),
+        delete: () => Effect.succeed(undefined),
+        read: () => Effect.succeed(undefined),
+      };
+
+      const output = yield* program("v2").pipe(stack.deploy, hook(recordHooks));
+
+      expect(output.B.string).toEqual("v2");
+      expect(events).toEqual(["A:start:v2", "A:end:v2", "B:start:v2", "B:end:v2"]);
+    }),
+  );
+
+  test.provider("a cycle member waits for terminal output from a distinct SCC", (stack) =>
+    Effect.gen(function* () {
+      const program = (revision: string) =>
+        Effect.gen(function* () {
+          const A = yield* BindingTarget("A", { string: revision });
+          yield* A.bind("Self", { env: { SELF: A.name } });
+          const B = yield* BindingTarget("B", { string: A.string });
+          yield* B.bind("Self", { env: { SELF: B.name } });
+          return { A, B };
+        });
+      yield* stack.deploy(program("v1"));
+      const events: string[] = [];
+      const output = yield* stack.deploy(program("v2")).pipe(
+        hook({
+          update: (id, props) =>
+            Effect.gen(function* () {
+              events.push(`${id}:start:${props.string}`);
+              if (id === "A") yield* Effect.sleep("50 millis");
+              events.push(`${id}:end:${props.string}`);
+            }),
+        }),
+      );
+      expect(output.B.string).toBe("v2");
+      expect(events.indexOf("B:start:v2")).toBeGreaterThan(events.indexOf("A:end:v2"));
+      expect(events).not.toContain("B:start:v1");
+      yield* stack.destroy();
     }),
   );
 
@@ -9547,4 +9618,333 @@ describe("resource selection apply barriers", { tags: ["unit", "local"] }, () =>
         }),
     );
   }
+});
+
+// =============================================================================
+// PLANNED NOOPS RE-EVALUATE AFTER UPSTREAM UPDATES
+// =============================================================================
+
+describe("planned noops re-evaluate after upstream updates", { tags: ["unit", "local"] }, () => {
+  const aliasProgram = (code: string) =>
+    Effect.gen(function* () {
+      const version = yield* VersionedTarget("Version", { code });
+      const alias = yield* AliasTarget("Alias", {
+        target: version,
+        aliasName: "live",
+      });
+      return { version, alias };
+    });
+
+  interface DeliberateNoopSink extends Resource<
+    "Test.DeliberateNoopSink",
+    { value: string; ignored: string },
+    { value: string }
+  > {}
+  const DeliberateNoopSink = Resource<DeliberateNoopSink>("Test.DeliberateNoopSink");
+  const sinkReconciles: Array<{
+    news: DeliberateNoopSink["Props"];
+    olds: DeliberateNoopSink["Props"];
+  }> = [];
+  const { test: deliberateNoopTest } = Test.make({
+    providers: Layer.merge(
+      TestLayers(),
+      Provider.succeed(DeliberateNoopSink, {
+        list: () => Effect.succeed([]),
+        diff: () => Effect.succeed({ action: "noop" as const }),
+        reconcile: Effect.fn(function* ({ news, olds }) {
+          if (olds !== undefined) sinkReconciles.push({ news, olds });
+          return { value: news.value };
+        }),
+        delete: () => Effect.void,
+      }),
+    ),
+  });
+
+  deliberateNoopTest.provider(
+    "a late cycle upgrade receives the noop's last applied props as olds",
+    (stack) =>
+      Effect.gen(function* () {
+        sinkReconciles.length = 0;
+        const program = (revision: string, ignored: string) =>
+          Effect.gen(function* () {
+            const A = yield* BindingTarget("A", { string: revision });
+            const B = yield* BindingTarget("B", { string: A.string });
+            yield* A.bind("B", { env: { B: B.string } });
+            const sink = yield* DeliberateNoopSink("Sink", { value: B.string, ignored });
+            return { B, sink };
+          });
+        yield* stack.deploy(program("v1", "ignored-old"));
+        const ignoredPlan = yield* stack.plan(program("v1", "ignored-new"));
+        expect(ignoredPlan.resources.Sink.action).toBe("noop");
+        yield* stack.deploy(program("v1", "ignored-new"));
+        expect(sinkReconciles).toEqual([]);
+        expect((yield* getState("Sink")).props).toEqual({ value: "v1", ignored: "ignored-old" });
+
+        const plan = yield* stack.plan(program("v2", "ignored-new"));
+        expect(plan.resources.Sink.action).toBe("noop");
+        expect(plan.cycleMembers.has("A")).toBe(true);
+        expect(plan.cycleMembers.has("B")).toBe(true);
+        const bReconciled = yield* Deferred.make<void>();
+        const second = yield* apply(plan).pipe(
+          hook({
+            update: (id) =>
+              Effect.gen(function* () {
+                if (id === "A") yield* Deferred.await(bReconciled);
+                if (id === "B") yield* Deferred.succeed(bReconciled, undefined);
+              }),
+          }),
+        );
+        expect(second.sink.value).toBe("v2");
+        expect(sinkReconciles).toEqual([
+          {
+            news: { value: "v2", ignored: "ignored-new" },
+            olds: { value: "v1", ignored: "ignored-old" },
+          },
+        ]);
+        expect((yield* getState("Sink")).props).toEqual({ value: "v2", ignored: "ignored-new" });
+        yield* stack.destroy();
+      }),
+  );
+
+  for (const initialUpgrade of [false, true]) {
+    test.provider(
+      `a cyclic source refreshes a noop chain after convergence (initial upgrade: ${initialUpgrade})`,
+      (stack) =>
+        Effect.gen(function* () {
+          const program = (revision: string) =>
+            Effect.gen(function* () {
+              const A = yield* BindingTarget("A", { string: revision });
+              const B = yield* BindingTarget("B", { string: A.string });
+              yield* A.bind("B", { env: { B: B.string } });
+              const X = yield* TestResource("X", { string: initialUpgrade ? revision : "v1" });
+              const C = yield* TestResource("C", {
+                string: Output.interpolate`${B.string}:${X.string}`,
+              });
+              const D = yield* TestResource("D", { string: C.string });
+              return { A, B, C, D };
+            });
+          yield* stack.deploy(program("v1"));
+          const state = yield* yield* State;
+          const stk = yield* Stack;
+          const persisted = yield* getState<CreatedResourceState | UpdatedResourceState>("C");
+          yield* state.set({
+            stack: stk.name,
+            stage: stk.stage,
+            fqn: "C",
+            value: { ...persisted, providerMode: "local" },
+          });
+          const plan = yield* stack.plan(program("v2"));
+          expect(plan.resources.A.action).toBe("update");
+          expect(plan.resources.B.action).toBe("update");
+          expect(plan.cycleMembers.has("A")).toBe(true);
+          expect(plan.cycleMembers.has("B")).toBe(true);
+          for (const id of ["C", "D"]) {
+            const node = plan.resources[id];
+            if (node.action !== "update" && node.action !== "noop") {
+              return yield* Effect.die(`Expected existing ${id}, got ${node.action}`);
+            }
+            plan.resources[id] = {
+              ...node,
+              action: "noop",
+              state: yield* getState<CreatedResourceState | UpdatedResourceState>(id),
+            };
+          }
+          const bReconciled = yield* Deferred.make<void>();
+          const observedC: Array<string | undefined> = [];
+          const second = yield* apply(plan).pipe(
+            hook({
+              update: (id, props) =>
+                Effect.gen(function* () {
+                  // Force B's first pass to consume A's early, persisted output.
+                  if (id === "A") yield* Deferred.await(bReconciled);
+                  if (id === "B") yield* Deferred.succeed(bReconciled, undefined);
+                  if (id === "C") observedC.push(props.string);
+                }),
+            }),
+          );
+          const expected = initialUpgrade ? "v2:v2" : "v2:v1";
+          expect(second.B.string).toBe("v2");
+          expect(second.C.string).toBe(expected);
+          expect(second.D.string).toBe(expected);
+          expect(observedC).toEqual(initialUpgrade ? ["v1:v2", "v2:v2"] : ["v2:v1"]);
+          expect((yield* getState<UpdatedResourceState>("C")).providerMode).toBe("local");
+          yield* stack.destroy();
+        }),
+    );
+  }
+
+  test.provider("fresh outputs propagate through a chain of provisional noops", (stack) =>
+    Effect.gen(function* () {
+      const program = (code: string) =>
+        Effect.gen(function* () {
+          const { version, alias } = yield* aliasProgram(code);
+          const mirror = yield* TestResource("Mirror", { string: alias.observedVersion });
+          return { version, alias, mirror };
+        });
+      yield* stack.deploy(program("v1"));
+      const plan = yield* stack.plan(program("v2"));
+      for (const id of ["Alias", "Mirror"]) {
+        const node = plan.resources[id];
+        if (node.action !== "update" && node.action !== "noop") {
+          return yield* Effect.die(`Expected existing ${id}, got ${node.action}`);
+        }
+        plan.resources[id] = {
+          ...node,
+          action: "noop",
+          state: yield* getState<CreatedResourceState | UpdatedResourceState>(id),
+        };
+      }
+      const second = yield* apply(plan);
+      expect(second.alias.observedVersion).toBe("2");
+      expect(second.mirror.string).toBe("2");
+      yield* stack.destroy();
+    }),
+  );
+
+  test.provider(
+    "a whole-resource reference follows fresh non-stable attrs across updates",
+    (stack) =>
+      Effect.gen(function* () {
+        const first = yield* stack.deploy(aliasProgram("v1"));
+        expect(first.version.version).toBe("1");
+        expect(first.alias.observedVersion).toBe("1");
+
+        const second = yield* stack.deploy(aliasProgram("v2"));
+        expect(second.version.version).toBe("2");
+        expect(second.alias.observedVersion).toBe("2");
+
+        yield* stack.destroy();
+      }),
+  );
+
+  test.provider(
+    "upgrades a noop when a stables-only persisted reference gains fresh non-stable attrs",
+    (stack) =>
+      Effect.gen(function* () {
+        const first = yield* stack.deploy(aliasProgram("v1"));
+        expect(first.alias.observedVersion).toBe("1");
+
+        // Reproduce a persisted diff-facing snapshot: the whole-resource
+        // reference contains only the upstream's stable identity.
+        const state = yield* yield* State;
+        const stk = yield* Stack;
+        const aliasState = yield* getState<CreatedResourceState | UpdatedResourceState>("Alias");
+        yield* state.set({
+          stack: stk.name,
+          stage: stk.stage,
+          fqn: "Alias",
+          value: {
+            ...aliasState,
+            props: {
+              target: {
+                name: first.version.name,
+                arn: first.version.arn,
+              },
+              aliasName: "live",
+            },
+          },
+        });
+
+        const plan = yield* stack.plan(aliasProgram("v2"));
+        expect(plan.resources.Version.action).toBe("update");
+
+        const second = yield* stack.deploy(aliasProgram("v2"));
+        expect(second.version.version).toBe("2");
+        expect(second.alias.observedVersion).toBe("2");
+
+        const refreshed = yield* getState<UpdatedResourceState>("Alias");
+        expect(refreshed.status).toBe("updated");
+        expect(refreshed.props.target.version).toBe("2");
+
+        yield* stack.destroy();
+      }),
+  );
+
+  test.provider("an upgraded noop preserves an existing providerMode stamp", (stack) =>
+    Effect.gen(function* () {
+      const program = (desired: string) =>
+        Effect.gen(function* () {
+          const source = yield* PhasedTarget("Source", { desired });
+          const alias = yield* TestResource("Alias", {
+            string: source.value,
+          });
+          return { source, alias };
+        });
+
+      yield* stack.deploy(program("old-url"));
+
+      const state = yield* yield* State;
+      const stk = yield* Stack;
+      const persisted = yield* getState<CreatedResourceState | UpdatedResourceState>("Alias");
+      yield* state.set({
+        stack: stk.name,
+        stage: stk.stage,
+        fqn: "Alias",
+        value: { ...persisted, providerMode: "local" },
+      });
+
+      // Force the provisional noop: the source's new value only reaches
+      // the alias's inputs during apply.
+      const plan = yield* stack.plan(program("new-url"));
+      const alias = plan.resources.Alias;
+      if (alias.action !== "update" && alias.action !== "noop") {
+        return yield* Effect.die(`Expected existing Alias, got ${alias.action}`);
+      }
+      plan.resources.Alias = {
+        ...alias,
+        action: "noop",
+        state: yield* getState<CreatedResourceState | UpdatedResourceState>("Alias"),
+      };
+
+      yield* apply(plan);
+
+      const after = yield* getState<UpdatedResourceState>("Alias");
+      expect(after.status).toBe("updated");
+      expect(after.props.string).toBe("new-url");
+      expect(after.providerMode).toBe("local");
+
+      yield* stack.destroy();
+    }),
+  );
+
+  test.provider("keeps a stable-property-only dependency as a noop", (stack) =>
+    Effect.gen(function* () {
+      const downstreamUpdates: string[] = [];
+      const capture = <A, Err, Req>(effect: Effect.Effect<A, Err, Req>) =>
+        effect.pipe(
+          Effect.provide(
+            Layer.succeed(TestResourceHooks, {
+              update: (id) =>
+                Effect.sync(() => {
+                  if (id === "B") downstreamUpdates.push(id);
+                }),
+            }),
+          ),
+        );
+
+      const program = (value: string) =>
+        Effect.gen(function* () {
+          const A = yield* TestResource("A", { string: value });
+          const B = yield* TestResource("B", { string: A.stableString });
+          return { A, B };
+        });
+
+      yield* stack.deploy(program("v1")).pipe(capture);
+      const before = yield* getState("B");
+
+      const plan = yield* stack.plan(program("v2"));
+      expect(plan.resources.A.action).toBe("update");
+      expect(plan.resources.B.action).toBe("noop");
+
+      const second = yield* stack.deploy(program("v2")).pipe(capture);
+      expect(second.B.string).toBe("A");
+      expect(downstreamUpdates).toEqual([]);
+
+      const after = yield* getState("B");
+      expect(after.status).toBe(before.status);
+      expect(after.attr).toEqual(before.attr);
+
+      yield* stack.destroy().pipe(capture);
+    }),
+  );
 });
