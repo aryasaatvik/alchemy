@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import type { Socket } from "node:net";
 import { expect, layer } from "@effect/vitest";
-import { newWebSocketRpcSession } from "capnweb";
+import { RpcSession, WebSocketTransport } from "capnweb";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -28,6 +28,30 @@ const edge = {
   nativeDisposals: 0,
 };
 
+let gateNextMethodsReply = false;
+let pipelineDispatched = false;
+let releaseMethodsReply: (() => void) | undefined;
+
+/** Withhold the capability response until its pipelined native method actually runs. */
+class GatedWebSocketTransport extends WebSocketTransport {
+  #pending: string[] | undefined;
+
+  holdMethodsReply() {
+    this.#pending = [];
+    releaseMethodsReply = () => {
+      const pending = this.#pending ?? [];
+      this.#pending = undefined;
+      releaseMethodsReply = undefined;
+      for (const message of pending) super.send(message);
+    };
+  }
+
+  override send(message: string) {
+    if (this.#pending !== undefined) this.#pending.push(message);
+    else super.send(message);
+  }
+}
+
 const repositoryInfo = {
   id: "starter-id",
   name: "starter",
@@ -53,7 +77,13 @@ const artifacts: Artifacts = {
     [Symbol.dispose]: () => {
       edge.nativeDisposals++;
     },
-    info: async () => ({ ...repositoryInfo, remote: "https://example.com/starter.git" }),
+    info: async () => {
+      if (releaseMethodsReply !== undefined) {
+        pipelineDispatched = true;
+        releaseMethodsReply();
+      }
+      return { ...repositoryInfo, remote: "https://example.com/starter.git" };
+    },
     readBlob: async () => new Blob([new Uint8Array([0, 255, 195, 169])]),
     readFile: async (args) => {
       if (args.path === "invalid")
@@ -107,7 +137,17 @@ const startFakeEdge = Effect.acquireRelease(
       sessions.handleUpgrade(request, socket, head, (webSocket) => {
         edge.sockets.add(webSocket);
         webSocket.on("close", () => edge.sockets.delete(webSocket));
-        newWebSocketRpcSession(webSocket as never, new ArtifactsBindingProxy(artifacts));
+        const transport = new GatedWebSocketTransport(webSocket as never);
+        class GatedArtifactsProxy extends ArtifactsBindingProxy {
+          override async getMethods(name: string) {
+            if (gateNextMethodsReply) {
+              gateNextMethodsReply = false;
+              transport.holdMethodsReply();
+            }
+            return super.getMethods(name);
+          }
+        }
+        new RpcSession(transport, new GatedArtifactsProxy(artifacts)).getRemoteMain();
       });
     });
     server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
@@ -124,6 +164,9 @@ const startFakeEdge = Effect.acquireRelease(
       edge.sockets.clear();
       edge.upgrades = 0;
       edge.nativeDisposals = 0;
+      gateNextMethodsReply = false;
+      pipelineDispatched = false;
+      releaseMethodsReply = undefined;
     }),
   ),
 );
@@ -180,6 +223,29 @@ const settledOpenSessions = Effect.promise(async () => {
 });
 
 layer(testLayer, { excludeTestServices: true })("Artifacts remote binding sessions", (it) => {
+  it.effect(
+    "dispatches a repository method before its getMethods reply is delivered",
+    () =>
+      Effect.gen(function* () {
+        yield* startFakeEdge;
+        const worker = yield* startWorker("artifacts-methods-pipeline");
+        gateNextMethodsReply = true;
+
+        const reply = yield* worker
+          .fetchText("/")
+          .pipe(
+            Effect.timeout("10 seconds"),
+            Effect.ensuring(Effect.sync(() => releaseMethodsReply?.())),
+          );
+
+        expect(reply).toBe("true");
+        expect(pipelineDispatched).toBe(true);
+        expect(edge.nativeDisposals).toBe(5);
+        expect(yield* settledOpenSessions).toBe(0);
+      }).pipe(Effect.scoped),
+    { timeout: 30_000 },
+  );
+
   it.effect(
     "closes each operation's session",
     () =>
