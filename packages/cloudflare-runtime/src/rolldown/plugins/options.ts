@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type * as vite from "vite";
+import { PRERENDER_ENVIRONMENT } from "../../vite/prerender.ts";
 import { createPlugin } from "../factory.ts";
 import { parseViteEnvironments, type BasePluginOptions } from "../options.ts";
 import { hasNodejsCompat } from "../utils.ts";
@@ -57,6 +58,16 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>("options", (plu
         const vite = await import("vite");
         const isRolldown = "rolldownVersion" in this.meta;
         const environmentNames = parseViteEnvironments(pluginOptions);
+        if (
+          pluginOptions.prerenderWorker &&
+          (environmentNames.includes(PRERENDER_ENVIRONMENT) ||
+            userConfig.environments?.[PRERENDER_ENVIRONMENT] ||
+            pluginOptions.skipEnvironments?.includes(PRERENDER_ENVIRONMENT))
+        ) {
+          throw new Error(
+            `The "${PRERENDER_ENVIRONMENT}" environment is reserved for the prerender Worker`,
+          );
+        }
         const root = path.resolve(userConfig.root ?? ".");
         input = resolveInputPaths(
           normalizeInput(
@@ -64,10 +75,6 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>("options", (plu
           ),
           root,
         );
-        const rollupOptions: vite.Rollup.RollupOptions = {
-          input: wrapInput(input),
-          preserveEntrySignatures: "strict",
-        };
         const define = getDefine(
           pluginOptions,
           process.env.NODE_ENV || userConfig.mode || "production",
@@ -75,13 +82,19 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>("options", (plu
         const makeEnvironment = ({
           name,
           isEntry,
+          main = pluginOptions.main,
         }: {
           name: string;
           isEntry: boolean;
+          main?: string;
         }): vite.EnvironmentOptions => {
           const entries = isEntry
-            ? (pluginOptions.main ?? defaultEnvironmentEntries(name, userConfig))
+            ? (main ?? defaultEnvironmentEntries(name, userConfig))
             : (defaultEnvironmentEntries(name, userConfig) ?? pluginOptions.main);
+          const rollupOptions: vite.Rollup.RollupOptions = {
+            input: wrapInput(resolveInputPaths(normalizeInput(entries ?? {}), root)),
+            preserveEntrySignatures: "strict",
+          };
           return {
             // Bake `process.env.NODE_ENV` (and friends) into the worker build.
             // workerd has no value for it at runtime, so without this libraries
@@ -229,6 +242,15 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>("options", (plu
                 makeEnvironment({ name, isEntry: index === 0 }),
               ]),
             ),
+            ...(pluginOptions.prerenderWorker
+              ? {
+                  [PRERENDER_ENVIRONMENT]: makeEnvironment({
+                    name: PRERENDER_ENVIRONMENT,
+                    isEntry: true,
+                    main: pluginOptions.prerenderWorker.main,
+                  }),
+                }
+              : {}),
           },
         };
       },

@@ -1,6 +1,7 @@
 import * as dns from "@distilled.cloud/cloudflare/dns";
 import * as zones from "@distilled.cloud/cloudflare/zones";
 import { Unowned } from "alchemy/AdoptPolicy";
+import { isResolved } from "alchemy/Diff";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import { arrayEqualsUnordered } from "alchemy/Util/equal";
@@ -291,19 +292,38 @@ export const RecordProvider = () =>
       return rows.flat();
     }),
 
-    diff: Effect.fn(function* ({ olds = {}, news }) {
+    diff: Effect.fn(function* ({ olds = {}, news, output }) {
+      // Derived record identity can remain an Output expression until apply
+      // (for example ACM's validation name/type). Never compare that proxy to
+      // a concrete prior identity: the generic planner will conservatively
+      // update and resolve it once its upstream is available.
+      if (!isResolved(news)) return undefined;
       const o = olds as RecordProps;
       const n = news as RecordProps;
-      if (o.type !== undefined && o.type !== n.type) {
+      // Prefer refreshed provider attributes for identity. Persisted props can
+      // omit or retain expression-shaped inputs when a record name/type/zone
+      // came from another resource; the observed record is the concrete
+      // identity Cloudflare actually owns.
+      const oldType = output?.type ?? o.type;
+      const oldName = output?.name ?? o.name;
+      const oldZoneId = output?.zoneId ?? o.zoneId;
+      if (oldType !== undefined && oldType !== n.type) {
         return { action: "replace" } as const;
       }
-      if (o.name !== undefined && o.name !== n.name) {
+      if (typeof oldZoneId === "string" && oldZoneId !== n.zoneId) {
         return { action: "replace" } as const;
       }
-      // zoneId is Input<string>; by reconcile time both sides are
-      // concrete strings.
-      if (typeof o.zoneId === "string" && typeof n.zoneId === "string" && o.zoneId !== n.zoneId) {
-        return { action: "replace" } as const;
+      if (oldName !== undefined && canonicalRecordName(oldName) !== canonicalRecordName(n.name)) {
+        // Cloudflare observes FQDNs even when the declaration uses @ or a
+        // relative name. Compare both identities in the authoritative zone.
+        const zone = yield* zones.getZone({ zoneId: n.zoneId });
+        const zoneName = canonicalRecordName(zone.name);
+        if (
+          normalizeRecordName(canonicalRecordName(oldName), zoneName) !==
+          normalizeRecordName(canonicalRecordName(n.name), zoneName)
+        ) {
+          return { action: "replace" } as const;
+        }
       }
     }),
 
@@ -471,6 +491,9 @@ export const RecordProvider = () =>
     }),
   });
 
+/** Cloudflare stores DNS names as lowercase FQDNs without a trailing dot. */
+export const canonicalRecordName = (name: string): string => name.replace(/\.$/, "").toLowerCase();
+
 const observeById = (zoneId: string, dnsRecordId: string) =>
   Effect.gen(function* () {
     const r = yield* dns.getRecord({ zoneId, dnsRecordId }).pipe(
@@ -523,14 +546,15 @@ export class AmbiguousDnsRecordError extends Data.TaggedError("AmbiguousDnsRecor
 //   - no exact match          -> `undefined` (a new sibling record is created)
 //   - several exact matches   -> fail with an actionable error
 const findByNameType = (zoneId: string, name: string, type: RecordType, match: RecordMatch) =>
-  listExactByNameType(zoneId, name, type).pipe(
+  listExactByNameType(zoneId, canonicalRecordName(name), type).pipe(
     Effect.flatMap((found) => {
       if (found.length > 0) return Effect.succeed(found);
 
       return zones.getZone({ zoneId }).pipe(
         Effect.flatMap((zone) => {
-          const normalizedName = normalizeRecordName(name, zone.name);
-          return normalizedName === name
+          const canonicalName = canonicalRecordName(name);
+          const normalizedName = normalizeRecordName(canonicalName, canonicalRecordName(zone.name));
+          return normalizedName === canonicalName
             ? Effect.succeed([] as ObservedRecord[])
             : listExactByNameType(zoneId, normalizedName, type);
         }),
@@ -589,7 +613,12 @@ const listExactByNameType = (zoneId: string, name: string, type: RecordType) =>
       Stream.runCollect,
       Effect.map((chunk) =>
         Array.from(chunk)
-          .filter((r) => r.name === name && r.type === type)
+          .filter(
+            (r) =>
+              r.name !== undefined &&
+              canonicalRecordName(r.name) === canonicalRecordName(name) &&
+              r.type === type,
+          )
           .map((r) => narrowRecord(r as Parameters<typeof narrowRecord>[0])),
       ),
     );
