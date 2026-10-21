@@ -1,3 +1,7 @@
+import { AxiomAuth } from "@alchemy.run/axiom/AuthProvider";
+import * as Credentials from "@alchemy.run/axiom/Credentials";
+import { Dataset, DatasetProvider } from "@alchemy.run/axiom/Dataset";
+import { providers } from "@alchemy.run/axiom/Providers";
 import type * as SDK from "@distilled.cloud/axiom";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "alchemy-test";
@@ -16,10 +20,6 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
-import { AxiomAuth } from "../src/AuthProvider.ts";
-import * as Credentials from "../src/Credentials.ts";
-import { Dataset, DatasetProvider } from "../src/Dataset.ts";
-import { providers } from "../src/Providers.ts";
 
 const options = { tags: ["unit", "local"], exclusive: true, timeout: 10_000 };
 

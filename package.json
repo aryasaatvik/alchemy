@@ -70,7 +70,9 @@
     "prepare": "pnpm prepare:hooks && pnpm prepare:patch && pnpm ensure:built",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "lint": "oxlint -c oxlint.config.ts"
+    "lint": "oxlint -c oxlint.config.ts",
+    "pack:integration": "mise exec -- bun scripts/integration-pack/cli.ts",
+    "checkpoint:integration": "mise exec -- bun scripts/integration-pack/checkpoint.ts"
   },
   "devDependencies": {
     "@alchemy.run/aws": "workspace:*",
@@ -103,6 +105,7 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "catalog:",
     "typescript-api": "catalog:"
   },

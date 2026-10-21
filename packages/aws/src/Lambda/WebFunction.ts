@@ -293,7 +293,8 @@ export type WebFunctionRuntimeContext = Omit<HostRuntimeContext, "run">;
  * apps, streaming AI responses. Use `AWS.Lambda.Function` for event sources
  * (SQS, DynamoDB Streams, S3 notifications, schedules) and direct invokes;
  * a Web Function only receives HTTP. Event sources and background loops
- * (`ServerHost.run`) are type errors in a Web Function and fail at plan.
+ * (`ServerHost.run`) retain unsatisfied host requirements on their implementation
+ * layer and fail at plan.
  * Web Functions launched in `us-east-1`, `us-east-2`, `us-west-2`,
  * `eu-west-1`, and `ap-northeast-1`, and AWS is adding Regions; see the
  * [Lambda pricing page](https://aws.amazon.com/lambda/pricing/) for where
@@ -560,8 +561,8 @@ export const WebFunction: Platform<
     // No `run`: environments exist only while HTTP traffic keeps them warm,
     // so background loops (e.g. queue pollers via `ServerHost`) would stop
     // at scale-to-zero and multiply per environment. Without `run`, the
-    // platform never provides `ServerHost`, and such code fails to type
-    // check and fails at plan instead of deploying a poller that silently
+    // platform never provides `ServerHost`; it remains an unsatisfied layer
+    // requirement and fails at plan instead of deploying a poller that silently
     // stops consuming.
     const { run: _run, ...context } = createHostRuntimeContext(WebFunctionTypeId)(id);
     return context;

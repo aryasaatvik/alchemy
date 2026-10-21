@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["test"],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "tsBuildInfoFile": "../../.cache/axiom-tests.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "./tsconfig.json"
+    },
+    {
+      "path": "../alchemy-test/tsconfig.json"
+    }
+  ]
+}

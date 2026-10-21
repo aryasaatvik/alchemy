@@ -289,7 +289,10 @@ const getSharedBuild = (entrypoint: any, stack: { name: string; stage: string })
           Layer.provideMerge(Layer.succeed(WorkerExecutionContext, deferredExecutionContext)),
           Layer.provideMerge(
             runtimeIdentityLayer(
-              (env as Record<string, string | undefined>).ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
+              "ALCHEMY_CLOUDFLARE_ACCOUNT_ID" in env &&
+                typeof env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID === "string"
+                ? env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID
+                : undefined,
             ),
           ),
           Layer.provideMerge(Layer.succeed(MinimumLogLevel, (env as any).DEBUG ? "Debug" : "Info")),
