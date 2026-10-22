@@ -1,6 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import { newMessagePortRpcSession } from "capnweb";
+import { vi } from "vitest";
 import makeArtifactsBinding from "../../bindings/artifacts/artifacts.worker.ts";
+import {
+  artifactErrorFields,
+  emitArtifactDiagnostic,
+  relayArtifactDiagnostics,
+  ArtifactsDiagnostics,
+} from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
 import {
   ArtifactsBindingProxy,
   type ArtifactsRepositoryMetadataResult,
@@ -116,8 +123,8 @@ const fixture = () => {
 };
 
 type RemoteArtifacts = {
-  getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult>;
-  getMethods(name: string): Promise<ArtifactsRepositoryWireOperations>;
+  getMetadata(name: string, diagnostics?: boolean): Promise<ArtifactsRepositoryMetadataResult>;
+  getMethods(name: string, diagnostics?: boolean): Promise<ArtifactsRepositoryWireOperations>;
 };
 const connect = (proxy: ArtifactsBindingProxy) => {
   const channel = new MessageChannel();
@@ -263,4 +270,207 @@ describe("Artifacts local facade", () => {
       numericCode: 10001,
     });
   });
+});
+
+describe("Artifacts diagnostic safety", () => {
+  it("does not reflect getters, coerce hostile values, or throw on revoked capabilities", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    let getters = 0;
+    const hostile = {
+      get code() {
+        getters++;
+        throw new Error("sensitive-getter-canary");
+      },
+      get numericCode() {
+        getters++;
+        throw new Error("sensitive-getter-canary");
+      },
+    };
+    const trap = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error("sensitive-trap-canary");
+        },
+      },
+    );
+    const coercion = {
+      [Symbol.toPrimitive]() {
+        throw new Error("sensitive-coercion-canary");
+      },
+    };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => {
+      lines.push(line);
+    });
+    try {
+      for (const value of [revoked.proxy, trap, hostile, null, coercion]) {
+        expect(() => artifactErrorFields(value)).not.toThrow();
+        expect(artifactErrorFields(value)).toEqual({});
+        expect(() => emitArtifactDiagnostic(value)).not.toThrow();
+        expect(() => relayArtifactDiagnostics(value)).not.toThrow();
+      }
+      for (const value of [
+        coercion,
+        revoked.proxy,
+        NaN,
+        Infinity,
+        -1,
+        2_147_483_648,
+        "sensitive-code-canary",
+      ]) {
+        expect(artifactErrorFields({ code: value, numericCode: value })).toEqual({});
+        emitArtifactDiagnostic({
+          operation: "session",
+          stage: "forward",
+          outcome: "failure",
+          httpStatus: value,
+          upgrade: value,
+          message: "sensitive-message-canary",
+        });
+      }
+      emitArtifactDiagnostic({
+        operation: "session",
+        stage: "forward",
+        outcome: "success",
+        get httpStatus() {
+          getters++;
+          throw new Error("sensitive-status-canary");
+        },
+      });
+      expect(getters).toBe(0);
+      expect(JSON.stringify(lines)).not.toMatch(/sensitive|httpStatus|upgrade/);
+      log.mockImplementation(() => {
+        throw new Error("sensitive-sink-canary");
+      });
+      expect(() =>
+        emitArtifactDiagnostic({ operation: "createToken", stage: "dispatch", outcome: "begin" }),
+      ).not.toThrow();
+      const error = revoked.proxy;
+      const trace = new ArtifactsDiagnostics("createToken");
+      await expect(
+        trace.run("native-createToken", async () => {
+          throw error;
+        }),
+      ).rejects.toBe(error);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("relays at most the finite sidecar and excludes business values and unallowlisted fields", () => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => {
+      lines.push(line);
+    });
+    try {
+      const event = {
+        operation: "createToken",
+        stage: "native-createToken",
+        outcome: "failure",
+        origin: "native",
+        code: "INVALID_TTL",
+        numericCode: 10003,
+        message: "sensitive-message-canary",
+        body: "sensitive-body-canary",
+      };
+      expect(
+        relayArtifactDiagnostics(
+          JSON.stringify({
+            ok: true,
+            value: { plaintext: "sensitive-token-canary" },
+            diagnostics: Array(100).fill(event),
+          }),
+        ),
+      ).toBe(true);
+      expect(lines).toHaveLength(16);
+      expect(JSON.parse(lines[0].slice("[artifacts-rpc] ".length))).toEqual({
+        operation: "createToken",
+        stage: "native-createToken",
+        outcome: "failure",
+        origin: "native",
+        code: "INVALID_TTL",
+        numericCode: 10003,
+      });
+      expect(lines.join("")).not.toMatch(/sensitive|message|body|plaintext/);
+      expect(relayArtifactDiagnostics('{"ok":')).toBe(false);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  for (const mode of ["typed", "json", "dispose", "both", "internal", "unallowlisted"])
+    it(`keeps original error envelopes and disposal behavior across Cap'n Web: ${mode}`, async () => {
+      const api = fixture();
+      const repository = await api.binding.get("starter");
+      const tokenError = Object.assign(new Error("sensitive-original-canary"), {
+        code:
+          mode === "internal"
+            ? "INTERNAL_ERROR"
+            : mode === "unallowlisted"
+              ? "sensitive-code-canary"
+              : "INVALID_TTL",
+        numericCode: 10003,
+      });
+      const disposeError = new Error("sensitive-disposal-canary");
+      const originalDispose = repository[Symbol.dispose].bind(repository);
+      const order: string[] = [];
+      Object.assign(repository, {
+        createToken: async () => {
+          order.push("settled");
+          if (
+            mode === "typed" ||
+            mode === "both" ||
+            mode === "internal" ||
+            mode === "unallowlisted"
+          )
+            throw tokenError;
+          return {
+            id: "token-id",
+            plaintext: "sensitive-token-canary",
+            scope: "read",
+            expiresAt: "now",
+            toJSON() {
+              throw new Error("sensitive-json-canary");
+            },
+          };
+        },
+        [Symbol.dispose]: () => {
+          order.push("dispose");
+          originalDispose();
+          if (mode === "dispose" || mode === "both") throw disposeError;
+        },
+      });
+      using session = connect(new ArtifactsBindingProxy(api.binding));
+      using original = await session.client.getMethods("starter");
+      using traced = await session.client.getMethods("starter", true);
+      const before = JSON.parse(await original.createToken("read", 60));
+      const { diagnostics, ...after } = JSON.parse(await traced.createToken("read", 60));
+      expect(after).toEqual(before);
+      expect(api.disposed).toBe(2);
+      expect(order).toEqual(["settled", "dispose", "settled", "dispose"]);
+      expect(diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            stage: "native-createToken",
+            outcome:
+              mode === "typed" || mode === "both" || mode === "internal" || mode === "unallowlisted"
+                ? "failure"
+                : "success",
+          }),
+          expect.objectContaining({
+            stage: "native-dispose",
+            outcome: mode === "dispose" || mode === "both" ? "failure" : "success",
+          }),
+        ]),
+      );
+      if (mode === "internal" || mode === "unallowlisted")
+        expect(diagnostics).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ stage: "envelope", origin: "native" }),
+          ]),
+        );
+      expect(JSON.stringify(diagnostics)).not.toMatch(/sensitive|message|stack|token-id/);
+    });
 });
