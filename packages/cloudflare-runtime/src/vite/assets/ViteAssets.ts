@@ -255,6 +255,9 @@ const viteFetchHtmlHandler =
  */
 const viteMiddlewareHandler =
   (viteDevServer: vite.ViteDevServer) => (req: IncomingMessage, res: ServerResponse) => {
+    // ASSETS addresses files by path; its arbitrary authority is not an external
+    // request Host. This handler is reached only through authenticated loopback.
+    req.headers.host = "localhost";
     (req as IncomingMessage & { [VITE_ASSET_REQUEST]?: true })[VITE_ASSET_REQUEST] = true;
     viteDevServer.middlewares(req, res, () => {
       res.writeHead(404, { [VITE_MISS_HEADER]: "1" });
