@@ -1,5 +1,10 @@
 import { newWebSocketRpcSession, type RpcPromise } from "capnweb";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import {
+  emitArtifactDiagnostic,
+  relayArtifactDiagnostics,
+  type ArtifactsOperation,
+} from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
 import type {
   ArtifactsRepositoryMetadataResult,
   ArtifactsRepositoryWireOperations,
@@ -23,13 +28,69 @@ type OpenArtifactsSession = () => Fetcher & Disposable;
  */
 const withArtifactsSession = async <A>(
   open: OpenArtifactsSession,
+  name: ArtifactsOperation,
   operation: (stub: Fetcher) => Promise<A>,
 ): Promise<A> => {
-  const stub = open();
+  emitArtifactDiagnostic({ operation: name, stage: "session-open", outcome: "begin" });
+  let stub: Fetcher & Disposable;
   try {
-    return await operation(stub);
+    // The stub opens asynchronously; the forwarder records the HTTP upgrade outcome.
+    stub = open();
+    emitArtifactDiagnostic({ operation: name, stage: "session-open", outcome: "success" });
+  } catch (error) {
+    emitArtifactDiagnostic({
+      operation: name,
+      stage: "session-open",
+      outcome: "failure",
+      transport: "rpc",
+    });
+    throw error;
+  }
+  try {
+    emitArtifactDiagnostic({ operation: name, stage: "dispatch", outcome: "begin" });
+    const result = operation(stub);
+    emitArtifactDiagnostic({ operation: name, stage: "dispatch", outcome: "success" });
+    return await result;
   } finally {
-    stub[Symbol.dispose]();
+    emitArtifactDiagnostic({ operation: name, stage: "session-dispose", outcome: "begin" });
+    try {
+      stub[Symbol.dispose]();
+      emitArtifactDiagnostic({ operation: name, stage: "session-dispose", outcome: "success" });
+    } catch (error) {
+      emitArtifactDiagnostic({
+        operation: name,
+        stage: "session-dispose",
+        outcome: "failure",
+        transport: "rpc",
+      });
+      // oxlint-disable-next-line no-unsafe-finally -- Preserve existing session-disposal error precedence.
+      throw error;
+    }
+  }
+};
+
+const settleArtifacts = async <A>(
+  name: ArtifactsOperation,
+  operation: () => Promise<A>,
+): Promise<A> => {
+  try {
+    const result = await operation();
+    const received = relayArtifactDiagnostics(result);
+    emitArtifactDiagnostic({
+      operation: name,
+      stage: "envelope",
+      outcome: received ? "success" : "failure",
+      ...(received ? {} : { transport: "envelope" as const }),
+    });
+    return result;
+  } catch (error) {
+    emitArtifactDiagnostic({
+      operation: name,
+      stage: "envelope",
+      outcome: "failure",
+      transport: "rpc",
+    });
+    throw error;
   }
 };
 
@@ -56,46 +117,70 @@ class ArtifactsRepositoryMethodsBridge
   }
 
   #withMethods<A>(
+    name: ArtifactsOperation,
     operation: (methods: ArtifactsRepositoryWireOperations) => Promise<A>,
   ): Promise<A> {
-    return withArtifactsSession(this.#open, async (stub) => {
+    return withArtifactsSession(this.#open, name, async (stub) => {
       // Keep the capability promise unresolved so its method shares the same RPC round trip.
-      using methods = callArtifacts(stub, "getMethods", [
+      const methods = callArtifacts(stub, "getMethods", [
         this.#name,
+        true,
       ]) as RpcPromise<ArtifactsRepositoryWireOperations>;
-      return await operation(methods);
+      const dispose = methods[Symbol.dispose];
+      using _lifetime = {
+        [Symbol.dispose]: () => {
+          emitArtifactDiagnostic({ operation: name, stage: "methods-dispose", outcome: "begin" });
+          try {
+            dispose.call(methods);
+            emitArtifactDiagnostic({
+              operation: name,
+              stage: "methods-dispose",
+              outcome: "success",
+            });
+          } catch (error) {
+            emitArtifactDiagnostic({
+              operation: name,
+              stage: "methods-dispose",
+              outcome: "failure",
+              transport: "rpc",
+            });
+            throw error;
+          }
+        },
+      };
+      return await settleArtifacts(name, () => operation(methods));
     });
   }
 
   info() {
-    return this.#withMethods((methods) => methods.info());
+    return this.#withMethods("info", (methods) => methods.info());
   }
   createToken(...args: Parameters<ArtifactsRepo["createToken"]>) {
-    return this.#withMethods((methods) => methods.createToken(...args));
+    return this.#withMethods("createToken", (methods) => methods.createToken(...args));
   }
   listTokens() {
-    return this.#withMethods((methods) => methods.listTokens());
+    return this.#withMethods("listTokens", (methods) => methods.listTokens());
   }
   revokeToken(...args: Parameters<ArtifactsRepo["revokeToken"]>) {
-    return this.#withMethods((methods) => methods.revokeToken(...args));
+    return this.#withMethods("revokeToken", (methods) => methods.revokeToken(...args));
   }
   fork(...args: Parameters<ArtifactsRepo["fork"]>) {
-    return this.#withMethods((methods) => methods.fork(...args));
+    return this.#withMethods("fork", (methods) => methods.fork(...args));
   }
   readBlob(...args: Parameters<ArtifactsRepo["readBlob"]>) {
-    return this.#withMethods((methods) => methods.readBlob(...args));
+    return this.#withMethods("readBlob", (methods) => methods.readBlob(...args));
   }
   readTree(...args: Parameters<ArtifactsRepo["readTree"]>) {
-    return this.#withMethods((methods) => methods.readTree(...args));
+    return this.#withMethods("readTree", (methods) => methods.readTree(...args));
   }
   readCommit(...args: Parameters<ArtifactsRepo["readCommit"]>) {
-    return this.#withMethods((methods) => methods.readCommit(...args));
+    return this.#withMethods("readCommit", (methods) => methods.readCommit(...args));
   }
   readFile(...args: Parameters<ArtifactsRepo["readFile"]>) {
-    return this.#withMethods((methods) => methods.readFile(...args));
+    return this.#withMethods("readFile", (methods) => methods.readFile(...args));
   }
   log(...args: Parameters<ArtifactsRepo["log"]>) {
-    return this.#withMethods((methods) => methods.log(...args));
+    return this.#withMethods("log", (methods) => methods.log(...args));
   }
 }
 
@@ -105,17 +190,19 @@ class ArtifactsRepositoryMethodsBridge
  * promise crosses workerd RPC.
  */
 const artifactsOperation = (open: OpenArtifactsSession, prop: string | symbol) => {
-  const call = (name: string, args: Array<unknown>) =>
-    withArtifactsSession(open, (stub) => callArtifacts(stub, name, args));
+  const call = (operation: ArtifactsOperation, name: string, args: Array<unknown>) =>
+    withArtifactsSession(open, operation, (stub) =>
+      settleArtifacts(operation, () => callArtifacts(stub, name, args)),
+    );
   switch (prop) {
     case "create":
     case "import":
     case "list":
     case "delete":
-      return async (...args: Array<unknown>) => await call(prop, args);
+      return async (...args: Array<unknown>) => await call(prop, prop, args);
     case "artifactsGetMetadata":
       return async (name: string) =>
-        (await call("getMetadata", [name])) as ArtifactsRepositoryMetadataResult;
+        (await call("metadata", "getMetadata", [name, true])) as ArtifactsRepositoryMetadataResult;
     case "artifactsGetMethods":
       return async (name: string) => new ArtifactsRepositoryMethodsBridge(name, open);
     default:

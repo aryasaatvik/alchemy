@@ -1,4 +1,5 @@
 import { RpcTarget } from "capnweb";
+import { ArtifactsDiagnostics, type ArtifactsOperation } from "./ArtifactsDiagnostics.ts";
 
 /**
  * Wire contract for a remote Artifacts binding.
@@ -38,15 +39,33 @@ export type ArtifactsRepositoryMetadataResult =
   | { readonly ok: true; readonly metadata: ArtifactsRepositoryMetadata }
   | { readonly ok: false; readonly error: ArtifactsErrorWire };
 
-const toJson = async (operation: () => Promise<unknown>): Promise<string> => {
+const toJson = async (
+  operation: () => Promise<unknown>,
+  trace?: ArtifactsDiagnostics,
+): Promise<string> => {
+  let serializing = false;
   try {
-    return JSON.stringify({ ok: true, value: await operation() });
+    const value = await operation();
+    serializing = true;
+    trace?.record("serialize", "begin");
+    const json = JSON.stringify({ ok: true, value });
+    trace?.record("serialize", "success");
+    // Append after business serialization: sidecar inspection cannot touch native values.
+    return trace
+      ? json.slice(0, -1) + ',"diagnostics":' + JSON.stringify(trace.events) + "}"
+      : json;
   } catch (error) {
-    return JSON.stringify({ ok: false, error: toArtifactsErrorWire(error) });
+    if (serializing) trace?.record("serialize", "failure", undefined, "bridge-fallback");
+    const wire = toArtifactsErrorWire(error, trace);
+    return JSON.stringify({
+      ok: false,
+      error: wire,
+      ...(trace ? { diagnostics: trace.events } : {}),
+    });
   }
 };
 
-const toArtifactsErrorWire = (error: unknown): ArtifactsErrorWire => {
+const toArtifactsErrorWire = (error: unknown, trace?: ArtifactsDiagnostics): ArtifactsErrorWire => {
   if (
     error instanceof Error &&
     "code" in error &&
@@ -54,19 +73,23 @@ const toArtifactsErrorWire = (error: unknown): ArtifactsErrorWire => {
     "numericCode" in error &&
     typeof error.numericCode === "number"
   ) {
-    return {
+    const wire: ArtifactsErrorWire = {
       name: "ArtifactsError",
       message: error.message,
       code: error.code as ArtifactsErrorCode,
       numericCode: error.numericCode,
     };
+    trace?.record("envelope", "failure", wire, "native");
+    return wire;
   }
-  return {
+  const wire: ArtifactsErrorWire = {
     name: "ArtifactsError",
     message: error instanceof Error ? error.message : "Unknown Artifacts error",
     code: "INTERNAL_ERROR",
     numericCode: 0,
   };
+  trace?.record("envelope", "failure", wire, "bridge-fallback");
+  return wire;
 };
 
 /** A fresh native capability is disposed before its operation returns. */
@@ -76,22 +99,32 @@ export class ArtifactsRepositoryMethods
 {
   readonly #binding: Artifacts;
   readonly #name: string;
+  readonly #diagnostics: boolean;
 
-  constructor(binding: Artifacts, name: string) {
+  constructor(binding: Artifacts, name: string, diagnostics = false) {
     super();
     this.#binding = binding;
     this.#name = name;
+    this.#diagnostics = diagnostics;
   }
 
-  #use(operation: (repository: ArtifactsRepo) => Promise<unknown>) {
+  #use(name: ArtifactsOperation, operation: (repository: ArtifactsRepo) => Promise<unknown>) {
+    const trace = this.#diagnostics ? new ArtifactsDiagnostics(name) : undefined;
     return toJson(async () => {
-      using repository = await this.#binding.get(this.#name);
-      return await operation(repository);
-    });
+      const repository = await (trace
+        ? trace.run("native-get", () => this.#binding.get(this.#name))
+        : this.#binding.get(this.#name));
+      using _lifetime = trace ? trace.lifetime(repository) : repository;
+      return await (trace
+        ? trace.run(name === "createToken" ? "native-createToken" : "native-call", () =>
+            operation(repository),
+          )
+        : operation(repository));
+    }, trace);
   }
 
-  #blob(operation: (repository: ArtifactsRepo) => Promise<Blob | null>) {
-    return this.#use(async (repository): Promise<ArtifactsBlobWire | null> => {
+  #blob(name: ArtifactsOperation, operation: (repository: ArtifactsRepo) => Promise<Blob | null>) {
+    return this.#use(name, async (repository): Promise<ArtifactsBlobWire | null> => {
       const blob = await operation(repository);
       if (blob === null) return null;
       const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -105,34 +138,34 @@ export class ArtifactsRepositoryMethods
   }
 
   info() {
-    return this.#use((repository) => repository.info());
+    return this.#use("info", (repository) => repository.info());
   }
   createToken(...args: Parameters<ArtifactsRepo["createToken"]>) {
-    return this.#use((repository) => repository.createToken(...args));
+    return this.#use("createToken", (repository) => repository.createToken(...args));
   }
   listTokens() {
-    return this.#use((repository) => repository.listTokens());
+    return this.#use("listTokens", (repository) => repository.listTokens());
   }
   revokeToken(...args: Parameters<ArtifactsRepo["revokeToken"]>) {
-    return this.#use((repository) => repository.revokeToken(...args));
+    return this.#use("revokeToken", (repository) => repository.revokeToken(...args));
   }
   fork(...args: Parameters<ArtifactsRepo["fork"]>) {
-    return this.#use((repository) => repository.fork(...args));
+    return this.#use("fork", (repository) => repository.fork(...args));
   }
   readBlob(...args: Parameters<ArtifactsRepo["readBlob"]>) {
-    return this.#blob((repository) => repository.readBlob(...args));
+    return this.#blob("readBlob", (repository) => repository.readBlob(...args));
   }
   readTree(...args: Parameters<ArtifactsRepo["readTree"]>) {
-    return this.#use((repository) => repository.readTree(...args));
+    return this.#use("readTree", (repository) => repository.readTree(...args));
   }
   readCommit(...args: Parameters<ArtifactsRepo["readCommit"]>) {
-    return this.#use((repository) => repository.readCommit(...args));
+    return this.#use("readCommit", (repository) => repository.readCommit(...args));
   }
   readFile(...args: Parameters<ArtifactsRepo["readFile"]>) {
-    return this.#blob((repository) => repository.readFile(...args));
+    return this.#blob("readFile", (repository) => repository.readFile(...args));
   }
   log(...args: Parameters<ArtifactsRepo["log"]>) {
-    return this.#use((repository) => repository.log(...args));
+    return this.#use("log", (repository) => repository.log(...args));
   }
 }
 
@@ -158,17 +191,25 @@ export class ArtifactsBindingProxy extends RpcTarget {
     return toJson(() => this.#binding.delete(...args));
   }
 
-  async getMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult> {
+  async getMetadata(name: string, diagnostics = false): Promise<ArtifactsRepositoryMetadataResult> {
+    const trace = diagnostics ? new ArtifactsDiagnostics("metadata") : undefined;
     try {
-      using repository = await this.#binding.get(name);
-      const metadata = JSON.parse(JSON.stringify(await repository.info()));
-      return { ok: true, metadata };
+      const repository = await (trace
+        ? trace.run("native-get", () => this.#binding.get(name))
+        : this.#binding.get(name));
+      using _lifetime = trace ? trace.lifetime(repository) : repository;
+      const info = await (trace
+        ? trace.run("native-call", () => repository.info())
+        : repository.info());
+      const metadata = JSON.parse(JSON.stringify(info));
+      return { ok: true, metadata, ...(trace ? { diagnostics: trace.events } : {}) };
     } catch (error) {
-      return { ok: false, error: toArtifactsErrorWire(error) };
+      const wire = toArtifactsErrorWire(error, trace);
+      return { ok: false, error: wire, ...(trace ? { diagnostics: trace.events } : {}) };
     }
   }
 
-  async getMethods(name: string): Promise<ArtifactsRepositoryWireOperations> {
-    return new ArtifactsRepositoryMethods(this.#binding, name);
+  async getMethods(name: string, diagnostics = false): Promise<ArtifactsRepositoryWireOperations> {
+    return new ArtifactsRepositoryMethods(this.#binding, name, diagnostics);
   }
 }

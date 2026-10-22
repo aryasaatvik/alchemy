@@ -5,7 +5,10 @@ import { RpcSession, WebSocketTransport } from "capnweb";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { WebSocketServer, type WebSocket } from "ws";
-import { ArtifactsBindingProxy } from "../../bindings/artifacts/ArtifactsRpc.ts";
+import {
+  ArtifactsBindingProxy,
+  ArtifactsRepositoryMethods,
+} from "../../bindings/artifacts/ArtifactsRpc.ts";
 import { Artifacts as ArtifactsBinding } from "../../bindings/index.ts";
 import * as RemoteBindings from "../../remote-bindings/RemoteBindings.ts";
 import * as RemoteWorker from "../../remote-bindings/RemoteWorker.ts";
@@ -26,6 +29,10 @@ const edge = {
   sockets: new Set<WebSocket>(),
   upgrades: 0,
   nativeDisposals: 0,
+  failUpgradeAt: 0,
+  tokenMode: "success",
+  order: [] as string[],
+  output: [] as string[],
 };
 
 let gateNextMethodsReply = false;
@@ -76,6 +83,9 @@ const artifacts: Artifacts = {
   get: async () => ({
     [Symbol.dispose]: () => {
       edge.nativeDisposals++;
+      edge.order.push("dispose");
+      if (edge.tokenMode === "dispose" && edge.order.includes("token-settled"))
+        throw new Error("sensitive-disposal-canary");
     },
     info: async () => {
       if (releaseMethodsReply !== undefined) {
@@ -97,12 +107,27 @@ const artifacts: Artifacts = {
     readTree: async () => [],
     readCommit: async () => null,
     log: async () => [],
-    createToken: async (scope?: "write" | "read") => ({
-      id: "token-id",
-      plaintext: "secret",
-      scope: scope ?? "write",
-      expiresAt: "2026-09-01T01:00:00.000Z",
-    }),
+    createToken: async (scope?: "write" | "read") => {
+      edge.order.push("token-settled");
+      if (edge.tokenMode === "typed")
+        throw Object.assign(new Error("sensitive-native-canary"), {
+          code: "INVALID_TTL",
+          numericCode: 10003,
+        });
+      const token = {
+        id: "token-id",
+        plaintext: "sensitive-token-canary",
+        scope: scope ?? "write",
+        expiresAt: "2026-09-01T01:00:00.000Z",
+      };
+      if (edge.tokenMode === "json")
+        return Object.assign(token, {
+          toJSON() {
+            throw new Error("sensitive-json-canary");
+          },
+        });
+      return token;
+    },
     listTokens: async () => ({ tokens: [], total: 0 }),
     revokeToken: async () => true,
     fork: async () => {
@@ -134,17 +159,34 @@ const startFakeEdge = Effect.acquireRelease(
     });
     server.on("upgrade", (request, socket, head) => {
       edge.upgrades++;
+      if (edge.upgrades === edge.failUpgradeAt) {
+        socket.end(
+          "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        return;
+      }
       sessions.handleUpgrade(request, socket, head, (webSocket) => {
         edge.sockets.add(webSocket);
         webSocket.on("close", () => edge.sockets.delete(webSocket));
         const transport = new GatedWebSocketTransport(webSocket as never);
         class GatedArtifactsProxy extends ArtifactsBindingProxy {
-          override async getMethods(name: string) {
+          override async getMethods(name: string, diagnostics = false) {
             if (gateNextMethodsReply) {
               gateNextMethodsReply = false;
               transport.holdMethodsReply();
             }
-            return super.getMethods(name);
+            if (edge.tokenMode === "malformed" || edge.tokenMode === "drop-result") {
+              class FaultedMethods extends ArtifactsRepositoryMethods {
+                override async createToken(...args: Parameters<ArtifactsRepo["createToken"]>) {
+                  const result = await super.createToken(...args);
+                  if (edge.tokenMode === "malformed") return '{"ok":';
+                  dropSessions();
+                  return result;
+                }
+              }
+              return new FaultedMethods(artifacts, name, diagnostics);
+            }
+            return super.getMethods(name, diagnostics);
           }
         }
         new RpcSession(transport, new GatedArtifactsProxy(artifacts)).getRemoteMain();
@@ -164,6 +206,10 @@ const startFakeEdge = Effect.acquireRelease(
       edge.sockets.clear();
       edge.upgrades = 0;
       edge.nativeDisposals = 0;
+      edge.failUpgradeAt = 0;
+      edge.tokenMode = "success";
+      edge.order = [];
+      edge.output = [];
       gateNextMethodsReply = false;
       pipelineDispatched = false;
       releaseMethodsReply = undefined;
@@ -178,6 +224,14 @@ export default {
     try {
       const repository = await env.ARTIFACTS.get("starter");
       try {
+        if (url.pathname === "/diagnostic") {
+          try {
+            const token = await repository.createToken("read", 60);
+            return Response.json({ ok: true, revoked: await repository.revokeToken(token.id) });
+          } catch (error) {
+            return Response.json({ ok: false, code: error.code ?? null, numericCode: error.numericCode ?? null, message: error.message });
+          }
+        }
         if (url.pathname === "/error") {
           try { await repository.readFile({ref: "main", path: "invalid"}); }
           catch (error) { return new Response(error.code); }
@@ -210,6 +264,7 @@ const startWorker = (name: string) =>
     name,
     compatibilityDate: "2026-03-10",
     compatibilityFlags: [],
+    logging: { onOutput: (chunk) => edge.output.push(chunk) },
     bindings: [ArtifactsBinding.remote("ARTIFACTS", "ns")],
     modules: [{ name: "main.js", type: "ESModule", content: WORKER_SCRIPT }],
   });
@@ -280,4 +335,201 @@ layer(testLayer, { excludeTestServices: true })("Artifacts remote binding sessio
       }).pipe(Effect.scoped),
     { timeout: 30_000 },
   );
+});
+
+const diagnostics = () =>
+  edge.output
+    .join("")
+    .split("\n")
+    .flatMap((line) => {
+      const start = line.indexOf("[artifacts-rpc] ");
+      return start < 0 ? [] : [JSON.parse(line.slice(start + "[artifacts-rpc] ".length))];
+    });
+
+layer(testLayer, { excludeTestServices: true })("Artifacts native local diagnostics", (it) => {
+  for (const mode of [
+    "success",
+    "upgrade",
+    "typed",
+    "json",
+    "dispose",
+    "malformed",
+    "drop-result",
+  ]) {
+    it.effect(
+      `retains outcomes and emits safe local stages: ${mode}`,
+      () =>
+        Effect.gen(function* () {
+          yield* startFakeEdge;
+          const worker = yield* startWorker(`artifacts-diagnostic-${mode}`);
+          edge.tokenMode = mode;
+          if (mode === "upgrade") edge.failUpgradeAt = 2;
+          const result = yield* worker.fetchJson<{
+            ok: boolean;
+            revoked?: boolean;
+            code?: string;
+            numericCode?: number;
+            message?: string;
+          }>("/diagnostic");
+          // Assert the business outcome before asking for the missing diagnostic.
+          if (mode === "success") expect(result).toEqual({ ok: true, revoked: true });
+          else if (mode === "typed")
+            expect(result).toEqual({
+              ok: false,
+              code: "INVALID_TTL",
+              numericCode: 10003,
+              message: "sensitive-native-canary",
+            });
+          else if (mode === "json" || mode === "dispose")
+            expect(result).toEqual({
+              ok: false,
+              code: "INTERNAL_ERROR",
+              numericCode: 0,
+              message: mode === "json" ? "sensitive-json-canary" : "sensitive-disposal-canary",
+            });
+          else {
+            expect(result.ok).toBe(false);
+            if (mode === "upgrade") expect(edge.order).not.toContain("token-settled");
+          }
+          expect(yield* settledOpenSessions).toBe(0);
+          expect(edge.nativeDisposals).toBe(mode === "upgrade" ? 1 : mode === "success" ? 3 : 2);
+          expect(edge.upgrades).toBe(mode === "success" ? 3 : 2);
+          if (mode !== "upgrade")
+            expect(edge.order.indexOf("token-settled")).toBeLessThan(
+              edge.order.lastIndexOf("dispose"),
+            );
+          const events = diagnostics();
+          expect(events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                operation: "metadata",
+                stage: "envelope",
+                outcome: "success",
+              }),
+            ]),
+          );
+          const tokenEvents = events.filter((event) => event.operation === "createToken");
+          expect(tokenEvents).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ stage: "session-open", outcome: "success" }),
+              expect.objectContaining({ stage: "session-dispose", outcome: "success" }),
+            ]),
+          );
+          if (mode === "upgrade") {
+            expect(events).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  stage: "forward",
+                  outcome: "success",
+                  httpStatus: 503,
+                  upgrade: true,
+                }),
+              ]),
+            );
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  stage: "envelope",
+                  outcome: "failure",
+                  transport: "rpc",
+                }),
+              ]),
+            );
+          } else if (mode === "malformed" || mode === "drop-result") {
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  stage: "envelope",
+                  outcome: "failure",
+                  transport: mode === "malformed" ? "envelope" : "rpc",
+                }),
+              ]),
+            );
+            expect(tokenEvents.some((event) => event.stage === "native-createToken")).toBe(false);
+          } else {
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({ stage: "native-get", outcome: "success" }),
+                expect.objectContaining({
+                  stage: "native-createToken",
+                  outcome: mode === "typed" ? "failure" : "success",
+                }),
+              ]),
+            );
+            const envelopeAt = tokenEvents.findIndex(
+              (event) => event.stage === "envelope" && event.outcome === "success",
+            );
+            expect(envelopeAt).toBeGreaterThan(-1);
+            expect(
+              tokenEvents.findIndex(
+                (event) => event.stage === "session-dispose" && event.outcome === "begin",
+              ),
+            ).toBeGreaterThan(envelopeAt);
+            expect(
+              tokenEvents.findIndex(
+                (event) => event.stage === "methods-dispose" && event.outcome === "begin",
+              ),
+            ).toBeGreaterThan(envelopeAt);
+            expect(
+              tokenEvents.findIndex(
+                (event) => event.stage === "session-dispose" && event.outcome === "begin",
+              ),
+            ).toBeGreaterThan(
+              tokenEvents.findIndex(
+                (event) => event.stage === "methods-dispose" && event.outcome === "success",
+              ),
+            );
+          }
+          if (mode === "json")
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({ stage: "serialize", outcome: "failure" }),
+              ]),
+            );
+          if (mode === "dispose")
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({ stage: "native-dispose", outcome: "failure" }),
+              ]),
+            );
+          if (mode === "typed")
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  origin: "native",
+                  code: "INVALID_TTL",
+                  numericCode: 10003,
+                }),
+              ]),
+            );
+          if (mode === "json" || mode === "dispose")
+            expect(tokenEvents).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  origin: "bridge-fallback",
+                  code: "INTERNAL_ERROR",
+                  numericCode: 0,
+                }),
+              ]),
+            );
+          expect(JSON.stringify(events)).not.toMatch(
+            /sensitive|starter|token-id|https?:|\.git|stack|message|headers|body/,
+          );
+          yield* Effect.sync(() =>
+            process.stdout.write(
+              "[artifacts-rpc-test] " +
+                JSON.stringify({
+                  mode,
+                  originalOutcomePreserved: true,
+                  nativeDisposals: edge.nativeDisposals,
+                  openSessions: edge.sockets.size,
+                  events,
+                }) +
+                "\n",
+            ),
+          );
+        }).pipe(Effect.scoped),
+      { timeout: 30_000 },
+    );
+  }
 });

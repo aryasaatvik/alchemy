@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { emitArtifactDiagnostic } from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
 import { decodeResponse } from "../../internal/response.shared.ts";
 import type { RemoteWorkerConfig, RemoteWorkerResult } from "../RemoteWorkerConfig.shared.ts";
 
@@ -118,6 +119,31 @@ export class RemoteBindingProxy extends DurableObject<Env> {
     for (const [key, value] of Object.entries(session.config.headers)) {
       proxiedHeaders.set(key, value);
     }
-    return await fetch(target, new Request(request, { headers: proxiedHeaders }));
+    const artifacts = origin.searchParams.has("MF-Artifacts-Namespace");
+    const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+    if (artifacts)
+      emitArtifactDiagnostic({ operation: "session", stage: "forward", outcome: "begin", upgrade });
+    try {
+      const response = await fetch(target, new Request(request, { headers: proxiedHeaders }));
+      if (artifacts)
+        emitArtifactDiagnostic({
+          operation: "session",
+          stage: "forward",
+          outcome: "success",
+          httpStatus: response.status,
+          upgrade,
+        });
+      return response;
+    } catch (error) {
+      if (artifacts)
+        emitArtifactDiagnostic({
+          operation: "session",
+          stage: "forward",
+          outcome: "failure",
+          transport: "fetch",
+          upgrade,
+        });
+      throw error;
+    }
   }
 }
