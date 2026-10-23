@@ -5,8 +5,9 @@ Alchemy base with changes that Samva has validated but that are still awaiting u
 intentionally integration-only. It is not an upstream pull-request branch, a package release, or a
 substitute for focused contribution branches.
 
-This guide owns the producer workflow. Samva's `docs/alchemy-operations.md` owns the consumer pin,
-installation, and application-validation boundary.
+This guide owns producer mechanics. Samva's project-local `alchemy-floci-integration` skill owns
+execution mode and standing authority; its `docs/alchemy-operations.md` owns the consumer pin,
+installation and application-validation boundary.
 
 ## Checkout topology
 
@@ -14,8 +15,13 @@ installation, and application-validation boundary.
   `alchemy-run/alchemy`.
 - `/Users/aryasaatvik/Developer/alchemy-worktrees/samva-integration` is the canonical validated
   checkout of `samva/integration`.
-- Focused Alchemy changes use their own branches and `wt` worktrees. A Samva delivery worktree does
-  not patch Alchemy independently.
+- Direct execution is the default: work in this maintained checkout and Samva main in place. Use
+  producer and consumer `wt` lanes only when AFK is specified, then land their validated changes.
+  Direct/orchestrated describe execution ownership; AFK/HITL describe interaction. AFK can be direct.
+  A Samva delivery worktree never patches an installed Alchemy copy.
+- Honor an explicitly named checkout. If another owner's native run holds its clean fence, wait
+  for that owner to release it and continue independent producer work; do not ask the user to choose
+  a new execution mode or silently move the consumer. Documentation edits also dirty that fence.
 - `~/Developer/distilled-worktrees/` is a conventional location for independent authoring worktrees
   from Alchemy's embedded Distilled repository. Discover the actual paths with `git worktree list`
   in that repository; native `wt` can select a nested location. Every Alchemy worktree keeps its own
@@ -25,6 +31,9 @@ installation, and application-validation boundary.
   fresh-consumer checks and local Samva acceptance before promotion. Portable maintained
   distribution checkpoints come from `samva/integration` after promotion; preserved candidate refs
   are recovery history, not parallel maintained distributions.
+- A user-selected diagnostic collection may be uploaded and pinned before promotion. Retain its
+  exact source/ref, Distilled gitlink, selected verified receipt, hashes and reconciliation owner;
+  call it a published candidate rather than a maintained checkpoint.
 - Samva consumes the exact core and extracted provider artifacts through its root catalog, with
   overrides selecting the same local dependency closure. It does not link the Alchemy workspace or carry Distilled source.
 
@@ -34,33 +43,37 @@ into this guide.
 
 ## Develop and contribute
 
-Start substantial or generally useful work on a focused branch from freshly fetched upstream main.
-Prove it at the owning Alchemy or Distilled boundary before integrating it for Samva. A contribution
-must stand on its own, avoid Samva-specific package or hostname assumptions, and include the focused
-regression evidence needed to review it independently.
+Start a focused downstream fix from the maintained head and prove it at the owning boundary.
+An upstream contribution uses a separate branch from freshly fetched upstream main when that
+contribution is in scope. It must stand on its own, avoid Samva-specific package or hostname
+assumptions, and include focused regression evidence. A distribution update does not require an
+upstream PR or an unrelated fork-main merge to consume a published Distilled commit.
 
 Use the integration line as a proving and distribution lane:
 
 1. Fetch upstream and classify the existing integration behavior against current source and open or
    merged pull requests.
-2. Preserve the validated integration head behind explicit local and fork recovery refs before any
-   history reconstruction.
-3. Build a candidate from current upstream. Reconstruct retained behavior as dependency-ordered,
-   coherent commits; drop upstreamed, obsolete, and intermediate implementations.
+2. Preserve the validated local head before rewriting it. Before direct in-place reconstruction,
+   also push the observed fork head to a dated remote backup and verify it. An AFK candidate can be
+   built without changing the maintained line; back up its observed fork head before promotion.
+3. Reconstruct against current upstream in the maintained checkout for direct work or a producer
+   candidate for explicit AFK work. Keep dependency-ordered coherent commits; drop upstreamed,
+   obsolete and intermediate implementations.
 4. Record every original integration commit as retained, rewritten, folded, extracted, superseded,
    or dropped in the canonical Scratchpad ledger.
 5. Compare the candidate with both current upstream and the preserved integration tree using
    merge-base-aware diffs and `git range-diff`, then run the owning focused suites and workspace
    typecheck.
-6. Pack candidate verification archives and complete fresh-consumer checks and local Samva
-   acceptance against their exact bytes before promotion.
-7. Promote only after review and acceptance, using an exact `--force-with-lease` against the
-   previously observed fork head. Promotion does not authorize checkpoint publication or a consumer
-   repin.
+6. Pack the complete native collection, verify it in a fresh consumer and run the affected Samva
+   checks against those exact bytes. Reuse unaffected evidence with its original source identity.
+7. Land after applicable review and validation. A normal direct fix fast-forwards the distribution;
+   an AFK candidate merges or replaces it. Before replacement, push the observed remote head to a
+   dated `backup/<topic>-<date>` ref on `fork`, verify readback, then use an exact
+   `--force-with-lease=refs/heads/samva/integration:<observed-sha>`. Stop if the lease moves.
 
-Do not conventionally rebase the only validated integration branch when its history contains
-upstreamed work, integration-only packaging, dependency pins, and intermediate fixes. Construct and
-review a fresh candidate instead.
+Preserve the validated line before reconstructing it; do not mechanically replay mixed upstreamed
+work, integration-only packaging, dependency pins and intermediate fixes. Keep one writer per
+checkout and drain any using runtime before changing source, dependencies or history.
 
 ## Distilled changes
 
@@ -79,7 +92,9 @@ not change that input.
 ## Pack an integration artifact
 
 Run packaging from the selected producer checkout using Bun 1.3.13, Node 24 and the exact pnpm
-version declared by `packageManager`. `mise exec` must select those installed runtimes.
+version declared by `packageManager`. Verify effective versions in nested commands: an unqualified
+nested `mise exec` can reset an outer runtime selection. Use explicit version overrides and the
+native `scripts/integration-pack/cli.ts` entrypoint when needed; Samva's runtime is a separate input.
 
 ```bash
 bun run pack:integration
@@ -157,9 +172,12 @@ upload only when its filename and SHA-256 match, and otherwise uploads each arch
 maps every package to an immutable URL. Dry run reads existing uploads and reports missing ones
 without uploading. All archive digests are rechecked before publication.
 
-Checkpoint publication is not implied by packing, committing, pushing, or a request to validate
-Samva locally. The checkpoint script is integration-only infrastructure and must be retained when
-the integration history is reconstructed even if it has no upstream destination.
+For an already verified selected receipt, upload its existing archives through the native Scratchpad
+workflow rather than rebuilding to obtain URLs. Match filename and SHA-256, then verify immutable
+GET bytes. The checkpoint helper always packs again, even with `--dry-run`; that flag suppresses
+uploading, not local builds. Preserve the selected archives and receipt without substituting a
+fresh build. The checkpoint script remains integration-only infrastructure even without an upstream
+destination.
 
 ## Accept an artifact in Samva
 
@@ -177,9 +195,16 @@ For each explicitly selected Samva head:
 A successful Alchemy test, pack, or fresh-consumer check is producer evidence. It is not Samva
 acceptance, a provider plan, a deployment, or customer-path proof.
 
-## Authority gates
+## Authority and evidence
 
-Treat each of these as a separate action requiring its own scope or approval:
+Samva's integration skill records standing authority for a requested end-to-end update: edit,
+build/test, pack and fresh-consumer verify, publish needed artifacts, repin, commit/push and land
+after applicable checks/review. Continue through those covered stages without repeated permission
+questions. Inspection/discussion remains read-only, and explicit prepare-only, no-upload, no-push or
+no-merge instructions narrow the grant. AFK alone is not a merge grant in generic delivery work;
+this integration workflow has the standing scoped grant. No action may bypass repository protections.
+
+Record each result independently:
 
 | Gate | Result |
 | --- | --- |
@@ -194,7 +219,9 @@ Treat each of these as a separate action requiring its own scope or approval:
 | Deploy/apply | Provider and state mutation |
 | Customer-path verification | Observed application behavior |
 
-Success at one gate does not authorize the next.
+Success at one boundary does not prove another. The standing scope supplies authority for covered
+delivery actions; live provider writes, plans, deployments, upstream contributions and branch
+deletion remain outside it unless separately authorized.
 
 A native `plan` or `deploy --dry-run` skips infrastructure Apply, but its state backend can write.
 The S3 state store acquires a stack/stage lease with `PutObject` before reading persisted state,
