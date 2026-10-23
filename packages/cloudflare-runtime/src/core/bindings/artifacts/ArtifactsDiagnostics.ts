@@ -60,8 +60,29 @@ export interface ArtifactsDiagnostic {
   readonly httpStatus?: number;
   readonly upgrade?: boolean;
   readonly transport?: (typeof transports)[number];
+  readonly fetchErrorKind?: (typeof fetchErrorKinds)[number];
+  readonly fetchErrorCode?: (typeof fetchErrorCodes)[number];
+  /** The forwarding request signal, independently of the caller's command signal. */
+  readonly requestAborted?: boolean;
+  readonly sessionAgeMs?: number;
 }
 
+const fetchErrorKinds = ["error", "type-error", "abort", "timeout", "unknown"] as const;
+const fetchErrorCodes = [
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+] as const;
+const MAX_FETCH_CAUSE_LINKS = 3;
+const MAX_SESSION_AGE_MS = 3_000_000;
 const MAX_EVENTS = 16;
 const member = <A extends string>(values: readonly A[], value: unknown) =>
   values.find((candidate) => candidate === value);
@@ -87,6 +108,44 @@ export const artifactErrorFields = (error: unknown) => {
   };
 };
 
+/** Only own data can classify a fetch rejection; prototypes and accessors stay untouched. */
+export const artifactFetchErrorFields = (error: unknown) => {
+  let fetchErrorKind: NonNullable<ArtifactsDiagnostic["fetchErrorKind"]> = "unknown";
+  let fetchErrorCode: ArtifactsDiagnostic["fetchErrorCode"];
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth <= MAX_FETCH_CAUSE_LINKS; depth++) {
+    if (
+      !((typeof current === "object" && current !== null) || typeof current === "function") ||
+      seen.has(current)
+    )
+      break;
+    seen.add(current);
+    if (fetchErrorKind === "unknown") {
+      switch (own(current, "name")) {
+        case "Error":
+          fetchErrorKind = "error";
+          break;
+        case "TypeError":
+          fetchErrorKind = "type-error";
+          break;
+        case "AbortError":
+          fetchErrorKind = "abort";
+          break;
+        case "TimeoutError":
+          fetchErrorKind = "timeout";
+          break;
+      }
+    }
+    fetchErrorCode ??= member(fetchErrorCodes, own(current, "code"));
+    if (depth < MAX_FETCH_CAUSE_LINKS) current = own(current, "cause");
+  }
+  return {
+    fetchErrorKind,
+    ...(fetchErrorCode === undefined ? {} : { fetchErrorCode }),
+  };
+};
+
 const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
   const operation = member(operations, own(value, "operation"));
   const stage = member(stages, own(value, "stage"));
@@ -96,6 +155,10 @@ const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
   const transport = member(transports, own(value, "transport"));
   const httpStatus = own(value, "httpStatus");
   const upgrade = own(value, "upgrade");
+  const fetchErrorKind = member(fetchErrorKinds, own(value, "fetchErrorKind"));
+  const fetchErrorCode = member(fetchErrorCodes, own(value, "fetchErrorCode"));
+  const requestAborted = own(value, "requestAborted");
+  const sessionAgeMs = own(value, "sessionAgeMs");
   return {
     operation,
     stage,
@@ -105,6 +168,10 @@ const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
     ...(transport === undefined ? {} : { transport }),
     ...(bounded(httpStatus, 100, 599) ? { httpStatus } : {}),
     ...(typeof upgrade === "boolean" ? { upgrade } : {}),
+    ...(fetchErrorKind === undefined ? {} : { fetchErrorKind }),
+    ...(fetchErrorCode === undefined ? {} : { fetchErrorCode }),
+    ...(typeof requestAborted === "boolean" ? { requestAborted } : {}),
+    ...(bounded(sessionAgeMs, 0, MAX_SESSION_AGE_MS) ? { sessionAgeMs } : {}),
   };
 };
 

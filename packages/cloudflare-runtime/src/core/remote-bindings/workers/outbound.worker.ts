@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { emitArtifactDiagnostic } from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
+import {
+  artifactFetchErrorFields,
+  emitArtifactDiagnostic,
+} from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
 import { decodeResponse } from "../../internal/response.shared.ts";
 import type { RemoteWorkerConfig, RemoteWorkerResult } from "../RemoteWorkerConfig.shared.ts";
 
@@ -142,6 +145,9 @@ export class RemoteBindingProxy extends DurableObject<Env> {
           outcome: "failure",
           transport: "fetch",
           upgrade,
+          ...artifactFetchErrorFields(error),
+          requestAborted: request.signal.aborted,
+          sessionAgeMs: Math.min(SESSION_MAX_AGE_MS, Math.max(0, Date.now() - session.createdAt)),
         });
       throw error;
     }
