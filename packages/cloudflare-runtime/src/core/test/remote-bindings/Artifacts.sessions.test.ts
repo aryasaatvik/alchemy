@@ -442,6 +442,7 @@ layer(testLayer, { excludeTestServices: true })("Artifacts native local diagnost
                   stage: "envelope",
                   outcome: "failure",
                   transport: mode === "malformed" ? "envelope" : "rpc",
+                  ...(mode === "drop-result" ? { rpcErrorKind: "unknown", closeCode: 1006 } : {}),
                 }),
               ]),
             );

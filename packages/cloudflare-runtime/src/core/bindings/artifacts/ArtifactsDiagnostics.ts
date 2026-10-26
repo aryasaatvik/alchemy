@@ -60,14 +60,17 @@ export interface ArtifactsDiagnostic {
   readonly httpStatus?: number;
   readonly upgrade?: boolean;
   readonly transport?: (typeof transports)[number];
-  readonly fetchErrorKind?: (typeof fetchErrorKinds)[number];
+  readonly fetchErrorKind?: (typeof errorKinds)[number];
+  readonly rpcErrorKind?: (typeof errorKinds)[number];
+  readonly closeCode?: number;
+  readonly connectionFailed?: true;
   readonly fetchErrorCode?: (typeof fetchErrorCodes)[number];
   /** The forwarding request signal, independently of the caller's command signal. */
   readonly requestAborted?: boolean;
   readonly sessionAgeMs?: number;
 }
 
-const fetchErrorKinds = ["error", "type-error", "abort", "timeout", "unknown"] as const;
+const errorKinds = ["error", "type-error", "abort", "timeout", "unknown"] as const;
 const fetchErrorCodes = [
   "ECONNRESET",
   "ECONNREFUSED",
@@ -108,6 +111,35 @@ export const artifactErrorFields = (error: unknown) => {
   };
 };
 
+const errorKind = (error: unknown): (typeof errorKinds)[number] => {
+  switch (own(error, "name")) {
+    case "Error":
+      return "error";
+    case "TypeError":
+      return "type-error";
+    case "AbortError":
+      return "abort";
+    case "TimeoutError":
+      return "timeout";
+    default:
+      return "unknown";
+  }
+};
+
+/** Cap'n Web supplies transport context as text; only finite signals may leave this boundary. */
+export const artifactRpcErrorFields = (error: unknown) => {
+  const message = own(error, "message");
+  const match =
+    typeof message === "string" ? /^Peer closed WebSocket: (\d{4})\b/.exec(message) : null;
+  const closeCode = match === null ? undefined : Number(match[1]);
+  return {
+    ...artifactErrorFields(error),
+    rpcErrorKind: errorKind(error),
+    ...(bounded(closeCode, 1000, 4999) ? { closeCode } : {}),
+    ...(message === "WebSocket connection failed." ? { connectionFailed: true as const } : {}),
+  };
+};
+
 /** Only own data can classify a fetch rejection; prototypes and accessors stay untouched. */
 export const artifactFetchErrorFields = (error: unknown) => {
   let fetchErrorKind: NonNullable<ArtifactsDiagnostic["fetchErrorKind"]> = "unknown";
@@ -121,22 +153,7 @@ export const artifactFetchErrorFields = (error: unknown) => {
     )
       break;
     seen.add(current);
-    if (fetchErrorKind === "unknown") {
-      switch (own(current, "name")) {
-        case "Error":
-          fetchErrorKind = "error";
-          break;
-        case "TypeError":
-          fetchErrorKind = "type-error";
-          break;
-        case "AbortError":
-          fetchErrorKind = "abort";
-          break;
-        case "TimeoutError":
-          fetchErrorKind = "timeout";
-          break;
-      }
-    }
+    if (fetchErrorKind === "unknown") fetchErrorKind = errorKind(current);
     fetchErrorCode ??= member(fetchErrorCodes, own(current, "code"));
     if (depth < MAX_FETCH_CAUSE_LINKS) current = own(current, "cause");
   }
@@ -155,8 +172,11 @@ const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
   const transport = member(transports, own(value, "transport"));
   const httpStatus = own(value, "httpStatus");
   const upgrade = own(value, "upgrade");
-  const fetchErrorKind = member(fetchErrorKinds, own(value, "fetchErrorKind"));
+  const fetchErrorKind = member(errorKinds, own(value, "fetchErrorKind"));
   const fetchErrorCode = member(fetchErrorCodes, own(value, "fetchErrorCode"));
+  const rpcErrorKind = member(errorKinds, own(value, "rpcErrorKind"));
+  const closeCode = own(value, "closeCode");
+  const connectionFailed = own(value, "connectionFailed");
   const requestAborted = own(value, "requestAborted");
   const sessionAgeMs = own(value, "sessionAgeMs");
   return {
@@ -170,6 +190,9 @@ const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
     ...(typeof upgrade === "boolean" ? { upgrade } : {}),
     ...(fetchErrorKind === undefined ? {} : { fetchErrorKind }),
     ...(fetchErrorCode === undefined ? {} : { fetchErrorCode }),
+    ...(rpcErrorKind === undefined ? {} : { rpcErrorKind }),
+    ...(bounded(closeCode, 1000, 4999) ? { closeCode } : {}),
+    ...(connectionFailed === true ? { connectionFailed } : {}),
     ...(typeof requestAborted === "boolean" ? { requestAborted } : {}),
     ...(bounded(sessionAgeMs, 0, MAX_SESSION_AGE_MS) ? { sessionAgeMs } : {}),
   };

@@ -1,6 +1,7 @@
 import { newWebSocketRpcSession, type RpcPromise } from "capnweb";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
+  artifactRpcErrorFields,
   emitArtifactDiagnostic,
   relayArtifactDiagnostics,
   type ArtifactsOperation,
@@ -43,6 +44,7 @@ const withArtifactsSession = async <A>(
       stage: "session-open",
       outcome: "failure",
       transport: "rpc",
+      ...artifactRpcErrorFields(error),
     });
     throw error;
   }
@@ -62,6 +64,7 @@ const withArtifactsSession = async <A>(
         stage: "session-dispose",
         outcome: "failure",
         transport: "rpc",
+        ...artifactRpcErrorFields(error),
       });
       // oxlint-disable-next-line no-unsafe-finally -- Preserve existing session-disposal error precedence.
       throw error;
@@ -89,6 +92,7 @@ const settleArtifacts = async <A>(
       stage: "envelope",
       outcome: "failure",
       transport: "rpc",
+      ...artifactRpcErrorFields(error),
     });
     throw error;
   }
@@ -143,6 +147,7 @@ class ArtifactsRepositoryMethodsBridge
               stage: "methods-dispose",
               outcome: "failure",
               transport: "rpc",
+              ...artifactRpcErrorFields(error),
             });
             throw error;
           }
