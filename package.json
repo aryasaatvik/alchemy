@@ -63,7 +63,9 @@
     "prepare": "pnpm prepare:hooks && pnpm prepare:patch && pnpm ensure:built",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "lint": "oxlint -c oxlint.config.ts"
+    "lint": "oxlint -c oxlint.config.ts",
+    "pack:integration": "bun scripts/integration-pack/cli.ts",
+    "checkpoint:integration": "bun scripts/integration-pack/checkpoint.ts"
   },
   "devDependencies": {
     "@alchemy.run/pkg": "workspace:*",

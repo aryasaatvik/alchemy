@@ -10878,6 +10878,9 @@ importers:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.5(effect@4.0.5)(redis@6.2.1)
+      '@types/bun':
+        specifier: 'catalog:'
+        version: 1.4.3
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.5

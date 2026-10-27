@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["**/*.ts", "../typescript-source.ts"],
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": true,
+    "tsBuildInfoFile": "../../.cache/tsconfig.integration-pack.tsbuildinfo",
+    // The integration packer runs under Bun (`bun:test`, `Bun.$`).
+    "types": ["bun", "node"]
+  }
+}
