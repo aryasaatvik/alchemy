@@ -13,6 +13,7 @@ import { DEV_RELOAD_EXIT_CODE, DevOptions } from "../DevOptions.ts";
 import { suppressInterruptMessages } from "./errors.ts";
 import {
   configPath,
+  dataDir,
   envFile,
   force,
   include,
@@ -44,6 +45,7 @@ export const devCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage: devStage,
     profile,
   },
