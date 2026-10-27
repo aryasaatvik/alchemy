@@ -1,5 +1,7 @@
 import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as zones from "@distilled.cloud/cloudflare/zones";
+import { cachedFunction } from "alchemy/Util/cached-function";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import type * as HttpClient from "effect/http/HttpClient";
 import * as Stream from "effect/Stream";
@@ -18,6 +20,21 @@ export const isId = (zone: string): boolean => /^[a-f0-9]{32}$/i.test(zone);
 export const matchesZoneHostname = (zoneName: string, hostname: string): boolean =>
   hostname === zoneName || hostname.endsWith(`.${zoneName}`);
 
+export class ZoneNotFound extends Data.TaggedError("ZoneNotFound")<{
+  readonly name: string;
+  readonly message: string;
+}> {}
+
+export const cachedResolveZoneId = () =>
+  cachedFunction(resolveZoneId, {
+    key: ([{ accountId, zone, hostname }]) =>
+      JSON.stringify([
+        accountId,
+        hostname,
+        typeof zone === "object" ? zone.zoneId : (zone ?? null),
+      ]),
+  });
+
 export const resolveZoneId = ({
   accountId,
   zone,
@@ -26,7 +43,11 @@ export const resolveZoneId = ({
   accountId: string;
   zone: Reference | undefined;
   hostname: string;
-}) =>
+}): Effect.Effect<
+  string,
+  ZoneNotFound | zones.ListZonesError,
+  Credentials | HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     if (typeof zone === "object") return zone.zoneId;
     if (typeof zone === "string" && isId(zone)) return zone;
@@ -36,7 +57,10 @@ export const resolveZoneId = ({
       const match = yield* findZoneByName({ accountId, name: candidate });
       if (match) return match.id;
     }
-    return yield* Effect.fail(new Error(`Cloudflare zone not found for ${lookup}`));
+    return yield* new ZoneNotFound({
+      name: lookup,
+      message: `Cloudflare zone not found for ${lookup}`,
+    });
   });
 
 type ZoneListItem = {
