@@ -189,6 +189,8 @@ export interface Delete<R extends ResourceLike = ResourceLike> extends BaseNode<
 
 export interface NoopUpdate<R extends ResourceLike = ResourceLike> extends ApplyNodeBase<R> {
   action: "noop";
+  /** Desired inputs retained for re-evaluation after upstream outputs settle. */
+  props: R["Props"];
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1824,6 +1826,7 @@ const makePlan = <A>(
       } else {
         return Node<NoopUpdate>({
           action: "noop",
+          props: applyProps,
           state: oldState,
         });
       }
