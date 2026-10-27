@@ -458,6 +458,68 @@ for (const name of ["aws", "cloudflare", "axiom", "planetscale"]) {
 console.log(\`Node resolved \${consumerSubpaths.length} Samva subpaths, local Lambda placement, and per-service endpoint routing\`);
 `;
 
+/**
+ * A Node service that imports the AWS provider root and nothing else, the
+ * shape of a deployed API bundle. Framework integrations are optional peers,
+ * so the bundle must build and load without them.
+ */
+const rootBundleConsumer = (): string => `import * as AWS from "@alchemy.run/aws";
+if (typeof AWS.Lambda !== "object") throw new Error("@alchemy.run/aws root has no Lambda namespace");
+console.log("Node bundle of @alchemy.run/aws built and loaded without optional framework peers");
+`;
+
+/** Optional framework peers the root bundle consumer does not install. */
+export const optionalFrameworkPeers: ReadonlyArray<string> = ["@alchemy.run/frontend-frameworks"];
+
+/**
+ * Optional runtime peers a Node host supplies when it uses them (Samva
+ * installs both). The probe leaves them to runtime resolution so it isolates
+ * the framework peers above.
+ */
+const hostSuppliedPeers = ["@effect/platform-bun", "react-devtools-core"] as const;
+
+/**
+ * Bundle and load a root `@alchemy.run/aws` import with `bun build --target
+ * node` in a consumer that has not installed the optional framework peers.
+ */
+const verifyRootBundle = async (
+  artifact: string,
+  manifest: PackageManifest,
+  dependencies: ConsumerDependencies,
+): Promise<void> => {
+  const consumerManifest = freshConsumerManifest(artifact, manifest, {
+    ...dependencies,
+    packages: (dependencies.packages ?? []).filter(
+      (packed) => !optionalFrameworkPeers.includes(packed.name),
+    ),
+  });
+  const consumer = await mkdtemp(join(tmpdir(), "alchemy-integration-root-bundle-"));
+  try {
+    await writeFile(
+      join(consumer, "package.json"),
+      `${JSON.stringify(consumerManifest, null, 2)}\n`,
+    );
+    await writeFile(join(consumer, "consumer-root-bundle.ts"), rootBundleConsumer());
+    await run(["bun", "install", "--ignore-scripts", "--backend=copyfile"], { cwd: consumer });
+    await run(
+      [
+        "bun",
+        "build",
+        "--target",
+        "node",
+        ...hostSuppliedPeers.flatMap((peer) => ["--external", peer]),
+        "--outfile",
+        "consumer-root-bundle.mjs",
+        "consumer-root-bundle.ts",
+      ],
+      { cwd: consumer },
+    );
+    await run(["node", "consumer-root-bundle.mjs"], { cwd: consumer });
+  } finally {
+    await rm(consumer, { recursive: true, force: true });
+  }
+};
+
 export interface ConsumerDependencies {
   /** Exact Effect family version the consumer installs beside the artifact. */
   readonly effect: string;
@@ -549,6 +611,7 @@ export const verifyFreshConsumer = async (
   } finally {
     await rm(consumer, { recursive: true, force: true });
   }
+  await verifyRootBundle(artifact, manifest, dependencies);
 };
 
 export const sha256 = async (path: string): Promise<string> => {

@@ -1,13 +1,29 @@
 import * as Effect from "effect/Effect";
 import { initialCwd } from "../Util/Node.ts";
 
+/**
+ * The Astro config reader in the optional `@alchemy.run/frontend-frameworks`
+ * peer. It is imported through this binding rather than a string literal so
+ * bundlers leave it to runtime: an application that bundles a provider root
+ * without installing the frameworks package must still build.
+ */
+const ASTRO_CONFIG_MODULE = "@alchemy.run/frontend-frameworks/astro/config";
+
+type AstroConfigModule = typeof import("@alchemy.run/frontend-frameworks/astro/config");
+
+const importAstroConfig = () =>
+  Effect.tryPromise(() => import(ASTRO_CONFIG_MODULE) as Promise<AstroConfigModule>);
+
+/** The Astro `output` a website composite deploys. */
+export type AstroOutput = "server" | "static";
+
 export interface AstroOutputProps {
   /** Project root, relative to the initial working directory. */
   readonly rootDir?: string | undefined;
   /** Alternate astro config file, relative to {@link rootDir}. */
   readonly config?: string | undefined;
   /** The composite's `astro.output` prop. */
-  readonly output?: "server" | "static" | undefined;
+  readonly output?: AstroOutput | undefined;
 }
 
 /**
@@ -18,16 +34,15 @@ export interface AstroOutputProps {
  * to the build.
  *
  * `@alchemy.run/frontend-frameworks` is an optional peer dependency, so it
- * is imported lazily. When it is missing or the config cannot be loaded the
- * site falls back to `"server"` (the build reports the real error).
+ * is imported lazily ({@link ASTRO_CONFIG_MODULE}). When it is missing or the
+ * config cannot be loaded the site falls back to `"server"` (the build
+ * reports the real error).
  */
 export const resolveAstroOutput = Effect.fn("Website.resolveAstroOutput")(function* (
   props: AstroOutputProps,
 ) {
   if (props.output !== undefined) return props.output;
-  const declared = yield* Effect.tryPromise(
-    () => import("@alchemy.run/frontend-frameworks/astro/config"),
-  ).pipe(
+  const declared: AstroOutput | undefined = yield* importAstroConfig().pipe(
     Effect.flatMap((astro) =>
       astro.readConfigOutput({ cwd: initialCwd, rootDir: props.rootDir, config: props.config }),
     ),
@@ -43,7 +58,7 @@ export const resolveAstroOutput = Effect.fn("Website.resolveAstroOutput")(functi
 
 export interface AstroSettings {
   /** The resolved `output` (see {@link resolveAstroOutput}). */
-  readonly output: "server" | "static";
+  readonly output: AstroOutput;
   /**
    * Whether the Astro config routes caching through the Cloudflare cache
    * provider (`cacheCloudflare()`), so the Worker needs Workers Cache on.
@@ -61,9 +76,7 @@ export interface AstroSettings {
 export const resolveAstroSettings = Effect.fn("Website.resolveAstroSettings")(function* (
   props: AstroOutputProps,
 ) {
-  const declared = yield* Effect.tryPromise(
-    () => import("@alchemy.run/frontend-frameworks/astro/config"),
-  ).pipe(
+  const declared: Partial<AstroSettings> | undefined = yield* importAstroConfig().pipe(
     Effect.flatMap((astro) =>
       astro.readConfigSettings({ cwd: initialCwd, rootDir: props.rootDir, config: props.config }),
     ),

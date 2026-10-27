@@ -135,7 +135,9 @@ Archive verification checks export targets and Contributions modules for each pa
 Distilled full-service outputs and shared chunks. Fresh-consumer verification installs the coherent
 collection beside the workspace-pinned Effect (`overrides.effect`) and the declared Vite peer, then checks declarations and Bun/Node
 imports, contribution discovery, packaged Lambda boot, local Lambda placement and service endpoint
-routing. `consumerSubpaths` in `scripts/integration-pack/verify.ts` owns the probe inventory.
+routing. A second consumer without the optional framework peers (`optionalFrameworkPeers`) bundles
+and loads a root `@alchemy.run/aws` import with `bun build --target node`, the shape of a deployed
+API. `consumerSubpaths` in `scripts/integration-pack/verify.ts` owns the probe inventory.
 
 Diagnostic options are:
 
