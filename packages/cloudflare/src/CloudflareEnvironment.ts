@@ -7,7 +7,13 @@ import {
 } from "./Auth/AuthConfig.ts";
 import { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
 
-export { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
+export {
+  CloudflareEnvironment,
+  runtimeIdentity,
+  runtimeIdentityLayer,
+  type CloudflareEnvironmentShape,
+  type CloudflareRuntimeIdentity,
+} from "./CloudflareEnvironmentService.ts";
 
 export const fromProfile = () =>
   Layer.effect(

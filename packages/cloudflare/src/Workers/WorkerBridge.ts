@@ -24,7 +24,7 @@ import * as Logger from "effect/Logger";
 import { MinimumLogLevel } from "effect/References";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { CloudflareEnvironment } from "../CloudflareEnvironmentService.ts";
+import { runtimeIdentityLayer } from "../CloudflareEnvironmentService.ts";
 import cloudflare_workers from "./cloudflare_workers.ts";
 import { isScopeEjected } from "./HttpServer.ts";
 import {
@@ -308,11 +308,11 @@ const getSharedBuild = (entrypoint: any, stack: { name: string; stage: string })
           ),
           Layer.provideMerge(Layer.succeed(WorkerEnvironment, env)),
           Layer.provideMerge(
-            Layer.succeed(
-              CloudflareEnvironment,
-              // TODO(sam): fix this with maybe a CloudflareAccountId Effect service
-              // @ts-expect-error - this is hacky, but we only need and have this property
-              Effect.succeed({ account: (env as any).ALCHEMY_CLOUDFLARE_ACCOUNT_ID }),
+            runtimeIdentityLayer(
+              "ALCHEMY_CLOUDFLARE_ACCOUNT_ID" in env &&
+                typeof env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID === "string"
+                ? env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID
+                : undefined,
             ),
           ),
           Layer.provideMerge(Layer.succeed(MinimumLogLevel, (env as any).DEBUG ? "Debug" : "Info")),
