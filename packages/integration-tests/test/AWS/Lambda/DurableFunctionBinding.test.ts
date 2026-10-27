@@ -55,6 +55,15 @@ const functionProvider = () =>
     delete: () => Effect.void,
   });
 
+// `Output`'s requirement parameter defaults to `any`; a reference built from
+// an unannotated Output would surface `any` as its requirement and erase the
+// caller's host-requirement check.
+type IsAny<T> = 0 extends 1 & T ? true : false;
+const referenceRequirementIsNotAny: IsAny<
+  Effect.Services<ReturnType<typeof AWS.Lambda.reference<unknown, unknown>>>
+> = false;
+void referenceRequirementIsNotAny;
+
 const { test } = Test.make({
   providers: Layer.mergeAll(functionProvider(), Credentials.mock),
   state: inMemoryState(),
@@ -127,6 +136,10 @@ test.provider(
       const parent = reconciled.get("NestedDurableParent");
       expect(parent).toBeDefined();
       expect(Object.values(parent?.env ?? {})).toContain("NestedDurable-deployed");
+      // The reference binds its start qualifier under the same key as the
+      // target's self handle, never one derived from function source text.
+      expect(parent?.env).toMatchObject({ NestedDurable_qualifier: "$LATEST" });
+      expect(Object.keys(parent?.env ?? {}).filter((key) => key.includes("_map_"))).toEqual([]);
       const parentPolicyStatements = reconciledBindings
         .get("NestedDurableParent")
         ?.flatMap((binding) => binding.data?.policyStatements ?? []);

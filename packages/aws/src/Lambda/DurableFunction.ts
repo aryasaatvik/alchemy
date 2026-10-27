@@ -613,6 +613,14 @@ const bindDurableReference = (caller: Function, target: Function, name: string) 
       });
 
 /**
+ * The target's start qualifier under the binding key `<LogicalId>.qualifier`,
+ * the key the target's own self handle uses. Yielding an unnamed `Output.map`
+ * derives the key from the mapping function's source text.
+ */
+const boundQualifierOf = (target: Function) =>
+  Output.named(qualifierOf(target), `${target.LogicalId}.qualifier`);
+
+/**
  * Build a management-plane handle for a Durable Function owned by another
  * Lambda. Unlike the function's self handle, this binds the target's deployed
  * physical name into the ambient caller Function.
@@ -624,7 +632,7 @@ export const reference = <Input = unknown, Result = unknown>(
     const caller = yield* Function;
     yield* bindDurableReference(caller, durable.function, durable.name);
     const functionName = yield* durable.functionName;
-    const qualifier = yield* qualifierOf(durable.function);
+    const qualifier = yield* boundQualifierOf(durable.function);
     return yield* makeDurableHandle({
       name: durable.name,
       host: durable.function,
@@ -649,7 +657,7 @@ const resolveDurableHandle = (id: string) => (instance: unknown) => {
       // A nested handle crosses a Lambda boundary, so bind the child's
       // deployed name into the parent while its init graph is being built.
       const functionName = yield* host.functionName;
-      const qualifier = yield* qualifierOf(host);
+      const qualifier = yield* boundQualifierOf(host);
       return yield* makeDurableHandle({ name: id, host, functionName, qualifier });
     });
   }
