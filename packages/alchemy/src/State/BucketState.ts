@@ -1,7 +1,6 @@
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import { decodeFqn, encodeFqn } from "../FQN.ts";
@@ -25,7 +24,10 @@ import { encodeState, reviveState } from "./StateEncoding.ts";
  * object, written with conditional puts. The second deploy fails
  * immediately instead of mixing rows. The holder refreshes the lease until
  * the store closes; a killed process stops refreshing, the lease expires,
- * and the next deploy can take it.
+ * and the next deploy can take it. Expiry only opens the lease to another
+ * deploy: a holder whose refresh ran late (a build that keeps the event
+ * loop busy past the TTL) still holds it until another deploy replaces it,
+ * which the version-conditional writes detect.
  *
  * Each backend supplies a {@link BucketObjects}: plain object operations
  * plus a version token (an S3 ETag, a Cloud Storage generation) for the
@@ -42,7 +44,7 @@ const OUTPUT_FILE = "__stack_output__.json";
  */
 const LEASE_FILE = "__lease__.json";
 
-/** How long a lease stays valid without a refresh. */
+/** How long a lease stays closed to other deploys without a refresh. */
 const LEASE_TTL_MS = 60_000;
 
 /** How long a passing lease check is trusted. A failure is never cached. */
@@ -124,17 +126,11 @@ const amortizeCheck = (
   ttlMs: number,
 ): Effect.Effect<void, StateStoreError> => {
   let lastOkAt: number | undefined;
-  return Effect.suspend(() => {
-    if (lastOkAt !== undefined && Date.now() - lastOkAt < ttlMs) {
-      return Effect.void;
-    }
-    return checkLive.pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          lastOkAt = Date.now();
-        }),
-      ),
-    );
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (lastOkAt !== undefined && now - lastOkAt < ttlMs) return;
+    yield* checkLive;
+    lastOkAt = now;
   });
 };
 
@@ -253,32 +249,26 @@ export const makeBucketState = (options: BucketStateOptions) =>
         const cursor = { version, lost: false };
         const gate = Semaphore.makeUnsafe(1);
 
-        const renew = Semaphore.withPermits(
-          gate,
-          1,
-        )(
+        // Extend the lease from `version`. Only a failed condition loses it:
+        // another deploy replaced the object. A failed request leaves the
+        // cursor alone, so the next refresh or check tries again.
+        const extend = (version: string) =>
           Effect.gen(function* () {
-            if (cursor.lost) return;
             const renewedAt = yield* Clock.currentTimeMillis;
             const next = yield* putLease(
               key,
               { token, expiresAt: renewedAt + LEASE_TTL_MS },
-              { ifVersion: cursor.version },
+              { ifVersion: version },
             );
             if (next === undefined) cursor.lost = true;
             else cursor.version = next;
-          }),
-        ).pipe(
-          Effect.retry({
-            while: () => !cursor.lost,
-            schedule: Schedule.spaced("1 second"),
-            times: 3,
-          }),
-          Effect.catch(() =>
-            Effect.sync(() => {
-              cursor.lost = true;
-            }),
-          ),
+          });
+
+        const renew = Semaphore.withPermits(
+          gate,
+          1,
+        )(Effect.suspend(() => (cursor.lost ? Effect.void : extend(cursor.version)))).pipe(
+          Effect.ignore,
         );
 
         const verify = Semaphore.withPermits(
@@ -288,16 +278,19 @@ export const makeBucketState = (options: BucketStateOptions) =>
           Effect.gen(function* () {
             if (cursor.lost) return yield* Effect.fail(lostError(stack, stage));
             const existing = yield* readLease(key);
-            const observedAt = yield* Clock.currentTimeMillis;
-            const leaseLost =
-              existing === undefined ||
-              existing.record.token !== token ||
-              existing.record.expiresAt <= observedAt;
-            if (leaseLost) {
+            if (existing === undefined || existing.record.token !== token) {
               cursor.lost = true;
               return yield* Effect.fail(lostError(stack, stage));
             }
             cursor.version = existing.version;
+            // Still ours but past its expiry: the refresh ran late. Extend it
+            // at the version just read, which fails if another deploy takes
+            // the lease first.
+            const observedAt = yield* Clock.currentTimeMillis;
+            if (existing.record.expiresAt <= observedAt) {
+              yield* extend(existing.version);
+              if (cursor.lost) return yield* Effect.fail(lostError(stack, stage));
+            }
           }),
         );
 
