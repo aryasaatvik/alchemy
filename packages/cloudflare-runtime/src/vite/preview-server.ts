@@ -6,6 +6,8 @@ import * as Exit from "effect/Exit";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
+import * as Assets from "../core/bindings/assets/Assets.ts";
+import * as Text from "../core/bindings/Text.ts";
 import type { BindingHooks, Module } from "../core/index.ts";
 import { DEFAULT_COMPATIBILITY_DATE } from "../core/internal/constants.ts";
 import * as Runtime from "../core/Runtime.ts";
@@ -149,7 +151,10 @@ const serve = Effect.fn(function* (
 ) {
   const runtime = yield* Runtime.Runtime;
   const modules = yield* Effect.promise(() => readWorkerModules(build));
-  const assetsDirectory = options.worker?.assets?.directory ?? build.assetsDirectory;
+  const prerenderWorker = options.prerenderWorker;
+  const assetsDirectory = prerenderWorker
+    ? (prerenderWorker.assets?.directory ?? build.assetsDirectory)
+    : (options.worker?.assets?.directory ?? build.assetsDirectory);
   return yield* runtime.start({
     // Everything the caller configured on the Worker reaches workerd; the
     // fields below are the ones the preview server owns or extends.
@@ -159,10 +164,20 @@ const serve = Effect.fn(function* (
     proxySharedSecret,
     compatibilityDate: options.compatibilityDate ?? DEFAULT_COMPATIBILITY_DATE,
     compatibilityFlags: options.compatibilityFlags ?? [],
-    bindings: options.worker?.bindings ?? [],
+    bindings: prerenderWorker
+      ? [
+          ...Object.entries(prerenderWorker.env ?? {}).map(([name, value]) =>
+            Text.local(name, value),
+          ),
+          Assets.local("ASSETS"),
+        ]
+      : (options.worker?.bindings ?? []),
     assets:
       options.worker?.assets !== undefined || assetsDirectory !== undefined
-        ? { ...options.worker?.assets, directory: assetsDirectory }
+        ? {
+            ...(prerenderWorker?.assets ?? options.worker?.assets),
+            directory: assetsDirectory,
+          }
         : undefined,
   });
 });

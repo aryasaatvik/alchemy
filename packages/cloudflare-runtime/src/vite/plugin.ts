@@ -14,6 +14,7 @@ import {
   wasmInitPlugin,
 } from "../rolldown/plugins/index.ts";
 import { dev } from "./dev-plugin.ts";
+import { prerender } from "./prerender.ts";
 import { preview } from "./preview-plugin.ts";
 
 export interface CloudflareVitePluginDevOptions {
@@ -234,6 +235,7 @@ export default function cloudflareVitePlugin(
   return [
     alchemyCloudflareVitePlugin(),
     optionsPlugin.vite(options),
+    prerender(options),
     cloudflareExternalsPlugin.vite(options),
     nodejsAlsPlugin.vite(options),
     nodejsImportWarningPlugin.vite(options),
@@ -256,3 +258,5 @@ export default function cloudflareVitePlugin(
     // post-process the returned plugins don't have to handle sparse entries.
   ].filter((plugin): plugin is vite.Plugin => plugin !== null);
 }
+
+export { PRERENDER_ENVIRONMENT } from "./prerender.ts";

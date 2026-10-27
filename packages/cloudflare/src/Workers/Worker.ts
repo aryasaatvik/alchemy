@@ -1,3 +1,4 @@
+import type { CloudflareVitePluginOptions } from "@alchemy.run/cloudflare-runtime/vite";
 import type * as cf from "@cloudflare/workers-types";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import { type MemoOptions } from "alchemy/Command/Memo";
@@ -1099,6 +1100,13 @@ export interface ViteOptions {
    * @internal
    */
   framework?: "foldkit";
+
+  /**
+   * Separate build-only Worker for prerender previews. Its modules are excluded
+   * from deployment. It shares this Worker's compatibility settings and is
+   * selected by preview while `TSS_PRERENDERING` is `"true"`.
+   */
+  prerenderWorker?: CloudflareVitePluginOptions["prerenderWorker"];
 
   /**
    * Overrides the module that becomes the deployed Worker entry, forwarded
