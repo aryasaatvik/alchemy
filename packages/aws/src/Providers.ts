@@ -6,6 +6,7 @@ import { CredentialsStoreLive } from "alchemy/Auth/Credentials";
 import * as Command from "alchemy/Command";
 import { KeyPair, KeyPairProvider } from "alchemy/KeyPair";
 import * as ProviderLayer from "alchemy/Local/ProviderLayer";
+import { ALCHEMY_DEV } from "alchemy/Phase";
 import * as Provider from "alchemy/Provider";
 import { defaultProviderMode } from "alchemy/ProviderMode";
 import { Random, RandomProvider } from "alchemy/Random";
@@ -138,7 +139,12 @@ import * as LakeFormation from "./LakeFormation/index.ts";
 import * as Lambda from "./Lambda/index.ts";
 import * as LexV2 from "./LexV2/index.ts";
 import * as LicenseManager from "./LicenseManager/index.ts";
-import { flociDual, flociServices } from "./Local/FlociServices.ts";
+import {
+  awsSessionConfig,
+  flociDual,
+  flociServices,
+  type LocalProfile,
+} from "./Local/FlociServices.ts";
 import { captureAwsEnvironment, pinCollectionEnvironment } from "./Local/ProviderContext.ts";
 import * as Location from "./Location/index.ts";
 import * as Logs from "./Logs/index.ts";
@@ -225,6 +231,43 @@ import * as XRay from "./XRay/index.ts";
 
 export class Providers extends Provider.ProviderCollection<Providers>()("AWS") {}
 
+/** Options for {@link providers}. */
+export interface ProvidersOptions {
+  /**
+   * Route individual AWS services to their own endpoints, keyed by SDK
+   * service ID (`"SESv2"`, `"Service Quotas"`; matched case- and
+   * punctuation-insensitively). Applies to every provider, the stack
+   * program, and — in a dev run — the local emulator context, where
+   * services without an entry keep the emulator endpoint.
+   *
+   * @example
+   * ```ts
+   * AWS.providers({
+   *   serviceEndpoints: { SES: "http://127.0.0.1:8800/ses" },
+   * });
+   * ```
+   */
+  readonly serviceEndpoints?: Endpoint.ServiceEndpoints;
+  /**
+   * The emulator account, region and endpoint of local-mode (`alchemy dev`)
+   * AWS resources. Reaches every local provider, including the ones the dev
+   * sidecar hosts. Omitted fields keep the managed `alchemy-floci` defaults.
+   *
+   * @example
+   * ```ts
+   * AWS.providers({
+   *   local: {
+   *     accountId: "100000000001",
+   *     region: "us-east-1",
+   *     endpoint: "http://127.0.0.1:4566",
+   *     lambda: { endpoint: "http://floci:4566" },
+   *   },
+   * });
+   * ```
+   */
+  readonly local?: LocalProfile;
+}
+
 /**
  * Every AWS provider, pinned to one AWS environment (account, region and
  * credentials).
@@ -258,7 +301,7 @@ export class Providers extends Provider.ProviderCollection<Providers>()("AWS") {
  * );
  * ```
  */
-export const providers = () =>
+export const providers = (options: ProvidersOptions = {}) =>
   Layer.effect(
     Providers,
     // Providers are PINNED to the environment they are registered with (the
@@ -1909,6 +1952,11 @@ export const providers = () =>
     Layer.provideMerge(Layer.fresh(Region.fromEnvironment)),
     Layer.provideMerge(Layer.fresh(Credentials.fromEnvironment)),
     Layer.provideMerge(Layer.fresh(Endpoint.fromEnvironment)),
+    Layer.provideMerge(
+      options.serviceEndpoints === undefined
+        ? Layer.empty
+        : Endpoint.services(options.serviceEndpoints),
+    ),
     Layer.provideMerge(providedOrDefault()),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),
@@ -1930,13 +1978,27 @@ export const providers = () =>
     // registered data plane. `Layer.merge`'s second layer wins duplicate
     // tags, which is exactly the shadowing we want; `Alchemy.remote()`
     // resources stay live through the per-resource binding routing.
+    //
+    // A program told it is a dev run (`ALCHEMY_DEV`) outside `alchemy dev` —
+    // a supervisor destroying a dev stage with a plain `alchemy destroy` —
+    // evaluates against the same emulator ambient. Deletes still follow each
+    // row's stamped mode.
     (base) =>
       Layer.unwrap(
         Effect.gen(function* () {
           const mode = yield* defaultProviderMode;
-          return mode === "local" ? Layer.merge(base, flociServices()) : base;
+          const devProgram = mode === "local" || (yield* ALCHEMY_DEV);
+          return devProgram ? Layer.merge(base, flociServices()) : base;
         }),
       ),
+    // The local emulator configuration, below everything above so every
+    // local variant (and the dev-mode ambient override) reads it, and
+    // merged out so the dev sidecar receives it with the session.
+    Layer.provideMerge(
+      options.local === undefined && options.serviceEndpoints === undefined
+        ? Layer.empty
+        : awsSessionConfig(options),
+    ),
     Layer.orDie,
   );
 

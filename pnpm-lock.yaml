@@ -8622,6 +8622,9 @@ importers:
 
   packages/aws:
     dependencies:
+      '@alchemy.run/cloudflare':
+        specifier: workspace:*
+        version: link:../cloudflare
       '@alchemy.run/docker':
         specifier: workspace:*
         version: link:../docker
@@ -8634,6 +8637,9 @@ importers:
       '@distilled.cloud/aws':
         specifier: workspace:*
         version: link:../../submodules/distilled/packages/aws
+      '@distilled.cloud/core':
+        specifier: workspace:*
+        version: link:../../submodules/distilled/packages/core
       '@types/aws-lambda':
         specifier: 'catalog:'
         version: 8.10.164

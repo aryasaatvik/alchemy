@@ -1,14 +1,26 @@
-import type { ResolvedCredentials } from "@distilled.cloud/aws/Credentials";
+import {
+  Credentials as ProtocolCredentials,
+  type ResolvedCredentials,
+} from "@distilled.cloud/aws/Credentials";
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import { Region, type RegionName } from "@distilled.cloud/aws/Region";
+import { Retry } from "@distilled.cloud/aws/Retry";
+import { SigningKeyCache } from "@distilled.cloud/aws/SigV4";
+import { ResponseValidation, StrictDecoder } from "@distilled.cloud/core/response-validation";
+import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
 import { AlchemyContext } from "alchemy/AlchemyContext";
 import * as Binding from "alchemy/Binding";
 import type { Input } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import { isResourceOfType, type ResourceLike } from "alchemy/Resource";
 import { CurrentRuntimeContext } from "alchemy/RuntimeContext";
+import { ConfigProvider } from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import { Fetch, RequestInit } from "effect/http/FetchHttpClient";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -20,6 +32,23 @@ import type { PolicyStatement } from "./IAM/Policy.ts";
 import { Role } from "./IAM/Role.ts";
 import { User } from "./IAM/User.ts";
 import { CurrentRegion } from "./Region.ts";
+
+// Bound operations retain protocol services, never the host's initialization scope.
+const operationContext = Context.pick(
+  ProtocolCredentials,
+  Region,
+  HttpClient.HttpClient,
+  Endpoint.Endpoint,
+  Endpoint.ServiceEndpoint,
+  Retry,
+  SigningKeyCache,
+  ResponseValidation,
+  StrictDecoder,
+  ServerRetryHintCapMs,
+  ConfigProvider,
+  Fetch,
+  RequestInit,
+);
 
 /**
  * How an AWS binding reaches AWS from its host:
@@ -268,21 +297,24 @@ export const withCredentials: <Op>(
   operation: Effect.Effect<Op, never, any>,
   region?: Effect.Effect<Effect.Effect<string>, never, any>,
 ) {
-  // A host running as an IAM role signs with its own credentials.
-  if (globalThis.__ALCHEMY_HOST_IDENTITY__ === "AWS.IAM.Role")
+  // Distilled operations implement yield, so acquire them inside the filtered context.
+  const resolve = Effect.gen(function* () {
     return yield* operation as Effect.Effect<Op>;
+  }).pipe(Effect.updateContext((context: Context.Context<never>) => operationContext(context)));
+  // A host running as an IAM role signs with its own credentials.
+  if (globalThis.__ALCHEMY_HOST_IDENTITY__ === "AWS.IAM.Role") return yield* resolve;
   if (!globalThis.__ALCHEMY_RUNTIME__) {
     const host = yield* Binding.Host;
     if (region !== undefined && host !== undefined && !runsAsRole(host)) {
       yield* region as Effect.Effect<Effect.Effect<string>>;
     }
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolve;
   }
 
   const runtime = yield* CurrentRuntimeContext;
   const roleArn = runtime ? yield* runtime.get<string>(KEY_ENV.roleArn) : undefined;
   if (runtime === undefined || roleArn === undefined) {
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolve;
   }
 
   // The created user's key signs `AssumeRole`; read on each refresh.
@@ -301,21 +333,30 @@ export const withCredentials: <Op>(
       } satisfies ResolvedCredentials;
     }),
   );
+  // The resolver's cache merges its construction context into every refresh.
   const credentials = yield* makeAssumeRoleResolver({
     roleArn: Effect.succeed(roleArn),
     base,
     region: "us-east-1",
-  });
+  }).pipe(Effect.updateContext((context: Context.Context<never>) => operationContext(context)));
   const callRegion =
     region !== undefined
       ? yield* region as Effect.Effect<Effect.Effect<string>>
       : Effect.map(runtime.get<string>(KEY_ENV.region), (value) => value ?? "us-east-1");
-  return yield* (operation as Effect.Effect<Op>).pipe(
+  return yield* resolve.pipe(
     Effect.provide([
       Layer.succeed(Credentials, credentials),
       Layer.succeed(Region, callRegion as Effect.Effect<RegionName>),
       Endpoint.fromEnv(),
-      FetchHttpClient.layer,
+      // Construct the transport in the request scope, not the closed init scope.
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.makeWith(
+          (request: Effect.Effect<HttpClientRequest.HttpClientRequest>) =>
+            Effect.flatMap(request, HttpClient.execute).pipe(Effect.provide(FetchHttpClient.layer)),
+          Effect.succeed,
+        ),
+      ),
     ]),
   );
 });
