@@ -260,3 +260,4 @@ export default function cloudflareVitePlugin(
 }
 
 export { PRERENDER_ENVIRONMENT } from "./prerender.ts";
+export { claimWebSocketUpgrade } from "./websockets.ts";

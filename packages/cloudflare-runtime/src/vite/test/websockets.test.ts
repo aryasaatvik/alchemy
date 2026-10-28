@@ -4,7 +4,7 @@ import * as NodeNet from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import { handleWebSocket } from "../websockets.ts";
+import { claimWebSocketUpgrade, handleWebSocket } from "../websockets.ts";
 
 const DEBUG = !!process.env.WS_PROXY_DEBUG;
 const dbg = (...args: Array<unknown>) => {
@@ -67,6 +67,11 @@ const setup = async (): Promise<Harness> => {
   });
 
   const clientServer = NodeHttp.createServer((_req, res) => res.end("OK"));
+  const clientSockets = new Set<NodeNet.Socket>();
+  clientServer.on("connection", (socket) => {
+    clientSockets.add(socket);
+    socket.once("close", () => clientSockets.delete(socket));
+  });
   const upstreamPort = await listen(upstreamServer);
   const removeListener = handleWebSocket(
     clientServer,
@@ -85,6 +90,7 @@ const setup = async (): Promise<Harness> => {
     upstreamConnections,
     cleanup: () => {
       removeListener();
+      for (const socket of clientSockets) socket.destroy();
       for (const client of upstreamWss.clients) {
         client.terminate();
       }
@@ -336,6 +342,32 @@ describe("handleWebSocket", () => {
     expect(message).toBe("ack");
   });
 
+  test("forwards the Worker upgrade when Vite only adds a no-op error listener", async () => {
+    harness.upstreamWss.on("connection", (ws) => ws.send("approvals"));
+    // Vite's HMR listener does this for every non-HMR upgrade it declines.
+    harness.clientServer.on("upgrade", (_request, socket) => {
+      socket.on("error", () => {});
+    });
+
+    const client = new WebSocket(`ws://127.0.0.1:${harness.clientPort}/agents/template-agent/test`);
+    try {
+      const message = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("The Worker handshake was lost")), 2_000);
+        client.on("message", (data) => {
+          clearTimeout(timer);
+          resolve(data.toString());
+        });
+        client.on("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+      expect(message).toBe("approvals");
+    } finally {
+      client.terminate();
+    }
+  });
+
   // https://github.com/alchemy-run/alchemy/issues/2191
   describe("leaves an upgrade another plugin accepts to that plugin", () => {
     const refuseUpgrades = () => {
@@ -371,6 +403,7 @@ describe("handleWebSocket", () => {
       });
       server.on("upgrade", async (request, socket, head) => {
         if (request.url !== "/__echo") return;
+        if (options.verifyDelay !== undefined) claimWebSocketUpgrade(socket);
         if (options.listenerDelay !== undefined) {
           await new Promise((resolve) => setTimeout(resolve, options.listenerDelay));
         }

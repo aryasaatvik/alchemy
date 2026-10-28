@@ -5,6 +5,17 @@ import type * as vite from "vite";
 import { proxyRequestHeaders, resolveForwardedHost } from "./forwarded-host.ts";
 import { workerRequestUrl } from "./worker-request.ts";
 
+const claimedUpgrades = new WeakSet<Duplex>();
+
+/**
+ * Reserve a matching upgrade before asynchronous verification that does not return a promise
+ * from its event listener (for example, `ws`'s callback-based `verifyClient`). Call only after
+ * matching the plugin's route. An async listener can instead return its full completion promise.
+ */
+export const claimWebSocketUpgrade = (socket: Duplex): void => {
+  claimedUpgrades.add(socket);
+};
+
 /**
  * Handles 'upgrade' requests on the Vite HTTP server and forwards the
  * WebSocket handshake to the local workerd address as a raw HTTP upgrade.
@@ -87,10 +98,10 @@ export function handleWebSocket(
     // relay, `server.proxy` with `ws: true`), and every `upgrade` listener sees
     // every upgrade. This listener runs first (see `prependListener` below),
     // so it records the socket's state before any other listener can touch
-    // it. A socket another listener has since written to, ended, or attached
-    // its own listeners to belongs to that listener: the Worker's answer is
+    // it. A socket another listener has since written to, ended, or explicitly
+    // claimed belongs to that listener: the Worker's answer is
     // dropped rather than written over the other listener's handshake.
-    const before = socketActivity(socket);
+    const before = socketWrittenBytes(socket);
     const claimed = () => isClaimed(socket, before);
 
     // The Worker's answer is buffered until it is known who answers the
@@ -177,34 +188,18 @@ const isPromiseLike = (value: unknown): value is PromiseLike<unknown> =>
   "then" in value &&
   typeof value.then === "function";
 
-interface SocketActivity {
-  readonly written: number;
-  readonly listeners: number;
-}
-
 // `bytesWritten` counts what Node has queued; Bun counts only what it has
 // flushed, so the queued `writableLength` is added for both.
-const socketActivity = (socket: Duplex): SocketActivity => ({
-  written: ((socket as Partial<NodeNet.Socket>).bytesWritten ?? 0) + socket.writableLength,
-  listeners: (["data", "error", "close", "end"] as const).reduce(
-    (count, event) => count + socket.listenerCount(event),
-    0,
-  ),
-});
+const socketWrittenBytes = (socket: Duplex): number =>
+  ((socket as Partial<NodeNet.Socket>).bytesWritten ?? 0) + socket.writableLength;
 
-// A listener that takes an upgrade writes its handshake or refusal, or
-// subscribes to the socket synchronously, before it answers: `ws` listens for
-// `error` before an async `verifyClient`, and Vite's `server.proxy` for
-// `close` and `error` before it dials its target.
-const isClaimed = (socket: Duplex, before: SocketActivity) => {
-  const now = socketActivity(socket);
-  return (
-    socket.destroyed ||
-    socket.writableEnded ||
-    now.written > before.written ||
-    now.listeners > before.listeners
-  );
-};
+// Vite attaches an error listener even when it declines a non-HMR upgrade. Only a response,
+// closure, or an explicit claim transfers ownership; subscriptions alone prove nothing.
+const isClaimed = (socket: Duplex, before: number) =>
+  socket.destroyed ||
+  socket.writableEnded ||
+  socketWrittenBytes(socket) > before ||
+  claimedUpgrades.has(socket);
 
 /**
  * Matches the origin of a Sandbox SDK preview URL.
