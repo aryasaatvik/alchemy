@@ -196,8 +196,9 @@ const sandboxApi = <A, E, R>(
         Effect.fail(
           ApiError.make({
             subtag,
-            message,
+            message: `${message} The request timed out after 30 seconds.`,
             hint: "The request timed out after 30 seconds.",
+            timeoutMs: 30_000,
           }),
         ),
     }),
