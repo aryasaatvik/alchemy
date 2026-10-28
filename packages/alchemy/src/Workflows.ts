@@ -169,10 +169,28 @@ export type Status<A, E> =
   | { readonly _tag: "Interrupted" }
   | { readonly _tag: "Died"; readonly defect: unknown };
 
+/** Provider reference captured per start call, without changing WorkflowEngine. @internal */
+export class StartReceipt extends Context.Service<
+  StartReceipt,
+  {
+    readonly record: (reference: string) => void;
+  }
+>()("alchemy/Workflows/StartReceipt") {}
+
+/** Provider reference for reading a saved run without rediscovering it by name. @internal */
+export const ExecutionReference = Context.Reference<string | undefined>(
+  "alchemy/Workflows/ExecutionReference",
+  {
+    defaultValue: () => undefined,
+  },
+);
+
 /** One run of a workflow. */
 export interface Run<A, E> {
   /** The run's id. Store it to read the run again later, with `get`. */
   readonly executionId: string;
+  /** Provider's execution reference (a durable execution ARN on Lambda), when supplied. */
+  readonly executionRef?: string;
   /** Where the run is now. */
   readonly status: Effect.Effect<Status<A, E>>;
   /**
@@ -194,7 +212,10 @@ export interface WorkflowClient<W> {
   /** Start a run, or return the run already started with the same key. Returns at once. */
   readonly start: (payload: PayloadOf<W>) => Effect.Effect<Run<SuccessOf<W>, ErrorOf<W>>>;
   /** A run started earlier, by its id. */
-  readonly get: (executionId: string) => Run<SuccessOf<W>, ErrorOf<W>>;
+  readonly get: (
+    executionId: string,
+    options?: { readonly executionRef?: string },
+  ) => Run<SuccessOf<W>, ErrorOf<W>>;
 }
 
 /** How often to check a run while waiting for it. */
@@ -228,7 +249,7 @@ const POLL = Schedule.min([Schedule.exponential("100 millis"), Schedule.spaced("
  *
  * **Example:** Read a run later
  * ```typescript
- * const run = greet.get(executionId);
+ * const run = greet.get(executionId, { executionRef: savedProviderReference });
  * const status = yield* run.status;
  * yield* run.signal(Approval, "agent-7");
  * ```
@@ -245,16 +266,22 @@ export const RunWorkflow = <W extends Workflow.Any>(
   Effect.gen(function* () {
     const engine = yield* WorkflowEngine.WorkflowEngine;
     const typed = workflow as unknown as Workflow.Workflow<string, any, any, any>;
-    const run = (executionId: string) =>
-      makeRun(engine, typed, executionId) as Run<SuccessOf<W>, ErrorOf<W>>;
+    const run = (executionId: string, options?: { readonly executionRef?: string }) =>
+      makeRun(engine, typed, executionId, options?.executionRef) as Run<SuccessOf<W>, ErrorOf<W>>;
     return {
       start: (payload) =>
-        typed
-          .execute(payload, { discard: true })
-          .pipe(
+        Effect.gen(function* () {
+          let executionRef: string | undefined;
+          const executionId = yield* typed.execute(payload, { discard: true }).pipe(
             Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
-            Effect.map(run),
-          ) as Effect.Effect<Run<SuccessOf<W>, ErrorOf<W>>>,
+            Effect.provideService(StartReceipt, {
+              record: (ref) => {
+                executionRef = ref;
+              },
+            }),
+          );
+          return run(executionId, { executionRef });
+        }) as Effect.Effect<Run<SuccessOf<W>, ErrorOf<W>>>,
       get: run,
     } satisfies WorkflowClient<W>;
   });
@@ -268,10 +295,14 @@ export const makeRun = (
   engine: WorkflowEngine.WorkflowEngine["Service"],
   workflow: Workflow.Workflow<string, any, any, any>,
   executionId: string,
+  executionRef?: string,
 ): Run<unknown, unknown> => {
-  const poll = engine.poll(workflow, executionId);
+  const poll = engine
+    .poll(workflow, executionId)
+    .pipe(Effect.provideService(ExecutionReference, executionRef));
   return {
     executionId,
+    executionRef,
     status: Effect.map(poll, (result): Status<unknown, unknown> => {
       if (Option.isNone(result)) return { _tag: "NotStarted" };
       if (result.value._tag === "Suspended") return { _tag: "Running" };
@@ -301,6 +332,8 @@ export const makeRun = (
         deferredName: deferred.name,
         exit: Exit.succeed(value),
       }) as Effect.Effect<void>,
-    interrupt: engine.interrupt(workflow, executionId),
+    interrupt: engine
+      .interrupt(workflow, executionId)
+      .pipe(Effect.provideService(ExecutionReference, executionRef)),
   };
 };
