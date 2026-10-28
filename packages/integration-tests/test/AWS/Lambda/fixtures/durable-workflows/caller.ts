@@ -5,7 +5,9 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
 import path from "pathe";
+import { CallbacksLive } from "./callbacks.ts";
 import { TestWorkflows } from "./host.ts";
 import { Approval, Approve, Checkout, Greet, Nap, Parent } from "./workflows.ts";
 
@@ -15,7 +17,14 @@ const main = path.resolve(import.meta.dirname, "caller.ts");
 export class WorkflowCaller extends Lambda.Function<WorkflowCaller>()("WorkflowCaller") {}
 
 export default WorkflowCaller.make(
-  { main, functionUrl: true, timeout: Duration.seconds(60) },
+  {
+    main,
+    ...(process.env.WORKFLOW_FLOCI_ENDPOINT
+      ? { env: { AWS_ENDPOINT_URL: "http://floci:4566" } }
+      : {}),
+    functionUrl: true,
+    timeout: Duration.seconds(60),
+  },
   Effect.gen(function* () {
     const workflows = {
       Greet: yield* Workflows.RunWorkflow(Greet),
@@ -42,7 +51,10 @@ export default WorkflowCaller.make(
         switch (operation) {
           case "start": {
             const run = yield* workflow.start(payload);
-            return yield* HttpServerResponse.json({ executionId: run.executionId });
+            return yield* HttpServerResponse.json({
+              executionId: run.executionId,
+              executionRef: run.executionRef,
+            });
           }
           case "status":
             return yield* HttpServerResponse.json(yield* workflow.get(executionId).status);
@@ -63,5 +75,7 @@ export default WorkflowCaller.make(
         ),
       ),
     };
-  }).pipe(Effect.provide(Lambda.DurableFunctionEngine(TestWorkflows))),
+  }).pipe(
+    Effect.provide(Lambda.DurableFunctionEngine(TestWorkflows).pipe(Layer.provide(CallbacksLive))),
+  ),
 );

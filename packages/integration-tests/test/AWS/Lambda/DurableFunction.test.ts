@@ -9,8 +9,7 @@ import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import DurableFlowLive, { DurableFlow } from "./fixtures/durable-handler";
-
-const testOptions = { providers: AWS.providers() };
+import { testOptions } from "./fixtures/workflow-floci/test-options.ts";
 const { test, beforeAll, afterAll } = Test.make(testOptions);
 const sharedStack = Core.scratchStack(testOptions, "LambdaDurable");
 

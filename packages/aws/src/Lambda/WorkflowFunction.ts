@@ -11,7 +11,8 @@ import {
   makeCurrentActivity,
   payloadCodec,
 } from "alchemy/WorkflowEncoding";
-import { type Implemented, implemented } from "alchemy/Workflows";
+import { type Implemented, implemented, StartReceipt, ExecutionReference } from "alchemy/Workflows";
+import * as Cause from "effect/Cause";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -22,13 +23,17 @@ import type * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { Workflow, WorkflowEngine } from "effect/workflow";
+import { Activity, DurableDeferred, Workflow, WorkflowEngine } from "effect/workflow";
 import * as AWSBindings from "../AWSBindings.ts";
-import { DurableStep } from "./Durable.ts";
+import {
+  DurableStep,
+  DurableStepAttempt,
+  type DurableCallbackConfig,
+  type DurableRetryPolicy,
+} from "./Durable.ts";
 import {
   DurableFunction,
   type DurableFunctionImpl,
@@ -68,16 +73,17 @@ export interface WorkflowFunctionClass<
    * Deploy the function with the Layer that implements its workflows. The
    * Layer must implement every workflow the function lists.
    */
-  make<ROut, E, RIn, PropsReq = never>(
+  make<ROut, E, RIn, StoreE, StoreR, PropsReq = never>(
     props:
       | InputProps<DurableFunctionProps>
       | Effect.Effect<InputProps<DurableFunctionProps>, ConfigError, PropsReq>,
     workflows: Layer.Layer<ROut, E, RIn> & ImplementsAll<ROut, WorkflowNames<W>>,
+    callbacks: Layer.Layer<WorkflowCallbackStore, StoreE, StoreR>,
   ): Layer.Layer<
     Self,
     never,
     | Function["Providers"]
-    | Exclude<PropsReq | RIn, DurableFunctionInitServices | WorkflowEngine.WorkflowEngine>
+    | Exclude<PropsReq | RIn | StoreR, DurableFunctionInitServices | WorkflowEngine.WorkflowEngine>
   >;
   new (_: never): {};
 }
@@ -93,6 +99,10 @@ export interface WorkflowFunctionClass<
  * in between. `DurableDeferred.await` waits for a callback, completed with a
  * run's `signal`. A workflow's child workflows run in the same function.
  *
+ * Activities (name + attempt), clocks and deferreds are memoized by name within
+ * each execution, matching Effect's identity semantics. Loop iterations must use
+ * distinct names, for example `apply/${pass}`. Reusing a name replays its result.
+ *
  * Other functions start and read its runs with
  * {@link DurableFunctionEngine | AWS.Lambda.DurableFunctionEngine}.
  *
@@ -102,6 +112,7 @@ export interface WorkflowFunctionClass<
  * // src/OrderWorkflows.ts
  * import * as AWS from "@alchemy.run/aws";
  * import * as Layer from "effect/Layer";
+ * import { CallbacksLive } from "./callbacks.ts";
  * import { PlaceOrder, PlaceOrderLive, RefundOrder, RefundOrderLive } from "./orders.ts";
  *
  * export class OrderWorkflows extends AWS.Lambda.WorkflowFunction<OrderWorkflows>()(
@@ -112,10 +123,13 @@ export interface WorkflowFunctionClass<
  * export default OrderWorkflows.make(
  *   { main: import.meta.url, executionTimeout: "7 days" },
  *   Layer.mergeAll(PlaceOrderLive, RefundOrderLive),
+ *   CallbacksLive,
  * );
  * ```
  *
- * The Layer must implement every workflow the function lists: leaving one out
+ * Supply the same persistent WorkflowCallbackStore to this host and its callers.
+ * Its layer is built inside the Lambda init context so it can resolve bindings.
+ * The workflow Layer must implement every workflow the function lists: leaving one out
  * is a type error.
  *
  * @resource
@@ -137,8 +151,11 @@ export const WorkflowFunction =
       durable,
       {
         workflows: options.workflows,
-        make: (props: unknown, workflows: Layer.Layer<any, any, any>) =>
-          make(props, makeWorkflowRunner(workflows)),
+        make: (
+          props: unknown,
+          workflows: Layer.Layer<any, any, any>,
+          callbacks: Layer.Layer<WorkflowCallbackStore, any, any>,
+        ) => make(props, makeWorkflowRunner(workflows).pipe(Effect.provide(callbacks))),
       },
       Effectable.Prototype({
         label: `AWS.Lambda.WorkflowFunction<${id}>`,
@@ -146,6 +163,81 @@ export const WorkflowFunction =
       }),
     );
   };
+
+/**
+ * Persistent callback registrations shared by a host and its callers. Keys are
+ * Effect's deferred tokens. register must be idempotent and commit before it
+ * returns; lookup must return that callback id across cold starts.
+ *
+ * Missing-token policy (early completion) belongs to the supplied store. The
+ * engine does not buffer, poll, or decide that policy. Scope stores to a host
+ * and stage, and retain entries for the execution's retention period.
+ */
+export class WorkflowCallbackStore extends Context.Service<
+  WorkflowCallbackStore,
+  {
+    readonly register: (token: DurableDeferred.Token, callbackId: string) => Effect.Effect<void>;
+    readonly lookup: (token: DurableDeferred.Token) => Effect.Effect<string>;
+  }
+>()("alchemy/AWS/Lambda/WorkflowCallbackStore") {}
+
+/**
+ * Lambda callback timeout and heartbeat deadline for the enclosed deferred await.
+ * Provide with Effect.provideService(DeferredWait, { timeout: "1 day" }). A timeout
+ * surfaces as the SDK's CallbackTimeoutError defect; it is not a deferred failure.
+ */
+export const DeferredWait = Context.Reference<DurableCallbackConfig>(
+  "alchemy/AWS/Lambda/DeferredWait",
+  { defaultValue: () => ({}) },
+);
+
+/**
+ * Annotate an Activity with a Lambda-native retry policy. The SDK checkpoints
+ * failed attempts and backoff; typed failures are decoded after exhaustion.
+ * Effect's Activity.retry is an outer Effect combinator and does not expose its
+ * policy to WorkflowEngine, so use this annotation for SDK-managed retries.
+ */
+export const ActivityRetry = Context.Reference<DurableRetryPolicy | undefined>(
+  "alchemy/AWS/Lambda/ActivityRetry",
+  { defaultValue: () => undefined },
+);
+
+const ACTIVITY_FAILURE = "alchemy/ActivityFailure";
+const DEFERRED_FAILURE = "alchemy/DeferredFailure";
+const failureText = (error: unknown, name: string): string | undefined => {
+  let node = error;
+  for (let depth = 0; depth < 8 && typeof node === "object" && node !== null; depth++) {
+    if (
+      "message" in node &&
+      typeof node.message === "string" &&
+      node.message.startsWith(`${name}:`)
+    )
+      return node.message.slice(name.length + 1);
+    if (
+      "name" in node &&
+      node.name === name &&
+      "message" in node &&
+      typeof node.message === "string"
+    )
+      return node.message;
+    node = "cause" in node ? node.cause : undefined;
+  }
+  return undefined;
+};
+
+const memo = <A>(
+  run: CurrentRun["Service"],
+  key: string,
+  effect: Effect.Effect<A>,
+): Effect.Effect<A> =>
+  Effect.gen(function* () {
+    let cached = run.results.get(key);
+    if (!cached) {
+      cached = yield* Effect.cached(effect);
+      run.results.set(key, cached);
+    }
+    return yield* cached;
+  });
 
 // ---------------------------------------------------------------- callers
 
@@ -164,6 +256,8 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  * **Example:** An API that starts orders
  * ```typescript
  * import * as AWS from "@alchemy.run/aws";
+ * import * as Layer from "effect/Layer";
+ * import { CallbacksLive } from "./callbacks.ts";
  * import * as Workflows from "alchemy/Workflows";
  * import * as Effect from "effect/Effect";
  * import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -182,7 +276,9 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  *         return HttpServerResponse.text(run.executionId);
  *       }),
  *     };
- *   }).pipe(Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows))),
+ *   }).pipe(Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows).pipe(
+ *     Layer.provide(CallbacksLive),
+ *   ))),
  * );
  * ```
  *
@@ -202,7 +298,7 @@ export const DurableFunctionEngine = <
 ): Layer.Layer<
   WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
   never,
-  LambdaServices | Function["Providers"]
+  LambdaServices | Function["Providers"] | WorkflowCallbackStore
 > =>
   Layer.merge(
     Layer.effect(
@@ -210,6 +306,7 @@ export const DurableFunctionEngine = <
       Effect.gen(function* () {
         const bind = yield* AWSBindings.Bind;
         const context = yield* Effect.context<LambdaServices>();
+        const callbacks = yield* WorkflowCallbackStore;
         const routes = new Map<string, Calls>();
         for (const host of hosts) {
           const fn = yield* host;
@@ -251,6 +348,7 @@ export const DurableFunctionEngine = <
           for (const workflow of host.workflows) routes.set(workflow._tag, calls);
         }
         return makeEngine({
+          callbacks,
           route: (workflowName) => {
             const calls = routes.get(workflowName);
             return calls
@@ -268,7 +366,7 @@ export const DurableFunctionEngine = <
   ) as Layer.Layer<
     WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
     never,
-    LambdaServices | Function["Providers"]
+    LambdaServices | Function["Providers"] | WorkflowCallbackStore
   >;
 
 // ---------------------------------------------------------------- hosting
@@ -289,18 +387,19 @@ type LambdaServices = Credentials | HttpClient.HttpClient;
  * The durable function body that runs the given workflows: each invocation is
  * one run of one workflow. Child workflows start in the same function.
  */
-const makeWorkflowRunner = <ROut, E, RIn>(
+export const makeWorkflowRunner = <ROut, E, RIn>(
   workflows: Layer.Layer<ROut, E, RIn>,
 ): Effect.Effect<
   DurableFunctionImpl<WorkflowInvocation, string>,
   E,
-  Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
+  Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices | WorkflowCallbackStore
 > =>
   Effect.gen(function* () {
     const context = yield* Effect.context<LambdaServices>();
     const functionName = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_NAME);
     // Child workflows start on the version this function is running.
     const version = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_VERSION ?? "$LATEST");
+    const callbacks = yield* WorkflowCallbackStore;
     const handlers = new Map<string, Registration>();
     const calls = makeCalls(
       (effect) => effect.pipe(Effect.provide(context)),
@@ -310,6 +409,7 @@ const makeWorkflowRunner = <ROut, E, RIn>(
       Effect.succeed(version),
     );
     const engine = makeEngine({
+      callbacks,
       route: (workflowName) =>
         handlers.has(workflowName)
           ? Effect.succeed(calls)
@@ -345,6 +445,7 @@ const makeWorkflowRunner = <ROut, E, RIn>(
                 durable,
                 context: runContext,
                 clocks: new Map(),
+                results: new Map(),
                 instance,
               }),
             ),
@@ -359,7 +460,7 @@ const makeWorkflowRunner = <ROut, E, RIn>(
   }) as Effect.Effect<
     DurableFunctionImpl<WorkflowInvocation, string>,
     E,
-    Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
+    Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices | WorkflowCallbackStore
   >;
 
 // ---------------------------------------------------------------- the engine
@@ -385,6 +486,7 @@ class CurrentRun extends Context.Service<
     readonly durable: DurableStep["Service"];
     readonly context: Context.Context<never>;
     readonly clocks: Map<string, Duration.Duration>;
+    readonly results: Map<string, Effect.Effect<any>>;
     readonly instance: WorkflowEngine.WorkflowInstance["Service"];
   }
 >()("alchemy/AWS/Lambda/DurableWorkflows/CurrentRun") {}
@@ -421,7 +523,8 @@ const isInterrupt = (defect: unknown) => {
 
 /** Lambda's calls for one host function. */
 interface Calls {
-  readonly start: (executionName: string, invocation: WorkflowInvocation) => Effect.Effect<void>;
+  readonly start: (executionName: string, invocation: WorkflowInvocation) => Effect.Effect<string>;
+  readonly target: Effect.Effect<string>;
   readonly find: (executionName: string) => Effect.Effect<string | undefined>;
   readonly get: (
     executionArn: string,
@@ -429,7 +532,7 @@ interface Calls {
   readonly history: (executionArn: string) => Effect.Effect<ReadonlyArray<Lambda.Event>>;
   readonly stop: (executionArn: string) => Effect.Effect<void>;
   readonly succeed: (callbackId: string, result: string) => Effect.Effect<void>;
-  readonly fail: (callbackId: string, errorType: string) => Effect.Effect<void>;
+  readonly fail: (callbackId: string, errorType: string, message?: string) => Effect.Effect<void>;
 }
 
 const unwrap = (value: string | Redacted.Redacted<string> | undefined) =>
@@ -443,6 +546,10 @@ const makeCalls = (
   const run = <A, E>(effect: Effect.Effect<A, E, LambdaServices>) =>
     provide(effect).pipe(Effect.orDie);
   return {
+    target: Effect.map(
+      Effect.all([functionName, qualifier]),
+      ([name, version]) => `${name}:${version}`,
+    ),
     start: (executionName, invocation) =>
       Effect.flatMap(Effect.all([functionName, qualifier]), ([FunctionName, Qualifier]) =>
         run(
@@ -453,9 +560,11 @@ const makeCalls = (
             DurableExecutionName: executionName,
             Payload: JSON.stringify(invocation),
           }).pipe(
-            // Already started: the same key always names the same run.
-            Effect.catchTag("DurableExecutionAlreadyStartedException", () => Effect.void),
-            Effect.asVoid,
+            Effect.flatMap((result) =>
+              result.DurableExecutionArn
+                ? Effect.succeed(result.DurableExecutionArn)
+                : Effect.die(new Error("Lambda Invoke did not return DurableExecutionArn")),
+            ),
           ),
         ),
       ),
@@ -492,15 +601,28 @@ const makeCalls = (
           Effect.asVoid,
         ),
       ),
-    fail: (callbackId, errorType) =>
+    fail: (callbackId, errorType, message = errorType) =>
       run(
         Lambda.sendDurableExecutionCallbackFailure({
           CallbackId: callbackId,
-          Error: { ErrorType: errorType, ErrorMessage: errorType },
+          Error: { ErrorType: errorType, ErrorMessage: message },
         }).pipe(Effect.asVoid),
       ),
   };
 };
+
+/** Build the runtime engine without deploy-time host binding. @internal */
+export const makeWorkflowEngine = (functionName: string, qualifier: string) =>
+  Effect.gen(function* () {
+    const context = yield* Effect.context<LambdaServices>();
+    const callbacks = yield* WorkflowCallbackStore;
+    const calls = makeCalls(
+      (effect) => Effect.provide(effect, context),
+      Effect.succeed(functionName),
+      Effect.succeed(qualifier),
+    );
+    return makeEngine({ callbacks, route: () => Effect.succeed(calls), register: () => undefined });
+  });
 
 /**
  * A durable execution's name: the workflow and execution id, within Lambda's
@@ -544,29 +666,6 @@ const pendingCallbacks = (events: ReadonlyArray<Lambda.Event>) => {
   return [...started.values()];
 };
 
-/** Find a waiting run's callback, retrying while the run is on its way to the wait. */
-const findCallback = (calls: Calls, executionName: string, deferredName: string) =>
-  Effect.gen(function* () {
-    const arn = yield* calls.find(executionName);
-    if (!arn) return yield* Effect.fail("not started" as const);
-    const callback = pendingCallbacks(yield* calls.history(arn)).find(
-      (pending) => pending.name === deferredName,
-    );
-    return callback ? callback.callbackId : yield* Effect.fail("not waiting" as const);
-  }).pipe(
-    Effect.retry({
-      schedule: Schedule.min([Schedule.exponential("200 millis"), Schedule.spaced("5 seconds")]),
-      times: 40,
-    }),
-    Effect.catch((reason) =>
-      Effect.die(
-        new Error(
-          `Workflow execution ${executionName} is ${reason === "not started" ? "not started" : `not waiting on ${deferredName}`}`,
-        ),
-      ),
-    ),
-  );
-
 /** Read a run's result from Lambda: undefined while it runs. */
 const readResult = (calls: Calls, workflow: Workflow.AnyWithProps, executionArn: string) =>
   Effect.gen(function* () {
@@ -587,10 +686,15 @@ const readResult = (calls: Calls, workflow: Workflow.AnyWithProps, executionArn:
 
 const makeEngine = (options: {
   /** The calls for the function that hosts a workflow. */
+  readonly callbacks: WorkflowCallbackStore["Service"];
   readonly route: (workflowName: string) => Effect.Effect<Calls>;
   readonly register: (workflow: Workflow.AnyWithProps, execute: Execute) => void;
 }): WorkflowEngine.WorkflowEngine["Service"] => {
-  const { route } = options;
+  const { route, callbacks } = options;
+  const find = (calls: Calls, name: string) =>
+    Effect.flatMap(ExecutionReference, (arn) =>
+      arn === undefined ? calls.find(name) : Effect.succeed(arn),
+    );
   return WorkflowEngine.makeUnsafe({
     register: (workflow, execute) =>
       Effect.sync(() => options.register(workflow as Workflow.AnyWithProps, execute)),
@@ -602,43 +706,32 @@ const makeEngine = (options: {
         const payload = yield* Schema.encodeEffect(payloadCodec(workflow as Workflow.AnyWithProps))(
           opts.payload,
         ).pipe(Effect.orDie);
-        yield* calls.start(executionName, {
-          workflow: workflow._tag,
-          executionId: opts.executionId,
-          payload,
-        });
-        if (opts.discard) return undefined;
+        const invocation = { workflow: workflow._tag, executionId: opts.executionId, payload };
         const run = yield* Effect.serviceOption(CurrentRun);
-        if (Option.isNone(run)) {
-          const arn = yield* calls.find(executionName);
-          const result = arn
-            ? yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)
-            : undefined;
-          return result ?? new Workflow.Suspended({});
+        if (Option.isSome(run) && !opts.discard) {
+          const text = yield* memo(
+            run.value,
+            `child/${executionName}`,
+            Effect.flatMap(calls.target, (target) =>
+              run.value.durable.invoke<string>(`child/${executionName}`, target, invocation),
+            ),
+          );
+          return yield* decodeResult(workflow as Workflow.AnyWithProps, text);
         }
-        // A child workflow: wait for it here, with durable waits between checks.
-        for (let check = 0; ; check++) {
-          const text = yield* run.value.durable.step({
-            name: `child/${executionName}/${check}`,
-            effect: Effect.gen(function* () {
-              const arn = yield* calls.find(executionName);
-              const result = arn
-                ? yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)
-                : undefined;
-              return result
-                ? yield* encodeResult(workflow as Workflow.AnyWithProps, result.exit)
-                : "";
-            }),
-          });
-          if (text !== "") return yield* decodeResult(workflow as Workflow.AnyWithProps, text);
-          yield* run.value.durable.wait(`child-wait/${executionName}/${check}`, "5 seconds");
-        }
+        const arn = yield* calls.start(executionName, invocation);
+        const receipt = yield* Effect.serviceOption(StartReceipt);
+        if (Option.isSome(receipt)) receipt.value.record(arn);
+        if (opts.discard) return undefined;
+        return (
+          (yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)) ??
+          new Workflow.Suspended({})
+        );
       }) as Effect.Effect<any>,
 
     poll: (workflow, executionId) =>
       Effect.gen(function* () {
         const calls = yield* route(workflow._tag);
-        const arn = yield* calls.find(executionNameOf(workflow._tag, executionId));
+        const arn = yield* find(calls, executionNameOf(workflow._tag, executionId));
         if (!arn) return Option.none();
         const result = yield* readResult(calls, workflow as Workflow.AnyWithProps, arn);
         return Option.some(result ?? new Workflow.Suspended({}));
@@ -649,7 +742,7 @@ const makeEngine = (options: {
     interrupt: (workflow, executionId) =>
       Effect.gen(function* () {
         const calls = yield* route(workflow._tag);
-        const arn = yield* calls.find(executionNameOf(workflow._tag, executionId));
+        const arn = yield* find(calls, executionNameOf(workflow._tag, executionId));
         if (!arn) return;
         const pending = pendingCallbacks(yield* calls.history(arn));
         if (pending.length === 0) return yield* calls.stop(arn);
@@ -661,7 +754,7 @@ const makeEngine = (options: {
     interruptUnsafe: (workflow, executionId) =>
       Effect.gen(function* () {
         const calls = yield* route(workflow._tag);
-        const arn = yield* calls.find(executionNameOf(workflow._tag, executionId));
+        const arn = yield* find(calls, executionNameOf(workflow._tag, executionId));
         if (arn) yield* calls.stop(arn);
       }),
 
@@ -677,33 +770,65 @@ const makeEngine = (options: {
           instance.executionId,
         );
         activityInstance.interrupted = instance.interrupted;
-        const text = yield* run.durable.step({
-          name: `${activity.name}/${attempt}`,
-          effect: activity.executeEncoded.pipe(
-            Workflow.intoResult,
-            Effect.flatMap((result) =>
-              result._tag === "Complete"
-                ? encodeExit(result.exit)
-                : Effect.die(new Error(`Activity ${activity.name} suspended inside a step`)),
-            ),
-            // The run's services, with the step's own instance.
-            Effect.provide(
-              Layer.succeedContext(
-                run.context.pipe(
-                  Context.add(WorkflowEngine.WorkflowInstance, activityInstance),
-                  Context.add(
-                    CurrentActivity,
-                    makeCurrentActivity(
-                      instance.workflow._tag,
-                      instance.executionId,
-                      activity.name,
+        const retry = Context.get(activity.annotations, ActivityRetry);
+        const text = yield* memo(
+          run,
+          `activity/${activity.name}/${attempt}`,
+          run.durable
+            .step({
+              name: `${activity.name}/${attempt}`,
+              ...(retry
+                ? {
+                    retry,
+                    retryWhen: (error: Error) => failureText(error, ACTIVITY_FAILURE) !== undefined,
+                  }
+                : { retry: { limit: 0 } }),
+              effect: Effect.flatMap(DurableStepAttempt, (nativeAttempt) =>
+                activity.executeEncoded.pipe(
+                  Effect.provideService(Activity.CurrentAttempt, attempt + nativeAttempt - 1),
+                  Workflow.intoResult,
+                  Effect.flatMap((result) =>
+                    result._tag === "Complete"
+                      ? Effect.flatMap(encodeExit(result.exit), (text) =>
+                          retry &&
+                          Exit.isFailure(result.exit) &&
+                          Cause.hasFails(result.exit.cause) &&
+                          !Cause.hasInterrupts(result.exit.cause)
+                            ? Effect.die(
+                                Object.assign(new Error(`${ACTIVITY_FAILURE}:${text}`), {
+                                  name: ACTIVITY_FAILURE,
+                                }),
+                              )
+                            : Effect.succeed(text),
+                        )
+                      : Effect.die(new Error(`Activity ${activity.name} suspended inside a step`)),
+                  ),
+                  // The run's services, with the step's own instance.
+                  Effect.provide(
+                    Layer.succeedContext(
+                      run.context.pipe(
+                        Context.add(WorkflowEngine.WorkflowInstance, activityInstance),
+                        Context.add(
+                          CurrentActivity,
+                          makeCurrentActivity(
+                            instance.workflow._tag,
+                            instance.executionId,
+                            activity.name,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ) as Effect.Effect<string>,
+            })
+            .pipe(
+              Effect.catchDefect((error) => {
+                const text = failureText(error, ACTIVITY_FAILURE);
+                return text === undefined ? Effect.die(error) : Effect.succeed(text);
+              }),
             ),
-          ) as Effect.Effect<string>,
-        });
+        );
         return new Workflow.Complete({ exit: yield* decodeExit(text) });
       }),
 
@@ -713,21 +838,40 @@ const makeEngine = (options: {
         const run = yield* currentRun("DurableDeferred reads");
         const duration = run.clocks.get(deferred.name);
         if (duration !== undefined) {
-          yield* run.durable.wait(deferred.name, Duration.max(duration, Duration.seconds(1)));
+          yield* memo(
+            run,
+            `clock/${deferred.name}`,
+            run.durable.wait(deferred.name, Duration.max(duration, Duration.seconds(1))),
+          );
           return Option.some(Exit.void);
         }
-        const text = yield* run.durable
-          .waitForCallback<string>({ name: deferred.name, submitter: () => Effect.void })
-          .pipe(
-            Effect.catchDefect((defect) =>
-              isInterrupt(defect)
-                ? Effect.sync(() => {
+        const config = yield* DeferredWait;
+        const token = DurableDeferred.TokenParsed.make({
+          workflowName: run.instance.workflow._tag,
+          executionId: run.instance.executionId,
+          deferredName: deferred.name,
+        }).asToken;
+        const text = yield* memo(
+          run,
+          `deferred/${deferred.name}`,
+          run.durable
+            .waitForCallback<string>({
+              ...config,
+              name: deferred.name,
+              submitter: (callbackId) => callbacks.register(token, callbackId),
+            })
+            .pipe(
+              Effect.catchDefect((defect) => {
+                if (isInterrupt(defect))
+                  return Effect.sync(() => {
                     run.instance.interrupted = true;
                     run.instance.suspended = false;
-                  }).pipe(Effect.andThen(Effect.interrupt))
-                : Effect.die(defect),
+                  }).pipe(Effect.andThen(Effect.interrupt));
+                const encoded = failureText(defect, DEFERRED_FAILURE);
+                return encoded === undefined ? Effect.die(defect) : Effect.succeed(encoded);
+              }),
             ),
-          );
+        );
         return Option.some(
           yield* decodeExit(typeof text === "string" ? text : JSON.stringify(text)),
         );
@@ -736,9 +880,16 @@ const makeEngine = (options: {
     deferredDone: (opts) =>
       Effect.gen(function* () {
         const calls = yield* route(opts.workflowName);
-        const executionName = executionNameOf(opts.workflowName, opts.executionId);
-        const callbackId = yield* findCallback(calls, executionName, opts.deferredName);
-        yield* calls.succeed(callbackId, yield* encodeExit(opts.exit));
+        const token = DurableDeferred.TokenParsed.make({
+          workflowName: opts.workflowName,
+          executionId: opts.executionId,
+          deferredName: opts.deferredName,
+        }).asToken;
+        const callbackId = yield* callbacks.lookup(token);
+        const text = yield* encodeExit(opts.exit);
+        if (Exit.isFailure(opts.exit))
+          yield* calls.fail(callbackId, DEFERRED_FAILURE, `${DEFERRED_FAILURE}:${text}`);
+        else yield* calls.succeed(callbackId, text);
       }),
 
     scheduleClock: (_workflow, opts) =>

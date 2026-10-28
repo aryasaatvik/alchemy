@@ -49,6 +49,8 @@ export interface DurableStepConfig {
    *   silent re-run.
    */
   semantics?: "at-least-once" | "at-most-once";
+  /** Restrict retries to failures owned by the step's protocol. */
+  retryWhen?: (error: Error) => boolean;
 }
 
 /**
@@ -98,10 +100,16 @@ export class DurableStep extends Context.Service<
   DurableStep,
   {
     step<T>(options: DurableStepOptions<T>): Effect.Effect<T>;
+    invoke<T>(name: string, functionName: string, input: unknown): Effect.Effect<T>;
     wait(name: string, duration: Duration.Input): Effect.Effect<void>;
     waitForCallback<T>(options: DurableCallbackOptions): Effect.Effect<T>;
   }
 >()("AWS.Lambda.DurableStep") {}
+
+/** Current SDK step attempt, replayed from its checkpoint. @internal */
+export const DurableStepAttempt = Context.Reference<number>("AWS.Lambda.DurableStepAttempt", {
+  defaultValue: () => 1,
+});
 
 /**
  * Runtime information about the current durable execution.

@@ -1,6 +1,7 @@
 import * as Lambda from "@alchemy.run/aws/Lambda";
 import * as Duration from "effect/Duration";
 import path from "pathe";
+import { CallbacksLive } from "./callbacks.ts";
 import { Approve, Checkout, Greet, Nap, Parent, WorkflowsLive } from "./workflows.ts";
 
 const main = path.resolve(import.meta.dirname, "host.ts");
@@ -13,6 +14,9 @@ export class TestWorkflows extends Lambda.WorkflowFunction<TestWorkflows>()("Tes
 export default TestWorkflows.make(
   {
     main,
+    ...(process.env.WORKFLOW_FLOCI_ENDPOINT
+      ? { env: { AWS_ENDPOINT_URL: "http://floci:4566" } }
+      : {}),
     executionTimeout: Duration.hours(1),
     retentionPeriod: "1 day",
     timeout: Duration.seconds(60),
@@ -20,4 +24,5 @@ export default TestWorkflows.make(
     alias: "live",
   },
   WorkflowsLive,
+  CallbacksLive,
 );

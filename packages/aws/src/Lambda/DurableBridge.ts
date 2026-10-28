@@ -36,6 +36,7 @@ import * as Scope from "effect/Scope";
 import {
   DurableExecutionContext,
   DurableStep,
+  DurableStepAttempt,
   type DurableCallbackOptions,
   type DurableRetryPolicy,
   type DurableStepOptions,
@@ -144,9 +145,10 @@ interface NativeDurableContext {
   executionContext: { readonly durableExecutionArn: string };
   step<T>(
     name: string,
-    fn: (stepContext: unknown) => Promise<T>,
+    fn: (stepContext: { attempt: number }) => Promise<T>,
     config?: NativeStepConfig,
   ): Promise<T>;
+  invoke<T>(name: string, functionName: string, input: unknown): Promise<T>;
   wait(name: string, duration: { seconds: number }): Promise<void>;
   waitForCallback<T>(
     name: string,
@@ -214,7 +216,14 @@ const toNativeRetryStrategy = (
 const toNativeStepConfig = (options: DurableStepOptions<any>): NativeStepConfig | undefined => {
   if (!options.retry && !options.semantics) return undefined;
   return {
-    ...(options.retry ? { retryStrategy: toNativeRetryStrategy(options.retry) } : {}),
+    ...(options.retry
+      ? {
+          retryStrategy: (error: Error, attempt: number) =>
+            options.retryWhen && !options.retryWhen(error)
+              ? { shouldRetry: false }
+              : toNativeRetryStrategy(options.retry!)(error, attempt),
+        }
+      : {}),
     ...(options.semantics
       ? {
           semantics:
@@ -227,11 +236,19 @@ const toNativeStepConfig = (options: DurableStepOptions<any>): NativeStepConfig 
 };
 
 const wrapDurableContext = (dctx: NativeDurableContext): DurableStep["Service"] => ({
+  invoke: <T>(name: string, functionName: string, input: unknown) =>
+    Effect.tryPromise(() => dctx.invoke<T>(name, functionName, input)).pipe(Effect.orDie),
   step: <T>(options: DurableStepOptions<T>) =>
     Effect.tryPromise(() =>
       dctx.step<T>(
         options.name,
-        () => Effect.runPromise(options.effect),
+        async (stepContext) => {
+          const exit = await Effect.runPromiseExit(
+            options.effect.pipe(Effect.provideService(DurableStepAttempt, stepContext.attempt)),
+          );
+          if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
+          return exit.value;
+        },
         toNativeStepConfig(options),
       ),
     ).pipe(Effect.orDie),

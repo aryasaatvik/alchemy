@@ -4,6 +4,7 @@ import { describe, expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
 import * as Core from "@alchemy.run/test/Core";
 import * as Lambda from "@distilled.cloud/aws/lambda";
+import * as S3 from "@distilled.cloud/aws/s3";
 import type { Status } from "alchemy/Workflows";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -11,10 +12,12 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
+import { DurableDeferred } from "effect/workflow";
+import { Callbacks } from "./fixtures/durable-workflows/callbacks.ts";
 import CallerLive, { WorkflowCaller } from "./fixtures/durable-workflows/caller.ts";
 import HostLive, { TestWorkflows } from "./fixtures/durable-workflows/host.ts";
-
-const testOptions = { providers: AWS.providers() };
+import { Approval, Approve } from "./fixtures/durable-workflows/workflows.ts";
+import { testOptions } from "./fixtures/workflow-floci/test-options.ts";
 const { test, beforeAll, afterAll } = Test.make(testOptions);
 const sharedStack = Core.scratchStack(testOptions, "LambdaWorkflowFunction");
 
@@ -33,6 +36,7 @@ describe(
     let functionName: string;
     let aliasVersion: string;
     let url: string;
+    let callbackBucket: string;
 
     beforeAll(
       Effect.gen(function* () {
@@ -41,13 +45,16 @@ describe(
           Effect.gen(function* () {
             const host = yield* TestWorkflows;
             const caller = yield* WorkflowCaller;
+            const callbacks = yield* Callbacks;
             return {
+              callbackBucket: callbacks.bucketName,
               functionName: host.functionName,
               version: host.version,
               url: caller.functionUrl,
             };
           }).pipe(Effect.provide(Layer.mergeAll(HostLive, CallerLive))),
         );
+        callbackBucket = outputs.callbackBucket;
         functionName = outputs.functionName;
         aliasVersion = outputs.version!;
         url = outputs.url!.replace(/\/$/, "");
@@ -63,7 +70,13 @@ describe(
     const request = <T>(target: string, method: "GET" | "POST" = "GET") =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const response = yield* method === "POST" ? client.post(target) : client.get(target);
+        const original = new URL(target);
+        const endpoint = process.env.WORKFLOW_FLOCI_ENDPOINT;
+        const routed = endpoint ? `${endpoint}${original.pathname}${original.search}` : target;
+        const options = endpoint ? { headers: { host: original.host } } : undefined;
+        const response = yield* method === "POST"
+          ? client.post(routed, options)
+          : client.get(routed, options);
         const body = yield* response.text;
         if (response.status !== 200) {
           return yield* new NotReady({
@@ -88,6 +101,12 @@ describe(
           status: request<RunStatus>(`${url}/status/${workflow}/${id}?executionId=${executionId}`),
         }),
       );
+
+    const awaitCallback = (executionId: string) =>
+      S3.headObject({
+        Bucket: callbackBucket,
+        Key: DurableDeferred.tokenFromExecutionId(Approval, { workflow: Approve, executionId }),
+      }).pipe(Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 20 }), Effect.asVoid);
 
     /** Read a run's status until it's finished. */
     const awaitResult = (status: Effect.Effect<RunStatus, unknown, HttpClient.HttpClient>) =>
@@ -197,6 +216,7 @@ describe(
         Effect.gen(function* () {
           const id = yield* freshId("approve");
           const run = yield* start("Approve", id);
+          yield* awaitCallback(run.executionId);
           yield* request(
             `${url}/approve/Approve/${id}?executionId=${run.executionId}&by=agent`,
             "POST",
@@ -247,6 +267,7 @@ describe(
         Effect.gen(function* () {
           const id = yield* freshId("interrupt");
           const run = yield* start("Approve", id);
+          yield* awaitCallback(run.executionId);
           // Interrupt once it's waiting on its signal.
           yield* stepsOf("Approve", run.executionId).pipe(
             Effect.repeat({
