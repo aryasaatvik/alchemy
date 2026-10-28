@@ -11,7 +11,13 @@ import {
   makeCurrentActivity,
   payloadCodec,
 } from "alchemy/WorkflowEncoding";
-import { type Implemented, implemented, StartReceipt, ExecutionReference } from "alchemy/Workflows";
+import {
+  type Implemented,
+  implemented,
+  StartReceipt,
+  ExecutionReference,
+  NotYetWaiting,
+} from "alchemy/Workflows";
 import * as Cause from "effect/Cause";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
@@ -26,7 +32,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { Activity, DurableDeferred, Workflow, WorkflowEngine } from "effect/workflow";
+import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
 import * as AWSBindings from "../AWSBindings.ts";
 import {
   DurableStep,
@@ -73,17 +79,16 @@ export interface WorkflowFunctionClass<
    * Deploy the function with the Layer that implements its workflows. The
    * Layer must implement every workflow the function lists.
    */
-  make<ROut, E, RIn, StoreE, StoreR, PropsReq = never>(
+  make<ROut, E, RIn, PropsReq = never>(
     props:
       | InputProps<DurableFunctionProps>
       | Effect.Effect<InputProps<DurableFunctionProps>, ConfigError, PropsReq>,
     workflows: Layer.Layer<ROut, E, RIn> & ImplementsAll<ROut, WorkflowNames<W>>,
-    callbacks: Layer.Layer<WorkflowCallbackStore, StoreE, StoreR>,
   ): Layer.Layer<
     Self,
     never,
     | Function["Providers"]
-    | Exclude<PropsReq | RIn | StoreR, DurableFunctionInitServices | WorkflowEngine.WorkflowEngine>
+    | Exclude<PropsReq | RIn, DurableFunctionInitServices | WorkflowEngine.WorkflowEngine>
   >;
   new (_: never): {};
 }
@@ -103,6 +108,16 @@ export interface WorkflowFunctionClass<
  * each execution, matching Effect's identity semantics. Loop iterations must use
  * distinct names, for example `apply/${pass}`. Reusing a name replays its result.
  *
+ * Complete an open wait with Workflows.completeDeferred or a Run's complete
+ * API: an absent or closed wait returns typed NotYetWaiting, with no retry or
+ * buffering. Plain DurableDeferred.done and the legacy Run.signal API raise a
+ * clear defect in that case.
+ * Lambda history is the sole source of callback state.
+ *
+ * Use ActivityRetry annotations for durable SDK retries. Native Activity.retry
+ * is in-process only and is not durable on this engine. DurableDeferred.raceAll
+ * is unsupported on this engine; use DeferredWait for callback deadlines.
+ *
  * Other functions start and read its runs with
  * {@link DurableFunctionEngine | AWS.Lambda.DurableFunctionEngine}.
  *
@@ -112,7 +127,6 @@ export interface WorkflowFunctionClass<
  * // src/OrderWorkflows.ts
  * import * as AWS from "@alchemy.run/aws";
  * import * as Layer from "effect/Layer";
- * import { CallbacksLive } from "./callbacks.ts";
  * import { PlaceOrder, PlaceOrderLive, RefundOrder, RefundOrderLive } from "./orders.ts";
  *
  * export class OrderWorkflows extends AWS.Lambda.WorkflowFunction<OrderWorkflows>()(
@@ -123,12 +137,9 @@ export interface WorkflowFunctionClass<
  * export default OrderWorkflows.make(
  *   { main: import.meta.url, executionTimeout: "7 days" },
  *   Layer.mergeAll(PlaceOrderLive, RefundOrderLive),
- *   CallbacksLive,
  * );
  * ```
  *
- * Supply the same persistent WorkflowCallbackStore to this host and its callers.
- * Its layer is built inside the Lambda init context so it can resolve bindings.
  * The workflow Layer must implement every workflow the function lists: leaving one out
  * is a type error.
  *
@@ -151,11 +162,8 @@ export const WorkflowFunction =
       durable,
       {
         workflows: options.workflows,
-        make: (
-          props: unknown,
-          workflows: Layer.Layer<any, any, any>,
-          callbacks: Layer.Layer<WorkflowCallbackStore, any, any>,
-        ) => make(props, makeWorkflowRunner(workflows).pipe(Effect.provide(callbacks))),
+        make: (props: unknown, workflows: Layer.Layer<any, any, any>) =>
+          make(props, makeWorkflowRunner(workflows)),
       },
       Effectable.Prototype({
         label: `AWS.Lambda.WorkflowFunction<${id}>`,
@@ -163,23 +171,6 @@ export const WorkflowFunction =
       }),
     );
   };
-
-/**
- * Persistent callback registrations shared by a host and its callers. Keys are
- * Effect's deferred tokens. register must be idempotent and commit before it
- * returns; lookup must return that callback id across cold starts.
- *
- * Missing-token policy (early completion) belongs to the supplied store. The
- * engine does not buffer, poll, or decide that policy. Scope stores to a host
- * and stage, and retain entries for the execution's retention period.
- */
-export class WorkflowCallbackStore extends Context.Service<
-  WorkflowCallbackStore,
-  {
-    readonly register: (token: DurableDeferred.Token, callbackId: string) => Effect.Effect<void>;
-    readonly lookup: (token: DurableDeferred.Token) => Effect.Effect<string>;
-  }
->()("alchemy/AWS/Lambda/WorkflowCallbackStore") {}
 
 /**
  * Lambda callback timeout and heartbeat deadline for the enclosed deferred await.
@@ -257,7 +248,6 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  * ```typescript
  * import * as AWS from "@alchemy.run/aws";
  * import * as Layer from "effect/Layer";
- * import { CallbacksLive } from "./callbacks.ts";
  * import * as Workflows from "alchemy/Workflows";
  * import * as Effect from "effect/Effect";
  * import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -276,9 +266,7 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  *         return HttpServerResponse.text(run.executionId);
  *       }),
  *     };
- *   }).pipe(Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows).pipe(
- *     Layer.provide(CallbacksLive),
- *   ))),
+ *   }).pipe(Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows))),
  * );
  * ```
  *
@@ -298,7 +286,7 @@ export const DurableFunctionEngine = <
 ): Layer.Layer<
   WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
   never,
-  LambdaServices | Function["Providers"] | WorkflowCallbackStore
+  LambdaServices | Function["Providers"]
 > =>
   Layer.merge(
     Layer.effect(
@@ -306,7 +294,6 @@ export const DurableFunctionEngine = <
       Effect.gen(function* () {
         const bind = yield* AWSBindings.Bind;
         const context = yield* Effect.context<LambdaServices>();
-        const callbacks = yield* WorkflowCallbackStore;
         const routes = new Map<string, Calls>();
         for (const host of hosts) {
           const fn = yield* host;
@@ -348,7 +335,6 @@ export const DurableFunctionEngine = <
           for (const workflow of host.workflows) routes.set(workflow._tag, calls);
         }
         return makeEngine({
-          callbacks,
           route: (workflowName) => {
             const calls = routes.get(workflowName);
             return calls
@@ -366,7 +352,7 @@ export const DurableFunctionEngine = <
   ) as Layer.Layer<
     WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
     never,
-    LambdaServices | Function["Providers"] | WorkflowCallbackStore
+    LambdaServices | Function["Providers"]
   >;
 
 // ---------------------------------------------------------------- hosting
@@ -392,14 +378,13 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
 ): Effect.Effect<
   DurableFunctionImpl<WorkflowInvocation, string>,
   E,
-  Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices | WorkflowCallbackStore
+  Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
 > =>
   Effect.gen(function* () {
     const context = yield* Effect.context<LambdaServices>();
     const functionName = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_NAME);
     // Child workflows start on the version this function is running.
     const version = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_VERSION ?? "$LATEST");
-    const callbacks = yield* WorkflowCallbackStore;
     const handlers = new Map<string, Registration>();
     const calls = makeCalls(
       (effect) => effect.pipe(Effect.provide(context)),
@@ -409,7 +394,6 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
       Effect.succeed(version),
     );
     const engine = makeEngine({
-      callbacks,
       route: (workflowName) =>
         handlers.has(workflowName)
           ? Effect.succeed(calls)
@@ -460,7 +444,7 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
   }) as Effect.Effect<
     DurableFunctionImpl<WorkflowInvocation, string>,
     E,
-    Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices | WorkflowCallbackStore
+    Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
   >;
 
 // ---------------------------------------------------------------- the engine
@@ -530,6 +514,10 @@ interface Calls {
     executionArn: string,
   ) => Effect.Effect<{ readonly status: string; readonly result: string | undefined }>;
   readonly history: (executionArn: string) => Effect.Effect<ReadonlyArray<Lambda.Event>>;
+  readonly historyPage: (
+    executionArn: string,
+    marker?: string,
+  ) => Effect.Effect<Lambda.GetDurableExecutionHistoryResponse>;
   readonly stop: (executionArn: string) => Effect.Effect<void>;
   readonly succeed: (callbackId: string, result: string) => Effect.Effect<void>;
   readonly fail: (callbackId: string, errorType: string, message?: string) => Effect.Effect<void>;
@@ -593,6 +581,15 @@ const makeCalls = (
           Effect.map((events) => [...events]),
         ),
       ),
+    historyPage: (executionArn, marker) =>
+      run(
+        Lambda.getDurableExecutionHistory({
+          DurableExecutionArn: executionArn,
+          ReverseOrder: true,
+          MaxItems: 20,
+          Marker: marker,
+        }),
+      ),
     stop: (executionArn) =>
       run(Lambda.stopDurableExecution({ DurableExecutionArn: executionArn }).pipe(Effect.asVoid)),
     succeed: (callbackId, result) =>
@@ -615,13 +612,12 @@ const makeCalls = (
 export const makeWorkflowEngine = (functionName: string, qualifier: string) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<LambdaServices>();
-    const callbacks = yield* WorkflowCallbackStore;
     const calls = makeCalls(
       (effect) => Effect.provide(effect, context),
       Effect.succeed(functionName),
       Effect.succeed(qualifier),
     );
-    return makeEngine({ callbacks, route: () => Effect.succeed(calls), register: () => undefined });
+    return makeEngine({ route: () => Effect.succeed(calls), register: () => undefined });
   });
 
 /**
@@ -666,6 +662,64 @@ const pendingCallbacks = (events: ReadonlyArray<Lambda.Event>) => {
   return [...started.values()];
 };
 
+/**
+ * Scan newest first, carrying terminal ids and context names across page boundaries.
+ * The SDK's callback is unnamed; its enclosing WaitForCallback context owns the
+ * deferred name. Terminal ids exclude their starts even across page boundaries.
+ */
+const findCallback = (calls: Calls, executionArn: string, deferredName: string) =>
+  Effect.gen(function* () {
+    const closed = new Set<string>();
+    const names = new Map<string, string>();
+    const starts: Array<{
+      id: string;
+      callbackId: string;
+      parentId: string | undefined;
+      name: string | undefined;
+    }> = [];
+    let marker: string | undefined;
+    const markers = new Set<string>();
+    do {
+      const page = yield* calls.historyPage(executionArn, marker);
+      for (const event of page.Events) {
+        if (!event.Id) continue;
+        if (event.SubType === "WaitForCallback" && event.Name) names.set(event.Id, event.Name);
+        if (
+          event.CallbackSucceededDetails ||
+          event.CallbackFailedDetails ||
+          event.CallbackTimedOutDetails
+        )
+          closed.add(event.Id);
+        if (event.CallbackStartedDetails)
+          starts.push({
+            id: event.Id,
+            callbackId: event.CallbackStartedDetails.CallbackId,
+            parentId: event.ParentId,
+            name: event.Name,
+          });
+      }
+      let unresolved = false;
+      for (const start of starts) {
+        if (closed.has(start.id)) continue;
+        const name = start.parentId ? names.get(start.parentId) : start.name;
+        if (name === undefined) {
+          unresolved = true;
+          continue;
+        }
+        if (name === deferredName && !unresolved) return start.callbackId;
+      }
+      marker = page.NextMarker;
+      if (marker !== undefined) {
+        if (markers.has(marker))
+          return yield* Effect.die(
+            new Error(`Lambda returned a repeated history marker for ${executionArn}`),
+          );
+        markers.add(marker);
+      }
+    } while (marker !== undefined);
+    return undefined;
+  });
+
 /** Read a run's result from Lambda: undefined while it runs. */
 const readResult = (calls: Calls, workflow: Workflow.AnyWithProps, executionArn: string) =>
   Effect.gen(function* () {
@@ -686,11 +740,10 @@ const readResult = (calls: Calls, workflow: Workflow.AnyWithProps, executionArn:
 
 const makeEngine = (options: {
   /** The calls for the function that hosts a workflow. */
-  readonly callbacks: WorkflowCallbackStore["Service"];
   readonly route: (workflowName: string) => Effect.Effect<Calls>;
   readonly register: (workflow: Workflow.AnyWithProps, execute: Execute) => void;
 }): WorkflowEngine.WorkflowEngine["Service"] => {
-  const { route, callbacks } = options;
+  const { route } = options;
   const find = (calls: Calls, name: string) =>
     Effect.flatMap(ExecutionReference, (arn) =>
       arn === undefined ? calls.find(name) : Effect.succeed(arn),
@@ -846,11 +899,6 @@ const makeEngine = (options: {
           return Option.some(Exit.void);
         }
         const config = yield* DeferredWait;
-        const token = DurableDeferred.TokenParsed.make({
-          workflowName: run.instance.workflow._tag,
-          executionId: run.instance.executionId,
-          deferredName: deferred.name,
-        }).asToken;
         const text = yield* memo(
           run,
           `deferred/${deferred.name}`,
@@ -858,7 +906,7 @@ const makeEngine = (options: {
             .waitForCallback<string>({
               ...config,
               name: deferred.name,
-              submitter: (callbackId) => callbacks.register(token, callbackId),
+              submitter: () => Effect.void,
             })
             .pipe(
               Effect.catchDefect((defect) => {
@@ -880,12 +928,17 @@ const makeEngine = (options: {
     deferredDone: (opts) =>
       Effect.gen(function* () {
         const calls = yield* route(opts.workflowName);
-        const token = DurableDeferred.TokenParsed.make({
-          workflowName: opts.workflowName,
-          executionId: opts.executionId,
-          deferredName: opts.deferredName,
-        }).asToken;
-        const callbackId = yield* callbacks.lookup(token);
+        const arn = yield* find(calls, executionNameOf(opts.workflowName, opts.executionId));
+        const callbackId =
+          arn === undefined ? undefined : yield* findCallback(calls, arn, opts.deferredName);
+        if (callbackId === undefined)
+          return yield* Effect.die(
+            new NotYetWaiting({
+              workflowName: opts.workflowName,
+              executionId: opts.executionId,
+              deferredName: opts.deferredName,
+            }),
+          );
         const text = yield* encodeExit(opts.exit);
         if (Exit.isFailure(opts.exit))
           yield* calls.fail(callbackId, DEFERRED_FAILURE, `${DEFERRED_FAILURE}:${text}`);

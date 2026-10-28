@@ -1,4 +1,3 @@
-import { WorkflowCallbackStore } from "@alchemy.run/aws/Lambda/WorkflowFunction";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
@@ -21,20 +20,4 @@ export const services = (endpoint: string) =>
         region: "us-east-1" as const,
       }),
     ),
-    Layer.succeed(WorkflowCallbackStore, {
-      register: (token, id) =>
-        Effect.promise(async () => {
-          const response = await fetch(`${endpoint}/pr3-workflow-callbacks/${token}`, {
-            method: "PUT",
-            body: id,
-          });
-          if (!response.ok) throw new Error(`register: ${response.status}`);
-        }),
-      lookup: (token) =>
-        Effect.promise(async () => {
-          const response = await fetch(`${endpoint}/pr3-workflow-callbacks/${token}`);
-          if (!response.ok) throw new Error(`lookup: ${response.status}`);
-          return response.text();
-        }),
-    }),
   );

@@ -1,7 +1,6 @@
 import * as Lambda from "@alchemy.run/aws/Lambda";
 import * as Duration from "effect/Duration";
 import path from "pathe";
-import { CallbacksLive } from "./callbacks.ts";
 import { Approve, Checkout, Greet, Nap, Parent, WorkflowsLive } from "./workflows.ts";
 
 const main = path.resolve(import.meta.dirname, "host.ts");
@@ -24,5 +23,4 @@ export default TestWorkflows.make(
     alias: "live",
   },
   WorkflowsLive,
-  CallbacksLive,
 );

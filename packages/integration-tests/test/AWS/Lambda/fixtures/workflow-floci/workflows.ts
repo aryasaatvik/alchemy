@@ -13,6 +13,9 @@ export const Approval = DurableDeferred.make("approval", {
   success: Schema.String,
   error: Rejected,
 });
+export const LoopApprovals = [0, 1].map((iteration) =>
+  DurableDeferred.make(`loop/${iteration}`, { success: Schema.String, error: Rejected }),
+);
 export const Child = Workflow.make("Child", {
   payload: { id: Schema.String },
   success: Schema.String,
@@ -28,6 +31,35 @@ export const live = Layer.mergeAll(
   Workflows.layer(Child, ({ id }) => Effect.succeed(`child:${id}`)),
   Workflows.layer(Probe, ({ id, mode }) =>
     Effect.gen(function* () {
+      if (mode === "early")
+        yield* DurableClock.sleep({
+          name: "before-await",
+          duration: "8 seconds",
+          inMemoryThreshold: 0,
+        });
+      if (mode === "loop") {
+        const results: string[] = [];
+        for (const deferred of LoopApprovals) results.push(yield* DurableDeferred.await(deferred));
+        return results.join(",");
+      }
+      if (mode === "paged") {
+        const [approval] = yield* Effect.all(
+          [
+            DurableDeferred.await(Approval),
+            Effect.gen(function* () {
+              yield* DurableClock.sleep({
+                name: "before-history",
+                duration: "1 second",
+                inMemoryThreshold: 0,
+              });
+              for (let index = 0; index < 32; index++)
+                yield* Activity.make({ name: `filler/${index}`, execute: Effect.void });
+            }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        return approval;
+      }
       if (mode === "child") return yield* Child.execute({ id });
       if (mode === "clock") {
         yield* DurableClock.sleep({ name: "nap", duration: "2 seconds", inMemoryThreshold: 0 });
@@ -52,7 +84,7 @@ export const live = Layer.mergeAll(
           execute: Effect.gen(function* () {
             const endpoint = process.env.AWS_ENDPOINT_URL!;
             const response = yield* Effect.promise(() =>
-              fetch(`${endpoint}/pr3-workflow-callbacks/attempt-${id}`),
+              fetch(`${endpoint}/pr3-workflow-attempts/attempt-${id}`),
             );
             const nativeAttempt = yield* Activity.CurrentAttempt;
             const attempt = response.ok
@@ -63,7 +95,7 @@ export const live = Layer.mergeAll(
                 new Error(`native attempt ${nativeAttempt}, counter ${attempt}`),
               );
             yield* Effect.promise(() =>
-              fetch(`${endpoint}/pr3-workflow-callbacks/attempt-${id}`, {
+              fetch(`${endpoint}/pr3-workflow-attempts/attempt-${id}`, {
                 method: "PUT",
                 body: String(attempt),
               }),

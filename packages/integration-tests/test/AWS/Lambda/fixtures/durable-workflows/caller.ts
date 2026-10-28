@@ -5,9 +5,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
-import * as Layer from "effect/Layer";
 import path from "pathe";
-import { CallbacksLive } from "./callbacks.ts";
 import { TestWorkflows } from "./host.ts";
 import { Approval, Approve, Checkout, Greet, Nap, Parent } from "./workflows.ts";
 
@@ -75,7 +73,5 @@ export default WorkflowCaller.make(
         ),
       ),
     };
-  }).pipe(
-    Effect.provide(Lambda.DurableFunctionEngine(TestWorkflows).pipe(Layer.provide(CallbacksLive))),
-  ),
+  }).pipe(Effect.provide(Lambda.DurableFunctionEngine(TestWorkflows))),
 );
