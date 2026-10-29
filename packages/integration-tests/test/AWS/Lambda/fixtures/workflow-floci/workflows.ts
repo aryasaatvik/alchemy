@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { Activity, DurableClock, DurableDeferred, Workflow } from "effect/workflow";
+import { readInline } from "./activity-context.ts";
 
 export class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {
   reason: Schema.String,
@@ -31,6 +32,7 @@ export const live = Layer.mergeAll(
   Workflows.layer(Child, ({ id }) => Effect.succeed(`child:${id}`)),
   Workflows.layer(Probe, ({ id, mode }) =>
     Effect.gen(function* () {
+      if (mode === "context") return JSON.stringify(yield* readInline);
       if (mode === "early")
         yield* DurableClock.sleep({
           name: "before-await",

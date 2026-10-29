@@ -105,6 +105,9 @@ export interface WorkflowFunctionClass<
  * in between. `DurableDeferred.await` waits for a callback, completed with a
  * run's `signal`. A workflow's child workflows run in the same function.
  *
+ * Activities retain services and telemetry provided at their call site across
+ * the native SDK callback. Each receives its own WorkflowInstance and attempt.
+ *
  * Activities (name + attempt), clocks and deferreds are memoized by name within
  * each execution, matching Effect's identity semantics. Loop iterations must use
  * distinct names, for example `apply/${pass}`. Reusing a name replays its result.
@@ -464,9 +467,6 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
           return yield* Effect.die(new Error(`Workflow ${invocation.workflow} is not hosted here`));
         }
         const durable = yield* DurableStep;
-        // Native SDK callbacks run on fresh fibers. Preserve this invocation's
-        // workflow services and telemetry, rather than the initializer's context.
-        const runContext = yield* Effect.context<never>();
         const { workflow, execute } = registration;
         const payload = yield* Schema.decodeEffect(payloadCodec(workflow))(invocation.payload).pipe(
           Effect.orDie,
@@ -480,7 +480,6 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
               Layer.succeed(WorkflowEngine.WorkflowEngine, engine),
               Layer.succeed(CurrentRun, {
                 durable,
-                context: runContext,
                 clocks: new Map(),
                 results: new Map(),
                 instance,
@@ -521,7 +520,6 @@ class CurrentRun extends Context.Service<
   CurrentRun,
   {
     readonly durable: DurableStep["Service"];
-    readonly context: Context.Context<never>;
     readonly clocks: Map<string, Duration.Duration>;
     readonly results: Map<string, Effect.Effect<any>>;
     readonly instance: WorkflowEngine.WorkflowInstance["Service"];
@@ -888,6 +886,9 @@ const makeEngine = (options: {
     activityExecute: (activity, attempt) =>
       Effect.gen(function* () {
         const run = yield* currentRun("activity execution");
+        // The SDK callback runs on a fresh fiber; capture services and telemetry
+        // here so providers around the Activity take precedence over invocation init.
+        const context = yield* Effect.context<never>();
         const instance = yield* WorkflowEngine.WorkflowInstance;
         const activityInstance = WorkflowEngine.WorkflowInstance.initial(
           instance.workflow,
@@ -927,10 +928,11 @@ const makeEngine = (options: {
                         )
                       : Effect.die(new Error(`Activity ${activity.name} suspended inside a step`)),
                   ),
-                  // The run's services, with the step's own instance.
+                  // Preserve the Activity caller, with engine-owned per-attempt services.
                   Effect.provide(
                     Layer.succeedContext(
-                      run.context.pipe(
+                      context.pipe(
+                        Context.add(DurableStepAttempt, nativeAttempt),
                         Context.add(WorkflowEngine.WorkflowInstance, activityInstance),
                         Context.add(
                           CurrentActivity,

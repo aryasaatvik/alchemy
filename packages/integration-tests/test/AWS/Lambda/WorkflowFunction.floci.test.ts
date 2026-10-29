@@ -206,7 +206,16 @@ describe.skipIf(!endpoint)("WorkflowFunction on isolated Floci", () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   }, 30_000);
 
-  for (const mode of ["clock", "identity", "child", "retry", "exhaust", "timeout", "heartbeat"]) {
+  for (const mode of [
+    "context",
+    "clock",
+    "identity",
+    "child",
+    "retry",
+    "exhaust",
+    "timeout",
+    "heartbeat",
+  ]) {
     test(
       mode,
       async () => {
@@ -221,15 +230,24 @@ describe.skipIf(!endpoint)("WorkflowFunction on isolated Floci", () => {
           expect(status).toEqual({
             _tag: "Completed",
             result:
-              mode === "clock"
-                ? "awake"
-                : mode === "identity"
-                  ? "same"
-                  : mode === "child"
-                    ? `child:${started.payload.id}`
-                    : mode === "retry"
-                      ? "attempt 3"
-                      : "timed out",
+              mode === "context"
+                ? JSON.stringify({
+                    value: "present",
+                    workflow: "Probe",
+                    sameExecution: true,
+                    isolated: true,
+                    interrupted: false,
+                    attempt: 1,
+                  })
+                : mode === "clock"
+                  ? "awake"
+                  : mode === "identity"
+                    ? "same"
+                    : mode === "child"
+                      ? `child:${started.payload.id}`
+                      : mode === "retry"
+                        ? "attempt 3"
+                        : "timed out",
           });
         await measure(mode, started.executionRef!);
         const history = [...(await events(started.executionRef!))];

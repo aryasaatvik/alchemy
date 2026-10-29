@@ -1,14 +1,20 @@
 import { expect, test } from "bun:test";
-import { DurableExecutionContext, DurableStep } from "@alchemy.run/aws/Lambda/Durable";
+import {
+  DurableExecutionContext,
+  DurableStep,
+  DurableStepAttempt,
+} from "@alchemy.run/aws/Lambda/Durable";
 import { HandlerContext } from "@alchemy.run/aws/Lambda/InvocationDeadline";
 import { makeWorkflowEngine, makeWorkflowRunner } from "@alchemy.run/aws/Lambda/WorkflowFunction";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
 import { RuntimeContext } from "alchemy/RuntimeContext";
+import { decodeResult, CurrentActivity } from "alchemy/WorkflowEncoding";
 import * as Workflows from "alchemy/Workflows";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -18,6 +24,7 @@ import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
+import { readInline, ActivityContextResult } from "./fixtures/workflow-floci/activity-context.ts";
 
 const workflow = Workflow.make("ContextProbe", {
   payload: { id: Schema.String },
@@ -167,16 +174,34 @@ for (const mode of ["engine", "runner"] as const) {
           Workflows.layer(parent, () =>
             Effect.gen(function* () {
               yield* workflow.execute({ id: "child" }, { discard: true });
+              expect(yield* readInline).toEqual({
+                value: "present",
+                workflow: "ContextParent",
+                sameExecution: true,
+                isolated: true,
+                interrupted: false,
+                attempt: 1,
+              });
               yield* Activity.make({
                 name: "activity",
                 execute: Effect.gen(function* () {
                   expect(yield* InvocationService).toBe("invocation-value");
+                  expect(yield* Activity.CurrentAttempt).toBe(4);
+                  expect(yield* DurableStepAttempt).toBe(3);
+                  expect(yield* CurrentActivity).toMatchObject({
+                    workflow: "ContextParent",
+                    executionId: "parent",
+                    activity: "activity",
+                  });
                   yield* Effect.logInfo("activity body");
                 }).pipe(
                   Effect.annotateLogs({ activity: "scoped" }),
                   Effect.withSpan("activity.body"),
                 ),
-              });
+              }).pipe(
+                Effect.provideService(Activity.CurrentAttempt, 2),
+                Effect.provideService(DurableStepAttempt, 99),
+              );
             }),
           ),
         );
@@ -188,12 +213,22 @@ for (const mode of ["engine", "runner"] as const) {
         );
         const unscripted = () => Effect.die("unscripted durable operation");
         const durable: DurableStep["Service"] = {
-          step: (options) => Effect.promise(() => Effect.runPromise(options.effect)),
+          step: (options) =>
+            Effect.promise(() =>
+              Effect.runPromise(
+                options.effect.pipe(
+                  Effect.provideService(
+                    DurableStepAttempt,
+                    options.name.startsWith("activity/") ? 3 : 1,
+                  ),
+                ),
+              ),
+            ),
           invoke: unscripted,
           wait: unscripted,
           waitForCallback: unscripted,
         };
-        await Effect.runPromise(
+        const encoded = await Effect.runPromise(
           runner({
             workflow: "ContextParent",
             executionId: "parent",
@@ -233,13 +268,24 @@ for (const mode of ["engine", "runner"] as const) {
             withTelemetry(caller, "caller"),
           ),
         );
+        const completed = await Effect.runPromise(decodeResult(parent, encoded));
+        expect(Exit.isSuccess(completed.exit)).toBe(true);
         assertTelemetry();
+        expect(caller.lines).toContainEqual({
+          message: ["inline activity body"],
+          annotations: { provenance: "caller", inline: "present" },
+        });
+        const inlineSpan = caller.spans.find((s) => s.name === "inline.callsite");
+        expect(inlineSpan?.parent).toBe("caller-parent");
         expect(caller.lines).toContainEqual({
           message: ["activity body"],
           annotations: { provenance: "caller", activity: "scoped" },
         });
+        const activitySpan = caller.spans.find((s) => s.name === "activity");
+        expect(activitySpan).toBeDefined();
+        expect(activitySpan!.parent).toBe("caller-parent");
         expect(caller.spans).toContainEqual(
-          expect.objectContaining({ name: "activity.body", parent: "caller-parent" }),
+          expect.objectContaining({ name: "activity.body", parent: activitySpan!.spanId }),
         );
       } finally {
         if (previousName === undefined) delete process.env.AWS_LAMBDA_FUNCTION_NAME;
@@ -250,3 +296,28 @@ for (const mode of ["engine", "runner"] as const) {
     }
   });
 }
+
+test("memory engine preserves the same inline Activity services and instance contract", async () => {
+  const memory = Workflow.make("MemoryContext", {
+    payload: { id: Schema.String },
+    success: ActivityContextResult,
+    idempotencyKey: ({ id }) => id,
+  });
+  const result = await Effect.runPromise(
+    memory
+      .execute({ id: "memory" })
+      .pipe(
+        Effect.provide(Workflows.layer(memory, () => readInline)),
+        Effect.provide(WorkflowEngine.layerMemory),
+        Effect.scoped,
+      ),
+  );
+  expect(result).toEqual({
+    value: "present",
+    workflow: "MemoryContext",
+    sameExecution: true,
+    isolated: true,
+    interrupted: false,
+    attempt: 1,
+  });
+});
