@@ -195,6 +195,9 @@ catalogs:
     '@astrojs/underscore-redirects':
       specifier: 1.0.4
       version: 1.0.4
+    '@aws/durable-execution-sdk-js':
+      specifier: 2.6.0
+      version: 2.6.0
     '@babel/plugin-proposal-decorators':
       specifier: ^8.0.2
       version: 8.0.2
@@ -10191,6 +10194,9 @@ importers:
       '@alchemy.run/turso':
         specifier: workspace:*
         version: link:../turso
+      '@aws/durable-execution-sdk-js':
+        specifier: 'catalog:'
+        version: 2.6.0
       '@cloudflare/containers':
         specifier: 'catalog:'
         version: 0.3.7
@@ -29289,7 +29295,6 @@ snapshots:
       '@smithy/node-http-handler': 4.12.1
       '@smithy/types': 4.19.0
       tslib: 2.8.1
-    optional: true
 
   '@aws-sdk/client-lambda@3.984.0':
     dependencies:
@@ -29768,7 +29773,6 @@ snapshots:
   '@aws/durable-execution-sdk-js@2.6.0':
     dependencies:
       '@aws-sdk/client-lambda': 3.1108.0
-    optional: true
 
   '@aws/lambda-invoke-store@0.3.0': {}
 

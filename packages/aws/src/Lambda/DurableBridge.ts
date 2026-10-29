@@ -137,7 +137,14 @@ interface NativeRetryDecision {
 
 interface NativeStepConfig {
   retryStrategy?: (error: Error, attemptCount: number) => NativeRetryDecision;
-  semantics?: string;
+  semantics?: "AT_MOST_ONCE_PER_RETRY" | "AT_LEAST_ONCE_PER_RETRY";
+}
+
+interface NativeDeserializer {
+  deserialize(
+    data: string | undefined,
+    context: { entityId: string; durableExecutionArn: string },
+  ): Promise<unknown>;
 }
 
 interface NativeDurableContext {
@@ -156,11 +163,13 @@ interface NativeDurableContext {
     config?: {
       timeout?: { seconds: number };
       heartbeatTimeout?: { seconds: number };
+      serdes?: NativeDeserializer;
     },
   ): Promise<T>;
 }
 
 interface NativeDurableSdk {
+  defaultSerdes: NativeDeserializer;
   withDurableExecution: (
     handler: (event: any, context: NativeDurableContext) => Promise<any>,
   ) => (event: any, context: lambda.Context) => Promise<any>;
@@ -235,7 +244,11 @@ const toNativeStepConfig = (options: DurableStepOptions<any>): NativeStepConfig 
   };
 };
 
-const wrapDurableContext = (dctx: NativeDurableContext): DurableStep["Service"] => ({
+/** @internal Adapt the SDK's context to Effect operations. */
+export const wrapDurableContext = (
+  dctx: NativeDurableContext,
+  json: NativeDeserializer,
+): DurableStep["Service"] => ({
   invoke: <T>(name: string, functionName: string, input: unknown) =>
     Effect.tryPromise(() => dctx.invoke<T>(name, functionName, input)).pipe(Effect.orDie),
   step: <T>(options: DurableStepOptions<T>) =>
@@ -262,6 +275,13 @@ const wrapDurableContext = (dctx: NativeDurableContext): DurableStep["Service"] 
         options.name,
         (callbackId) => Effect.runPromise(options.submitter(callbackId)),
         {
+          // sendCallbackSuccess writes JSON, while the SDK's callback default
+          // is raw text. Let the SDK decode once, including child-context
+          // replay, and keep an absent/empty wire result as undefined.
+          serdes: {
+            deserialize: (data, context) =>
+              json.deserialize(data === "" ? undefined : data, context),
+          },
           ...(options.timeout !== undefined
             ? { timeout: { seconds: toSeconds(options.timeout)! } }
             : {}),
@@ -325,7 +345,7 @@ export const makeDurableListener = (options: {
                   options.run(params).pipe(
                     Effect.provide(
                       Layer.mergeAll(
-                        Layer.succeed(DurableStep, wrapDurableContext(dctx)),
+                        Layer.succeed(DurableStep, wrapDurableContext(dctx, sdk.defaultSerdes)),
                         Layer.succeed(DurableExecutionContext, {
                           executionArn: dctx.executionContext.durableExecutionArn,
                         }),

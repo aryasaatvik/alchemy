@@ -32,6 +32,7 @@
     "@alchemy.run/stripe": "workspace:*",
     "@alchemy.run/test": "workspace:*",
     "@alchemy.run/turso": "workspace:*",
+    "@aws/durable-execution-sdk-js": "catalog:",
     "@cloudflare/containers": "catalog:",
     "@cloudflare/puppeteer": "catalog:",
     "@cloudflare/vite-plugin": "catalog:",
