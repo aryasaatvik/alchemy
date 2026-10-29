@@ -33,8 +33,8 @@ import { Role } from "./IAM/Role.ts";
 import { User } from "./IAM/User.ts";
 import { CurrentRegion } from "./Region.ts";
 
-// Bound operations retain protocol services, never the host's initialization scope.
-const operationContext = Context.pick(
+/** @internal Retain AWS authority and transport without capturing caller telemetry or scope. */
+export const operationContext = Context.pick(
   ProtocolCredentials,
   Region,
   HttpClient.HttpClient,

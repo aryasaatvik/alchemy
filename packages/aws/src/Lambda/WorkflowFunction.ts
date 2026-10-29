@@ -303,6 +303,8 @@ type HostedBy<Host> =
  * scoped to its ARN. Execution and callback APIs use the execution ARN and
  * callback id returned by that target; their IAM permissions remain account-wide.
  * Omitting the target preserves the host's Function-owned alias or `$LATEST`.
+ * AWS authority and transport are retained at initialization; logs, annotations
+ * and tracing use the caller's context for each operation.
  *
  * @layer
  * @provides WorkflowEngine
@@ -320,7 +322,9 @@ export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHo
       WorkflowEngine.WorkflowEngine,
       Effect.gen(function* () {
         const bind = yield* AWSBindings.Bind;
-        const context = yield* Effect.context<LambdaServices>();
+        const context = yield* Effect.context<LambdaServices>().pipe(
+          Effect.map(AWSBindings.operationContext),
+        );
         const routes = new Map<string, Calls>();
         for (const entry of hosts) {
           const host = "host" in entry ? entry.host : entry;
@@ -426,7 +430,9 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
   Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
 > =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<LambdaServices>();
+    const context = yield* Effect.context<LambdaServices>().pipe(
+      Effect.map(AWSBindings.operationContext),
+    );
     const functionName = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_NAME);
     // Child workflows start on the version this function is running.
     const version = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_VERSION ?? "$LATEST");
@@ -458,6 +464,8 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
           return yield* Effect.die(new Error(`Workflow ${invocation.workflow} is not hosted here`));
         }
         const durable = yield* DurableStep;
+        // Native SDK callbacks run on fresh fibers. Preserve this invocation's
+        // workflow services and telemetry, rather than the initializer's context.
         const runContext = yield* Effect.context<never>();
         const { workflow, execute } = registration;
         const payload = yield* Schema.decodeEffect(payloadCodec(workflow))(invocation.payload).pipe(
@@ -665,10 +673,16 @@ const makeCalls = (
   };
 };
 
-/** Build the runtime engine without deploy-time host binding. @internal */
+/**
+ * Build the runtime engine without deploy-time host binding. AWS authority and
+ * transport are retained; telemetry comes from the caller of each operation.
+ * @internal
+ */
 export const makeWorkflowEngine = (functionName: string, qualifier: string) =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<LambdaServices>();
+    const context = yield* Effect.context<LambdaServices>().pipe(
+      Effect.map(AWSBindings.operationContext),
+    );
     const calls = makeCalls(
       (effect) => Effect.provide(effect, context),
       Effect.succeed(functionName),
