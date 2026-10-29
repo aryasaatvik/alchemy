@@ -13,6 +13,7 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import CallerLive, { WorkflowCaller } from "./fixtures/durable-workflows/caller.ts";
 import HostLive, { TestWorkflows } from "./fixtures/durable-workflows/host.ts";
+import { liveAlias } from "./fixtures/durable-workflows/target.ts";
 import { testOptions } from "./fixtures/workflow-floci/test-options.ts";
 const { test, beforeAll, afterAll } = Test.make(testOptions);
 const sharedStack = Core.scratchStack(testOptions, "LambdaWorkflowFunction");
@@ -40,9 +41,10 @@ describe(
           Effect.gen(function* () {
             const host = yield* TestWorkflows;
             const caller = yield* WorkflowCaller;
+            const alias = yield* liveAlias;
             return {
               functionName: host.functionName,
-              version: host.version,
+              version: alias.functionVersion,
               url: caller.functionUrl,
             };
           }).pipe(Effect.provide(Layer.mergeAll(HostLive, CallerLive))),
@@ -87,9 +89,13 @@ describe(
     /** Start a run through the caller, and return how to read it. */
     const start = (workflow: string, id: string, query = "") =>
       Effect.map(
-        request<{ executionId: string }>(`${url}/start/${workflow}/${id}${query}`, "POST"),
-        ({ executionId }) => ({
+        request<{ executionId: string; executionRef: string }>(
+          `${url}/start/${workflow}/${id}${query}`,
+          "POST",
+        ),
+        ({ executionId, executionRef }) => ({
           executionId,
+          executionRef,
           status: request<RunStatus>(`${url}/status/${workflow}/${id}?executionId=${executionId}`),
         }),
       );
@@ -225,6 +231,8 @@ describe(
         Effect.gen(function* () {
           const id = yield* freshId("approve");
           const run = yield* start("Approve", id);
+          // Lambda returns the immutable version resolved by the alias.
+          expect(run.executionRef).toContain(`:${aliasVersion}/durable-execution/`);
           yield* awaitCallback(run.executionId);
           yield* request(
             `${url}/approve/Approve/${id}?executionId=${run.executionId}&by=agent`,
@@ -235,6 +243,17 @@ describe(
             result: "approved by agent",
           });
           expect(yield* stepsOf("Approve", run.executionId)).toEqual(["requested", "approved"]);
+          const execution = yield* Lambda.getDurableExecution({
+            DurableExecutionArn: run.executionRef,
+          }).pipe(
+            Effect.repeat({
+              schedule: Schedule.spaced("500 millis"),
+              times: 20,
+              until: (r) => r.Status !== "RUNNING",
+            }),
+          );
+          expect(execution.Status).toBe("SUCCEEDED");
+          expect(execution.Version).toBe(aliasVersion);
         }),
       { timeout: 180_000 },
     );
@@ -276,6 +295,8 @@ describe(
         Effect.gen(function* () {
           const id = yield* freshId("interrupt");
           const run = yield* start("Approve", id);
+          // Lambda returns the immutable version resolved by the alias.
+          expect(run.executionRef).toContain(`:${aliasVersion}/durable-execution/`);
           yield* awaitCallback(run.executionId);
           // Interrupt once it's waiting on its signal.
           yield* stepsOf("Approve", run.executionId).pipe(

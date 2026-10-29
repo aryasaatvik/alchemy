@@ -5,8 +5,10 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
 import path from "pathe";
 import { TestWorkflows } from "./host.ts";
+import { liveAlias } from "./target.ts";
 import { Approval, Approve, Checkout, Greet, Nap, Parent } from "./workflows.ts";
 
 const main = path.resolve(import.meta.dirname, "caller.ts");
@@ -73,5 +75,14 @@ export default WorkflowCaller.make(
         ),
       ),
     };
-  }).pipe(Effect.provide(Lambda.DurableFunctionEngine(TestWorkflows))),
+  }).pipe(
+    Effect.provide(
+      Layer.unwrap(
+        Effect.gen(function* () {
+          const alias = yield* liveAlias;
+          return Lambda.DurableFunctionEngine({ host: TestWorkflows, alias });
+        }),
+      ),
+    ),
+  ),
 );

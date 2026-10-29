@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
 import * as AWSBindings from "../AWSBindings.ts";
+import type { Alias } from "./Alias.ts";
 import {
   DurableStep,
   DurableStepAttempt,
@@ -232,7 +233,22 @@ const memo = <A>(
 
 // ---------------------------------------------------------------- callers
 
-type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? WorkflowNames<W> : never;
+/** A workflow host routed through an independently owned Lambda alias. */
+export interface WorkflowFunctionTarget<
+  Host extends WorkflowFunctionClass<any, any> = WorkflowFunctionClass<any, any>,
+> {
+  readonly host: Host;
+  /** Alias that invokes this host. The engine does not manage its lifecycle. */
+  readonly alias: Alias;
+}
+
+type EngineHost = WorkflowFunctionClass<any, any> | WorkflowFunctionTarget;
+type HostedBy<Host> =
+  Host extends WorkflowFunctionTarget<infer H>
+    ? HostedBy<H>
+    : Host extends WorkflowFunctionClass<any, infer W>
+      ? WorkflowNames<W>
+      : never;
 
 /**
  * Run workflows hosted by {@link WorkflowFunction | AWS.Lambda.WorkflowFunction}s
@@ -275,13 +291,24 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  * Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows, BillingWorkflows))
  * ```
  *
+ * **Example:** A separately managed alias
+ * ```typescript
+ * const fn = yield* OrderWorkflows;
+ * const version = yield* AWS.Lambda.Version("OrdersVersion", { function: fn });
+ * const alias = yield* AWS.Lambda.Alias("OrdersLive", { version, aliasName: "live" });
+ * const engine = AWS.Lambda.DurableFunctionEngine({ host: OrderWorkflows, alias });
+ * ```
+ *
+ * The alias must belong to the supplied host. Invoke and list permissions are
+ * scoped to its ARN. Execution and callback APIs use the execution ARN and
+ * callback id returned by that target; their IAM permissions remain account-wide.
+ * Omitting the target preserves the host's Function-owned alias or `$LATEST`.
+ *
  * @layer
  * @provides WorkflowEngine
  * @product Lambda
  */
-export const DurableFunctionEngine = <
-  const Hosts extends ReadonlyArray<WorkflowFunctionClass<any, any>>,
->(
+export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHost>>(
   ...hosts: Hosts
 ): Layer.Layer<
   WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
@@ -295,22 +322,35 @@ export const DurableFunctionEngine = <
         const bind = yield* AWSBindings.Bind;
         const context = yield* Effect.context<LambdaServices>();
         const routes = new Map<string, Calls>();
-        for (const host of hosts) {
+        for (const entry of hosts) {
+          const host = "host" in entry ? entry.host : entry;
+          const alias = "host" in entry ? entry.alias : undefined;
           const fn = yield* host;
           if (!globalThis.__ALCHEMY_RUNTIME__) {
             yield* bind`AWS.Lambda.DurableFunctionEngine(${fn})`({
               policyStatements: [
+                ...(alias
+                  ? [
+                      {
+                        Effect: "Allow" as const,
+                        Action: ["lambda:ListDurableExecutionsByFunction"],
+                        Resource: [alias.aliasArn],
+                      },
+                    ]
+                  : []),
                 {
                   Effect: "Allow",
                   Action: ["lambda:InvokeFunction"],
-                  Resource: [fn.functionArn, Output.interpolate`${fn.functionArn}:*`],
+                  Resource: alias
+                    ? [alias.aliasArn]
+                    : [fn.functionArn, Output.interpolate`${fn.functionArn}:*`],
                 },
                 // Durable execution ARNs aren't function ARNs, so reading and
                 // signalling runs is granted account-wide, as the host's own is.
                 {
                   Effect: "Allow",
                   Action: [
-                    "lambda:ListDurableExecutionsByFunction",
+                    ...(alias ? [] : ["lambda:ListDurableExecutionsByFunction"]),
                     "lambda:GetDurableExecution",
                     "lambda:GetDurableExecutionHistory",
                     "lambda:StopDurableExecution",
@@ -322,15 +362,18 @@ export const DurableFunctionEngine = <
               ],
             });
           }
-          const functionName = yield* fn.functionName;
+          const functionName = alias
+            ? yield* alias.functionName.bind(`${fn.LogicalId}.engineFunctionName`)
+            : yield* fn.functionName;
           // Runs start on the host's alias when it sets one.
-          const qualifier = yield* qualifierOf(fn).bind(
+          const qualifier = yield* (alias ? alias.aliasName : qualifierOf(fn)).bind(
             `${fn.LogicalId}.qualifier`,
           ) as Effect.Effect<Effect.Effect<string>>;
           const calls = makeCalls(
             (effect) => effect.pipe(Effect.provide(context)),
             functionName,
             qualifier,
+            alias !== undefined,
           );
           for (const workflow of host.workflows) routes.set(workflow._tag, calls);
         }
@@ -347,7 +390,9 @@ export const DurableFunctionEngine = <
       }),
     ),
     implemented(
-      hosts.flatMap((host) => host.workflows.map((workflow) => workflow._tag)),
+      hosts.flatMap((entry) =>
+        ("host" in entry ? entry.host : entry).workflows.map((workflow) => workflow._tag),
+      ),
     ) as Layer.Layer<ImplementedEach<HostedBy<Hosts[number]>>>,
   ) as Layer.Layer<
     WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
@@ -530,6 +575,7 @@ const makeCalls = (
   provide: <A, E>(effect: Effect.Effect<A, E, LambdaServices>) => Effect.Effect<A, E>,
   functionName: Effect.Effect<string>,
   qualifier: Effect.Effect<string>,
+  qualifiedLookup = false,
 ): Calls => {
   const run = <A, E>(effect: Effect.Effect<A, E, LambdaServices>) =>
     provide(effect).pipe(Effect.orDie);
@@ -557,12 +603,23 @@ const makeCalls = (
         ),
       ),
     find: (executionName) =>
-      Effect.flatMap(functionName, (FunctionName) =>
+      Effect.flatMap(Effect.all([functionName, qualifier]), ([name, version]) =>
         run(
-          Lambda.listDurableExecutionsByFunction({
-            FunctionName,
-            DurableExecutionName: executionName,
-          }).pipe(Effect.map((page) => page.DurableExecutions?.[0]?.DurableExecutionArn)),
+          // Lambda rejects DurableExecutionName on qualified lists. Keep the
+          // alias scope and search pages locally instead of widening to the function.
+          qualifiedLookup
+            ? Lambda.listDurableExecutionsByFunction
+                .items({ FunctionName: `${name}:${version}` })
+                .pipe(
+                  Stream.filter((execution) => execution.DurableExecutionName === executionName),
+                  Stream.take(1),
+                  Stream.runCollect,
+                  Effect.map((executions) => executions[0]?.DurableExecutionArn),
+                )
+            : Lambda.listDurableExecutionsByFunction({
+                FunctionName: name,
+                DurableExecutionName: executionName,
+              }).pipe(Effect.map((page) => page.DurableExecutions?.[0]?.DurableExecutionArn)),
         ),
       ),
     get: (executionArn) =>

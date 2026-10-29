@@ -8,6 +8,7 @@ import { Credentials } from "@distilled.cloud/aws";
 import * as Bundle from "alchemy/Bundle/Bundle";
 import { isResolved, stripEffects } from "alchemy/Diff";
 import * as Provider from "alchemy/Provider";
+import { Resource } from "alchemy/Resource";
 import { inMemoryState } from "alchemy/State";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -15,6 +16,8 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import AliasCallerLive, { AliasWorkflowCaller } from "./fixtures/alias-workflow-caller.ts";
+import HostLive from "./fixtures/durable-workflows/host.ts";
 import NestedDurableParentLive, { NestedDurableParent } from "./fixtures/nested-durable-parent.ts";
 import SelfDurableLive, { SelfDurable } from "./fixtures/self-durable.ts";
 
@@ -65,7 +68,34 @@ const referenceRequirementIsNotAny: IsAny<
 void referenceRequirementIsNotAny;
 
 const { test } = Test.make({
-  providers: Layer.mergeAll(functionProvider(), Credentials.mock),
+  providers: Layer.mergeAll(
+    functionProvider(),
+    Credentials.mock,
+    Provider.succeed(Resource<AWS.Lambda.Version>("AWS.Lambda.Version"), {
+      reconcile: () =>
+        Effect.succeed({
+          functionName: "TestWorkflows-deployed",
+          functionArn: "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed",
+          version: "7",
+          versionArn: "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:7",
+          sourceHash: "hash",
+          codeSha256: "hash",
+          configSha256: "hash",
+        }),
+      delete: () => Effect.void,
+    }),
+    Provider.succeed(AWS.Lambda.Alias, {
+      reconcile: () =>
+        Effect.succeed({
+          functionName: "TestWorkflows-deployed",
+          aliasName: "live",
+          aliasArn: "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:live",
+          functionVersion: "7",
+          invokeArn: "invoke",
+        }),
+      delete: () => Effect.void,
+    }),
+  ),
   state: inMemoryState(),
 });
 
@@ -397,6 +427,113 @@ test.provider(
         expect(Cause.pretty(unresolved.cause)).toContain("AWS_LAMBDA_FUNCTION_NAME");
       }
       expect(requests).toHaveLength(1);
+    }),
+  { timeout: 120_000, exclusive: true },
+);
+
+test.provider(
+  "binds a separately owned workflow alias and routes every engine operation through it",
+  (stack) =>
+    Effect.gen(function* () {
+      yield* stack.destroy();
+      yield* stack.deploy(
+        AliasWorkflowCaller.pipe(Effect.provide(Layer.mergeAll(HostLive, AliasCallerLive))),
+      );
+      const props = reconciled.get("AliasWorkflowCaller")!;
+      expect(props.env).toMatchObject({
+        TestWorkflows_qualifier: "live",
+        TestWorkflows_engineFunctionName: "TestWorkflows-deployed",
+      });
+      const statements = reconciledBindings
+        .get("AliasWorkflowCaller")!
+        .flatMap((b) => b.data?.policyStatements ?? []);
+      for (const action of ["lambda:InvokeFunction", "lambda:ListDurableExecutionsByFunction"]) {
+        expect(statements).toContainEqual({
+          Effect: "Allow",
+          Action: [action],
+          Resource: ["arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:live"],
+        });
+      }
+      const entry = yield* writeBundle(props as FunctionZipProps, "alchemy-alias-engine-");
+      const requests: URL[] = [];
+      const arn =
+        "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:7/durable-execution/execution";
+      let pending = true;
+      const server = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.serve({
+            port: 0,
+            fetch(request) {
+              const url = new URL(request.url);
+              requests.push(url);
+              if (url.pathname.endsWith("/invocations"))
+                return new Response("{}", {
+                  status: 202,
+                  headers: { "x-amz-durable-execution-arn": arn },
+                });
+              if (url.pathname.endsWith("/durable-executions")) {
+                expect(decodeURIComponent(url.pathname)).toContain(
+                  "/functions/TestWorkflows-deployed:live/",
+                );
+                expect(url.searchParams.has("DurableExecutionName")).toBe(false);
+                if (!url.searchParams.has("Marker"))
+                  return Response.json({ DurableExecutions: [], NextMarker: "alias-page-2" });
+                return Response.json({
+                  DurableExecutions: [
+                    {
+                      DurableExecutionArn: arn,
+                      DurableExecutionName: "Approve-execution",
+                      FunctionArn: arn.split("/durable-execution")[0],
+                      Status: "RUNNING",
+                      StartTimestamp: 1,
+                    },
+                  ],
+                });
+              }
+              if (url.pathname.endsWith("/history"))
+                return Response.json({
+                  Events: pending
+                    ? [
+                        { Id: "wait", SubType: "WaitForCallback", Name: "approval" },
+                        {
+                          Id: "callback",
+                          ParentId: "wait",
+                          CallbackStartedDetails: { CallbackId: "alias-callback" },
+                        },
+                      ]
+                    : [],
+                });
+              if (url.pathname.includes("/durable-execution-callbacks/")) return Response.json({});
+              if (url.pathname.endsWith("/stop")) return Response.json({});
+              return Response.json({ Status: "RUNNING" });
+            },
+          }),
+        ),
+        (server) => Effect.sync(() => server.stop(true)),
+      );
+      yield* setRuntimeEnv({
+        ...baseRuntimeEnv(server.url.origin),
+        ...(props.env as Record<string, string>),
+      });
+      const module = yield* Effect.promise(() => import(`${pathToFileURL(entry).href}?alias`));
+      for (const operation of ["start", "status", "success", "failure", "interrupt", "stop"]) {
+        yield* Effect.promise(() => module.default({ operation }, {}));
+      }
+      pending = false;
+      yield* Effect.promise(() => module.default({ operation: "interrupt" }, {}));
+      expect(
+        requests.find((u) => u.pathname.endsWith("/invocations"))?.searchParams.get("Qualifier"),
+      ).toBe("live");
+      for (const url of requests.filter(
+        (u) => u.pathname.includes("/durable-executions/") && !u.pathname.includes("/functions/"),
+      ))
+        expect(decodeURIComponent(url.pathname)).toContain(arn);
+      expect(
+        requests.filter((u) => u.pathname.includes("/durable-execution-callbacks/alias-callback/"))
+          .length,
+      ).toBe(3);
+      expect(requests.filter((u) => u.pathname.endsWith("/stop")).length).toBe(2);
+      yield* stack.destroy();
     }),
   { timeout: 120_000, exclusive: true },
 );
