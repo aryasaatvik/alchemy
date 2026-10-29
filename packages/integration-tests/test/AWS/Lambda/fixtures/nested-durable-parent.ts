@@ -1,8 +1,16 @@
 import * as Lambda from "@alchemy.run/aws/Lambda";
-import type { Self } from "alchemy/Self";
 import * as Effect from "effect/Effect";
 
-export class NestedDurable extends Lambda.DurableFunction<NestedDurable>()("NestedDurable") {}
+export class NestedDurable extends Lambda.DurableFunction<NestedDurable>()(
+  "NestedDurable",
+  { main: import.meta.url },
+  Effect.gen(function* () {
+    if (globalThis.__ALCHEMY_RUNTIME__) {
+      return yield* Effect.die("Nested durable init must not run in the parent Lambda");
+    }
+    return () => Effect.void;
+  }),
+) {}
 
 export class NestedDurableParent extends Lambda.Function<NestedDurableParent>()(
   "NestedDurableParent",
@@ -11,19 +19,7 @@ export class NestedDurableParent extends Lambda.Function<NestedDurableParent>()(
 export default NestedDurableParent.make(
   { main: import.meta.url, functionUrl: false },
   Effect.gen(function* () {
-    // A nested runtime owns only a proxy for the child Function resource, not
-    // the child's handler implementation or its in-process durable handle.
-    const child = yield* Lambda.Function("NestedDurable", {
-      main: import.meta.url,
-      isExternal: true,
-      functionUrl: false,
-    });
-    const durable = yield* NestedDurable.pipe(
-      Effect.provideService(
-        (NestedDurable as unknown as { Self: Self<Lambda.Function> }).Self,
-        child,
-      ),
-    );
+    const durable = yield* NestedDurable;
     const explicit = yield* Lambda.reference(durable);
     const host = yield* Lambda.Function;
 

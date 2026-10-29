@@ -590,8 +590,8 @@ const makeDurableHandle = (options: {
     return {
       ...handle,
       function: host,
-      functionName: host.functionName,
-      functionArn: host.functionArn,
+      functionName: boundFunctionNameOf(host),
+      functionArn: Output.named(host.functionArn, `${host.LogicalId}.functionArn`),
     } satisfies DurableFunction<any, any>;
   });
 
@@ -620,6 +620,11 @@ const bindDurableReference = (caller: Function, target: Function, name: string) 
 const boundQualifierOf = (target: Function) =>
   Output.named(qualifierOf(target), `${target.LogicalId}.qualifier`);
 
+// Resource refs have a different expression name from declarations. Both must
+// read the same key captured by the caller's plan-time binding.
+const boundFunctionNameOf = (target: Function) =>
+  Output.named(target.functionName, `${target.LogicalId}.functionName`);
+
 /**
  * Build a management-plane handle for a Durable Function owned by another
  * Lambda. Unlike the function's self handle, this binds the target's deployed
@@ -642,7 +647,11 @@ export const reference = <Input = unknown, Result = unknown>(
   });
 
 const resolveDurableHandle = (id: string) => (instance: unknown) => {
-  const handle = (instance as Record<symbol, unknown> | undefined)?.[DurableHandleKey];
+  // Output references synthesize property expressions for arbitrary symbols;
+  // only an initialized host can carry the in-process self handle.
+  const handle = Output.isOutput(instance)
+    ? undefined
+    : (instance as Record<symbol, unknown> | undefined)?.[DurableHandleKey];
   if (handle !== undefined) {
     return Effect.succeed(handle as DurableFunction<any, any>);
   }
@@ -656,7 +665,7 @@ const resolveDurableHandle = (id: string) => (instance: unknown) => {
       yield* bindDurableReference(caller, host, id);
       // A nested handle crosses a Lambda boundary, so bind the child's
       // deployed name into the parent while its init graph is being built.
-      const functionName = yield* host.functionName;
+      const functionName = yield* boundFunctionNameOf(host);
       const qualifier = yield* boundQualifierOf(host);
       return yield* makeDurableHandle({ name: id, host, functionName, qualifier });
     });

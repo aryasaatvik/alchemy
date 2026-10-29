@@ -4,6 +4,7 @@ import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { Platform, type PlatformProps } from "@/Platform.ts";
@@ -217,51 +218,174 @@ test.provider("a shared init layer builds separately for each plan host", (stack
   }),
 );
 
-test.provider("a nested runtime host shares its parent's init memo map", (stack) =>
-  Effect.gen(function* () {
-    const previous = globalThis.__ALCHEMY_RUNTIME__;
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        globalThis.__ALCHEMY_RUNTIME__ = true;
-      }),
-      () =>
+test.provider(
+  "a nested runtime reference skips init and preserves its parent's memo map",
+  (stack) =>
+    Effect.gen(function* () {
+      const previous = globalThis.__ALCHEMY_RUNTIME__;
+      yield* Effect.acquireRelease(
         Effect.sync(() => {
-          globalThis.__ALCHEMY_RUNTIME__ = previous;
+          globalThis.__ALCHEMY_RUNTIME__ = true;
         }),
-    );
-    let builds = 0;
-    const shared = Layer.effect(
-      SharedBinding,
-      Effect.sync(() => ({ host: String(++builds) })),
-    );
-    yield* stack.deploy(
-      ConfigHost(
-        "Parent",
-        {},
-        Effect.gen(function* () {
-          const parent = yield* SharedBinding;
-          yield* ConfigHost(
-            "Child",
-            {},
-            Effect.gen(function* () {
-              const child = yield* SharedBinding;
-              expect(child).toBe(parent);
-              return {};
-            }).pipe(Effect.provide(shared)),
-          );
-          return {};
-        }).pipe(Effect.provide(shared)),
+        () =>
+          Effect.sync(() => {
+            globalThis.__ALCHEMY_RUNTIME__ = previous;
+          }),
+      );
+      let builds = 0;
+      let childInits = 0;
+      const shared = Layer.effect(
+        SharedBinding,
+        Effect.sync(() => ({ host: String(++builds) })),
+      );
+      yield* stack.deploy(
+        ConfigHost(
+          "Parent",
+          {},
+          Effect.gen(function* () {
+            const parent = yield* SharedBinding;
+            yield* ConfigHost(
+              "Child",
+              {},
+              Effect.gen(function* () {
+                childInits++;
+                const child = yield* SharedBinding;
+                expect(child).toBe(parent);
+                return {};
+              }).pipe(Effect.provide(shared)),
+            );
+            return {};
+          }).pipe(Effect.provide(shared)),
+        ),
+      );
+      expect(builds).toBe(1);
+      expect(childInits).toBe(0);
+    }).pipe(
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromUnknown({ ALCHEMY_PHASE: "runtime" }),
       ),
-    );
-    expect(builds).toBe(1);
-  }).pipe(
-    Effect.provideService(
-      ConfigProvider.ConfigProvider,
-      ConfigProvider.fromUnknown({ ALCHEMY_PHASE: "runtime" }),
+      Effect.scoped,
     ),
-    Effect.scoped,
-  ),
 );
+
+for (const runtime of [false, true]) {
+  test.provider(
+    runtime
+      ? "nested runtime hosts skip props, body, listeners and exports while the root initializes"
+      : "nested plan hosts evaluate props, body, listeners, exports and bindings",
+    (stack) =>
+      Effect.gen(function* () {
+        const events: string[] = [];
+        const Host: Platform<ConfigHost, never, {}, BaseRuntimeContext> = Platform<ConfigHost>(
+          "Test.ConfigHost",
+          {
+            transformProps: (id, props) =>
+              Effect.sync(() => {
+                events.push(`${id}:transform`);
+                return props;
+              }),
+            onCreate: (host) =>
+              Effect.sync(() => {
+                events.push(`${host.LogicalId}:create`);
+              }),
+            createRuntimeContext: (id) => {
+              events.push(`${id}:context`);
+              return {
+                Type: "Test.ConfigHost",
+                id,
+                env: {},
+                set: (key) =>
+                  Effect.sync(() => {
+                    events.push(`${id}:binding`);
+                    return key;
+                  }),
+                get: () => Effect.succeed(undefined),
+                serve: () =>
+                  Effect.sync(() => {
+                    events.push(`${id}:listen`);
+                  }),
+                exports: Effect.sync(() => {
+                  events.push(`${id}:exports`);
+                  return {};
+                }),
+              };
+            },
+          },
+        );
+        const props = (id: string) =>
+          Effect.sync(() => {
+            events.push(`${id}:props`);
+            return {};
+          });
+        const body = (id: string) =>
+          Effect.gen(function* () {
+            events.push(`${id}:body`);
+            yield* Config.String("ALCHEMY_TEST_PRESENT_CONFIG");
+            return { fetch: Effect.succeed(HttpServerResponse.text("ready")) };
+          });
+        class TaggedChild extends Host<TaggedChild>()("TaggedChild") {}
+
+        yield* stack.destroy();
+        const previous = globalThis.__ALCHEMY_RUNTIME__;
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            globalThis.__ALCHEMY_RUNTIME__ = runtime;
+          }),
+          () =>
+            Effect.sync(() => {
+              globalThis.__ALCHEMY_RUNTIME__ = previous;
+            }),
+        );
+        yield* stack.deploy(
+          Host(
+            "Root",
+            props("Root"),
+            Effect.gen(function* () {
+              const child = yield* Host("InlineChild", props("InlineChild"), body("InlineChild"));
+              expect(child.LogicalId).toBe("InlineChild");
+              const tagged = yield* TaggedChild.pipe(
+                Effect.provide(TaggedChild.make(props("TaggedChild"), body("TaggedChild"))),
+              );
+              expect(tagged.LogicalId).toBe("TaggedChild");
+              return yield* body("Root");
+            }),
+          ),
+        );
+        for (const id of ["Root", "InlineChild", "TaggedChild"]) {
+          const stages = events.filter(
+            (event) => event.startsWith(`${id}:`) && event !== `${id}:binding`,
+          );
+          expect(stages.sort()).toEqual(
+            (runtime && id !== "Root"
+              ? []
+              : [
+                  "props",
+                  "transform",
+                  "context",
+                  "create",
+                  "body",
+                  "listen",
+                  "exports",
+                  ...(!runtime && id === "TaggedChild" ? ["create"] : []),
+                ].map((stage) => `${id}:${stage}`)
+            ).sort(),
+          );
+          expect(events.includes(`${id}:binding`)).toBe(!runtime);
+        }
+        yield* stack.destroy();
+      }).pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromUnknown({
+            ALCHEMY_PHASE: runtime ? "runtime" : "plan",
+            ALCHEMY_TEST_PRESENT_CONFIG: "present",
+          }),
+        ),
+        Effect.scoped,
+      ),
+  );
+}
 
 test.provider("host services remain available to each host's init", (stack) =>
   Effect.gen(function* () {

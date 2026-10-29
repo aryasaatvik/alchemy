@@ -406,6 +406,13 @@ export const Platform = <
                 )
               : Effect.void,
           ),
+          (initialize) =>
+            Effect.gen(function* () {
+              if (globalThis.__ALCHEMY_RUNTIME__ && (yield* CurrentRuntimeContext)) {
+                return yield* resource.ref(id);
+              }
+              return yield* initialize;
+            }),
         );
       return Object.assign(
         function (props: Props, impl: Impl) {
@@ -638,6 +645,16 @@ export const Platform = <
               return Object.assign(instance, {
                 RuntimeContext: runtimeContext,
               }) as R;
+            }),
+          ).pipe((initialize) =>
+            Effect.gen(function* () {
+              if (globalThis.__ALCHEMY_RUNTIME__ && (yield* CurrentRuntimeContext)) {
+                // Another host owns this runtime. Resolve only the reference;
+                // child props, init, listeners and exports belong to its own
+                // entrypoint. Plan-time init still collects child bindings.
+                return yield* resource.ref(id);
+              }
+              return yield* initialize;
             }),
           ),
         );
