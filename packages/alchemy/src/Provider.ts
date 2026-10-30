@@ -282,6 +282,19 @@ export interface ProviderService<
    * Properties that are always stable across any update.
    */
   stables?: Extract<keyof Res["Attributes"], string>[];
+  /**
+   * Read-only validation of desired props and bindings on every plan, including
+   * first creates and noops. Outputs can still be unresolved: validate only
+   * what is known, and repeat final validation before applying provider writes.
+   * New resources have no physical instance or ResourceContext yet; use id/fqn.
+   */
+  validate?(input: {
+    id: string;
+    fqn: string;
+    news: Input<Props<Res>>;
+    bindings: Input<BindingData<Res>>;
+    output: Res["Attributes"] | undefined;
+  }): Effect.Effect<void, any, Exclude<DiffReq, LifecycleServices>>;
   diff?(input: {
     id: string;
     /**

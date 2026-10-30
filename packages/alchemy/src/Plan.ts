@@ -1336,6 +1336,10 @@ const makePlan = <A>(
       const { row: persistedRow, renamedFrom, renameMoved } = yield* getPersistedRow(resource);
       let oldState: ResourceState | undefined = persistedRow;
 
+      if (provider.validate) {
+        yield* provider.validate({ id, fqn, news, bindings: newBindings, output: oldState?.attr });
+      }
+
       // Engine-level adoption. When there is no prior state, always
       // consult `provider.read` (if implemented) so the engine — not
       // each lifecycle method — owns the existence/ownership decision.

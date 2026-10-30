@@ -13,6 +13,7 @@ import type * as Bundle from "alchemy/Bundle/Bundle";
 import type { PackageInstall } from "alchemy/Bundle/InstalledPackages";
 import { deepEqual, havePropsChanged, isResolved, stripEffects } from "alchemy/Diff";
 import { isScopeEjected, type HttpEffect } from "alchemy/Http";
+import type { Input } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import { createPhysicalName } from "alchemy/PhysicalName";
 import { Platform, type Main, type PlatformProps } from "alchemy/Platform";
@@ -29,6 +30,7 @@ import { sha256 } from "alchemy/Util/sha256";
 import { zipCode } from "alchemy/Util/zip";
 import type * as lambda from "aws-lambda";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -44,7 +46,6 @@ import * as Stream from "effect/Stream";
 import type * as rolldown from "rolldown";
 import { Assets } from "../Assets.ts";
 import { AWSEnvironment } from "../Environment.ts";
-import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import { syncLogGroupRetention, type LogRetentionConfig } from "../Logs/LogRetention.ts";
 import type { Providers } from "../Providers.ts";
@@ -58,6 +59,11 @@ import {
   type FunctionImageSource,
   makeFunctionImage,
 } from "./FunctionImage.ts";
+import {
+  functionBindingStatements,
+  functionLogGroupGuard,
+  renderFunctionPolicy,
+} from "./FunctionPolicy.ts";
 import {
   isResponseStreaming,
   makeFunctionHttpHandler,
@@ -853,6 +859,11 @@ export const normalizeFunctionUrl = (
  * Dockerfile into a Lambda container image. In both modes Alchemy creates the
  * execution role and applies bindings; image mode additionally owns the
  * private ECR repository and Lambda pull policy.
+ *
+ * Resolved binding grants are deduplicated and merged without broadening action
+ * or resource scopes. The binding policy and log-group guard share a conservative
+ * 10,240-byte inline-policy budget. Known grants are checked during planning;
+ * unresolved grants are checked after resolution, before IAM writes.
  *
  * Zip-packaged functions can be defined in two ways:
  *
@@ -1673,7 +1684,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         roleName,
         policyName,
         // functionArn,
-        // functionName,
+        functionName,
         bindings,
       }: {
         roleName: string;
@@ -1689,12 +1700,11 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         const env = activeBindings
           .map((binding) => binding?.data?.env)
           .reduce((acc, env) => ({ ...acc, ...env }), {});
-        const policyStatements = activeBindings.flatMap(
-          (binding) =>
-            binding?.data?.policyStatements?.map((stmt: IAM.PolicyStatement) => ({
-              ...stmt,
-              Sid: stmt.Sid?.replace(/[^A-Za-z0-9]+/gi, ""),
-            })) ?? [],
+        const { accountId, region } = yield* AWSEnvironment.current;
+        const { document } = yield* renderFunctionPolicy(
+          roleName,
+          functionBindingStatements(bindings),
+          functionLogGroupGuard(region, accountId, functionName),
         );
         // VPC attachments requested through the binding channel (DECISION
         // #5) — set-union across bindings; merged with the `vpc` prop in
@@ -1720,14 +1730,11 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           ).values(),
         ];
 
-        if (policyStatements.length > 0) {
+        if (document !== undefined) {
           yield* iam.putRolePolicy({
             RoleName: roleName,
             PolicyName: policyName,
-            PolicyDocument: JSON.stringify({
-              Version: "2012-10-17",
-              Statement: policyStatements,
-            } satisfies IAM.PolicyDocument),
+            PolicyDocument: document,
           });
         } else {
           yield* iam
@@ -1858,16 +1865,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         functionName: string;
       }) {
         const { accountId, region } = yield* AWSEnvironment.current;
-        const document = JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Deny",
-              Action: "logs:CreateLogGroup",
-              Resource: `arn:aws:logs:${region}:${accountId}:log-group:/aws/lambda/${functionName}:*`,
-            },
-          ],
-        });
+        const document = functionLogGroupGuard(region, accountId, functionName);
         const observed = yield* iam
           .getRolePolicy({ RoleName: roleName, PolicyName: logGroupGuardPolicyName })
           .pipe(
@@ -2749,6 +2747,38 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
 
       return {
         stables: ["functionArn", "functionName", "roleName", "qualifiedArn", "aliasName"],
+        validate: Effect.fn(function* ({ fqn, news, bindings, output }) {
+          if (!Array.isArray(bindings)) return;
+          // Unknown environment/mount values do not make known IAM grants unknown.
+          const policyBindings: Input<ResourceBinding<Function["Binding"]>[]> = bindings.map(
+            (binding) => {
+              if (Output.isOutput(binding) || Effect.isEffect(binding) || Config.isConfig(binding))
+                return binding;
+              const data = binding.data;
+              if (Output.isOutput(data) || Effect.isEffect(data) || Config.isConfig(data))
+                return binding;
+              return { ...binding, data: { policyStatements: data?.policyStatements } };
+            },
+          );
+          if (!isResolved<ResourceBinding<Function["Binding"]>[]>(policyBindings)) return;
+          const statements = functionBindingStatements(policyBindings);
+          const { accountId, region } = yield* AWSEnvironment.current;
+          // A new generated physical name is assigned only at Apply. Reserve
+          // its maximum length so the known plan cannot under-budget the guard.
+          const explicitName =
+            typeof news === "object" &&
+            news !== null &&
+            "functionName" in news &&
+            typeof news.functionName === "string"
+              ? news.functionName
+              : undefined;
+          const functionName = explicitName ?? output?.functionName ?? "x".repeat(64);
+          yield* renderFunctionPolicy(
+            output?.roleName ?? `${fqn} execution role (physical name pending)`,
+            statements,
+            functionLogGroupGuard(region, accountId, functionName),
+          );
+        }),
         diff: Effect.fn(function* ({ id, olds, news: desired, output, oldBindings, newBindings }) {
           // Effect-native runtime exports remain unevaluated during planning.
           // Their identity is represented by the bundle hash, so they must not
@@ -3126,6 +3156,13 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           const roleName = output?.roleName ?? generated.roleName;
           const functionArn = output?.functionArn ?? generated.functionArn;
           const policyName = generated.policyName;
+
+          const { accountId, region } = yield* AWSEnvironment.current;
+          yield* renderFunctionPolicy(
+            roleName,
+            functionBindingStatements(bindings),
+            functionLogGroupGuard(region, accountId, functionName),
+          );
 
           // State is only a cache: the execution role may have been removed
           // out-of-band (or by a previously interrupted cleanup) while the

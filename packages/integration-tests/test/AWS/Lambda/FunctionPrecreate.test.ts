@@ -322,3 +322,68 @@ test.provider(
     }),
   { tags: ["unit", "provider:aws", "provider:aws:lambda", "local"] },
 );
+
+class PolicyPlanFunction extends Lambda.Function<PolicyPlanFunction>()("PolicyPlanFunction") {}
+
+test.provider(
+  "rejects an oversized resolved inline policy during a fresh plan before cloud writes",
+  (stack) =>
+    Effect.gen(function* () {
+      const cloud = makeCloud();
+      const program = PolicyPlanFunction.pipe(
+        Effect.provide(
+          PolicyPlanFunction.make(
+            {
+              main: new URL("./named-handler.ts", import.meta.url).pathname,
+              functionName: "policy-plan",
+            },
+            Effect.gen(function* () {
+              const host = yield* Lambda.Function;
+              yield* host.bind`oversized`({
+                policyStatements: [
+                  { Effect: "Allow", Action: ["s3:GetObject"], Resource: ["x".repeat(11000)] },
+                ],
+              });
+              return {};
+            }),
+          ),
+        ),
+      );
+      const exit = yield* Effect.exit(stack.plan(program).pipe(Effect.provide(cloud.layer)));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("LambdaRolePolicyTooLarge");
+      expect(cloud.roles.size).toBe(0);
+      expect(cloud.requests.some((request) => request.startsWith("POST iam."))).toBe(false);
+    }),
+);
+
+test.provider(
+  "validates known policy grants even when binding environment values are unresolved",
+  () =>
+    Effect.gen(function* () {
+      const cloud = makeCloud();
+      const provider = yield* Provider.findProvider(Lambda.Function);
+      const exit = yield* Effect.exit(
+        provider.validate!({
+          id: "PolicyPendingEnv",
+          fqn: "PolicyPendingEnv",
+          news: { main: "./handler.ts" },
+          output: undefined,
+          bindings: [
+            {
+              sid: "known-policy",
+              data: {
+                env: { PENDING: collectorConfigLayer },
+                policyStatements: [
+                  { Effect: "Allow", Action: ["s3:GetObject"], Resource: ["x".repeat(11000)] },
+                ],
+              },
+            },
+          ],
+        }).pipe(Effect.provide(cloud.layer)),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("LambdaRolePolicyTooLarge");
+      expect(cloud.requests).toHaveLength(0);
+    }),
+);
