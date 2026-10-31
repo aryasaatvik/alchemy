@@ -1,8 +1,13 @@
-import { ActivityRetry, DeferredWait } from "@alchemy.run/aws/Lambda/WorkflowFunction";
+import {
+  ActivityRetry,
+  DeferredWait,
+  DeferredWaitFailure,
+} from "@alchemy.run/aws/Lambda/WorkflowFunction";
 import * as Workflows from "alchemy/Workflows";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Activity, DurableClock, DurableDeferred, Workflow } from "effect/workflow";
 import { readInline } from "./activity-context.ts";
@@ -12,7 +17,7 @@ export class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {
 }) {}
 export const Approval = DurableDeferred.make("approval", {
   success: Schema.String,
-  error: Rejected,
+  error: Schema.Union([Rejected, DeferredWaitFailure]),
 });
 export const LoopApprovals = [0, 1].map((iteration) =>
   DurableDeferred.make(`loop/${iteration}`, { success: Schema.String, error: Rejected }),
@@ -25,7 +30,7 @@ export const Child = Workflow.make("Child", {
 export const Probe = Workflow.make("Probe", {
   payload: { id: Schema.String, mode: Schema.String },
   success: Schema.String,
-  error: Rejected,
+  error: Schema.Union([Rejected, DeferredWaitFailure]),
   idempotencyKey: ({ id }) => id,
 });
 export const live = Layer.mergeAll(
@@ -82,7 +87,7 @@ export const live = Layer.mergeAll(
         return yield* Activity.make({
           name: "retry",
           success: Schema.String,
-          error: Rejected,
+          error: Schema.Union([Rejected, DeferredWaitFailure]),
           execute: Effect.gen(function* () {
             const endpoint = process.env.AWS_ENDPOINT_URL!;
             const response = yield* Effect.promise(() =>
@@ -123,7 +128,8 @@ export const live = Layer.mergeAll(
           Effect.exit,
         );
         if (exit._tag === "Failure")
-          return Cause.pretty(exit.cause).includes("CallbackTimeoutError")
+          return Option.isSome(Cause.findErrorOption(exit.cause)) &&
+            Cause.squash(exit.cause) instanceof DeferredWaitFailure
             ? "timed out"
             : Cause.pretty(exit.cause);
         return exit.value;

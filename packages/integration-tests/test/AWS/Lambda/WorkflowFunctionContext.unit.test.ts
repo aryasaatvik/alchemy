@@ -11,6 +11,7 @@ import type {
 import { HandlerContext } from "@alchemy.run/aws/Lambda/InvocationDeadline";
 import {
   ActivityRetry,
+  DeferredWaitFailure,
   makeWorkflowEngine,
   makeWorkflowRunner,
 } from "@alchemy.run/aws/Lambda/WorkflowFunction";
@@ -18,7 +19,7 @@ import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
 import { RuntimeContext } from "alchemy/RuntimeContext";
-import { decodeResult, CurrentActivity } from "alchemy/WorkflowEncoding";
+import { decodeResult, encodeExit, CurrentActivity } from "alchemy/WorkflowEncoding";
 import * as Workflows from "alchemy/Workflows";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -32,7 +33,7 @@ import * as Redacted from "effect/Redacted";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
-import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
+import { Activity, DurableDeferred, Workflow, WorkflowEngine } from "effect/workflow";
 import { readInline, ActivityContextResult } from "./fixtures/workflow-floci/activity-context.ts";
 
 // The function provides its self handle during init; callers must not supply it.
@@ -223,6 +224,32 @@ for (const mode of ["engine", "runner"] as const) {
                 expect(result.retryable).toBe(retryable);
                 expect(attempts).toBe(retryable ? 3 : 1);
               }
+              for (const mode of ["timeout", "external", "domain", "unknown"] as const) {
+                const deferred = DurableDeferred.make(`native-${mode}`, {
+                  error: Schema.Union([DeferredWaitFailure, RetryFailure]),
+                });
+                const exit = yield* Effect.exit(DurableDeferred.await(deferred));
+                expect(Exit.isFailure(exit)).toBe(true);
+                if (Exit.isFailure(exit)) {
+                  const error = Cause.findErrorOption(exit.cause);
+                  if (mode === "unknown") {
+                    expect(Cause.squash(exit.cause)).toEqual({
+                      errorType: "EngineInvariantBroken",
+                    });
+                  } else {
+                    expect(Option.isSome(error)).toBe(true);
+                    if (Option.isSome(error)) {
+                      if (mode === "domain") expect(error.value).toBeInstanceOf(RetryFailure);
+                      else {
+                        expect(error.value).toBeInstanceOf(DeferredWaitFailure);
+                        expect((error.value as DeferredWaitFailure).kind).toBe(
+                          mode === "timeout" ? "timed_out" : "failed",
+                        );
+                      }
+                    }
+                  }
+                }
+              }
               let defectAttempts = 0;
               const defectExit = yield* Activity.make({
                 name: "predicate-defect",
@@ -290,7 +317,23 @@ for (const mode of ["engine", "runner"] as const) {
             }),
           invoke: unscripted,
           wait: unscripted,
-          waitForCallback: unscripted,
+          waitForCallback: (options) => {
+            if (options.name === "native-timeout")
+              return Effect.die({ errorType: "CallbackTimeoutError" });
+            if (options.name === "native-unknown")
+              return Effect.die({ errorType: "EngineInvariantBroken" });
+            const exit =
+              options.name === "native-domain"
+                ? Exit.fail(Schema.encodeSync(RetryFailure)(new RetryFailure({ retryable: false })))
+                : Exit.die(
+                    new Error("external rejection", {
+                      cause: { errorType: "CallbackExternalError" },
+                    }),
+                  );
+            return encodeExit(exit).pipe(
+              Effect.flatMap((text) => Effect.die(new Error(`alchemy/DeferredFailure:${text}`))),
+            );
+          },
         };
         const encoded = await Effect.runPromise(
           runner({

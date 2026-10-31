@@ -179,12 +179,43 @@ export const WorkflowFunction =
 /**
  * Lambda callback timeout and heartbeat deadline for the enclosed deferred await.
  * Provide with Effect.provideService(DeferredWait, { timeout: "1 day" }). A timeout
- * surfaces as the SDK's CallbackTimeoutError defect; it is not a deferred failure.
+ * is a typed DeferredWaitFailure; declare that schema in the deferred's error union.
  */
 export const DeferredWait = Context.Reference<DurableCallbackConfig>(
   "alchemy/AWS/Lambda/DeferredWait",
   { defaultValue: () => ({}) },
 );
+
+/** A native callback deadline or externally failed wait. Declare in the deferred error schema. */
+export class DeferredWaitFailure extends Schema.TaggedError<DeferredWaitFailure>()(
+  "DeferredWaitFailure",
+  {
+    kind: Schema.Literals(["timed_out", "failed"]),
+    message: Schema.String,
+  },
+) {}
+
+const waitFailureOf = (defect: unknown): DeferredWaitFailure | undefined => {
+  let current = defect;
+  let message: string | undefined;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
+    if (message === undefined && "message" in current && typeof current.message === "string")
+      message = current.message;
+    if ("errorType" in current) {
+      if (current.errorType === "CallbackTimeoutError")
+        return new DeferredWaitFailure({
+          kind: "timed_out",
+          message: "The callback deadline expired",
+        });
+      if (current.errorType === "CallbackExternalError")
+        return new DeferredWaitFailure({
+          kind: "failed",
+          message: message ?? "The callback was failed externally",
+        });
+    }
+    current = "cause" in current ? current.cause : undefined;
+  }
+};
 
 /**
  * Annotate an Activity with a Lambda-native retry policy. The SDK checkpoints
@@ -1015,13 +1046,29 @@ const makeEngine = (options: {
                     run.instance.suspended = false;
                   }).pipe(Effect.andThen(Effect.interrupt));
                 const encoded = failureText(defect, DEFERRED_FAILURE);
-                return encoded === undefined ? Effect.die(defect) : Effect.succeed(encoded);
+                if (encoded !== undefined) return Effect.succeed(encoded);
+                const failure = waitFailureOf(defect);
+                return failure === undefined
+                  ? Effect.die(defect)
+                  : Schema.encodeEffect(DeferredWaitFailure)(failure).pipe(
+                      Effect.orDie,
+                      Effect.flatMap((encoded) => encodeExit(Exit.fail(encoded))),
+                    );
               }),
             ),
         );
-        return Option.some(
-          yield* decodeExit(typeof text === "string" ? text : JSON.stringify(text)),
-        );
+        const exit = yield* decodeExit(typeof text === "string" ? text : JSON.stringify(text));
+        if (Exit.isFailure(exit)) {
+          const defect = exit.cause.reasons.find(Cause.isDieReason);
+          const failure = defect === undefined ? undefined : waitFailureOf(defect.defect);
+          if (failure !== undefined)
+            return Option.some(
+              Exit.fail(
+                yield* Schema.encodeEffect(DeferredWaitFailure)(failure).pipe(Effect.orDie),
+              ),
+            );
+        }
+        return Option.some(exit);
       }),
 
     deferredDone: (opts) =>
