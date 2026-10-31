@@ -219,7 +219,12 @@ for (const mode of ["engine", "runner"] as const) {
                       return error instanceof RetryFailure && error.retryable;
                     },
                   })
-                  .pipe(Effect.flip);
+                  .pipe(
+                    Effect.matchEffect({
+                      onFailure: Effect.succeed,
+                      onSuccess: () => Effect.die("Expected a typed Activity failure"),
+                    }),
+                  );
                 expect(result).toBeInstanceOf(RetryFailure);
                 expect(result.retryable).toBe(retryable);
                 expect(attempts).toBe(retryable ? 3 : 1);
