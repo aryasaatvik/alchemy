@@ -68,6 +68,7 @@ export type DurableFunctionInitServices =
   | FunctionServices
   | PlatformServices
   | Function
+  | DurableFunctionScope
   | DurableRunServices;
 
 /**

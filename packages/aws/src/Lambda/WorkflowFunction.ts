@@ -192,7 +192,12 @@ export const DeferredWait = Context.Reference<DurableCallbackConfig>(
  * Effect's Activity.retry is an outer Effect combinator and does not expose its
  * policy to WorkflowEngine, so use this annotation for SDK-managed retries.
  */
-export const ActivityRetry = Context.Reference<DurableRetryPolicy | undefined>(
+export interface ActivityRetryPolicy extends DurableRetryPolicy {
+  /** Retry only typed failures accepted by this predicate. Receives the decoded Activity error. */
+  readonly while?: (error: unknown) => boolean;
+}
+
+export const ActivityRetry = Context.Reference<ActivityRetryPolicy | undefined>(
   "alchemy/AWS/Lambda/ActivityRetry",
   { defaultValue: () => undefined },
 );
@@ -919,11 +924,32 @@ const makeEngine = (options: {
                           Exit.isFailure(result.exit) &&
                           Cause.hasFails(result.exit.cause) &&
                           !Cause.hasInterrupts(result.exit.cause)
-                            ? Effect.die(
-                                Object.assign(new Error(`${ACTIVITY_FAILURE}:${text}`), {
-                                  name: ACTIVITY_FAILURE,
-                                }),
-                              )
+                            ? Effect.gen(function* () {
+                                const failure = Exit.isFailure(result.exit)
+                                  ? Cause.findErrorOption(result.exit.cause)
+                                  : Option.none();
+                                if (retry.while && Option.isSome(failure)) {
+                                  if (
+                                    !("errorSchema" in activity) ||
+                                    !Schema.isSchema(activity.errorSchema)
+                                  ) {
+                                    return yield* Effect.die(
+                                      new Error(
+                                        "Activity retry predicate requires an error schema",
+                                      ),
+                                    );
+                                  }
+                                  const decoded = yield* Schema.decodeUnknownEffect(
+                                    Schema.toCodecJson(activity.errorSchema),
+                                  )(failure.value).pipe(Effect.orDie);
+                                  if (!retry.while(decoded)) return text;
+                                }
+                                return yield* Effect.die(
+                                  Object.assign(new Error(`${ACTIVITY_FAILURE}:${text}`), {
+                                    name: ACTIVITY_FAILURE,
+                                  }),
+                                );
+                              })
                             : Effect.succeed(text),
                         )
                       : Effect.die(new Error(`Activity ${activity.name} suspended inside a step`)),

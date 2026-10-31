@@ -4,14 +4,23 @@ import {
   DurableStep,
   DurableStepAttempt,
 } from "@alchemy.run/aws/Lambda/Durable";
+import type {
+  DurableFunctionInitServices,
+  DurableFunctionScope,
+} from "@alchemy.run/aws/Lambda/DurableFunction";
 import { HandlerContext } from "@alchemy.run/aws/Lambda/InvocationDeadline";
-import { makeWorkflowEngine, makeWorkflowRunner } from "@alchemy.run/aws/Lambda/WorkflowFunction";
+import {
+  ActivityRetry,
+  makeWorkflowEngine,
+  makeWorkflowRunner,
+} from "@alchemy.run/aws/Lambda/WorkflowFunction";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { decodeResult, CurrentActivity } from "alchemy/WorkflowEncoding";
 import * as Workflows from "alchemy/Workflows";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -25,6 +34,16 @@ import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
 import { readInline, ActivityContextResult } from "./fixtures/workflow-floci/activity-context.ts";
+
+// The function provides its self handle during init; callers must not supply it.
+const selfHandleProvided: Exclude<DurableFunctionScope, DurableFunctionInitServices> extends never
+  ? true
+  : false = true;
+expect(selfHandleProvided).toBe(true);
+
+class RetryFailure extends Schema.TaggedError<RetryFailure>()("RetryFailure", {
+  retryable: Schema.Boolean,
+}) {}
 
 const workflow = Workflow.make("ContextProbe", {
   payload: { id: Schema.String },
@@ -182,6 +201,40 @@ for (const mode of ["engine", "runner"] as const) {
                 interrupted: false,
                 attempt: 1,
               });
+              for (const retryable of [false, true]) {
+                let attempts = 0;
+                const result = yield* Activity.make({
+                  name: `predicate-${retryable}`,
+                  error: RetryFailure,
+                  execute: Effect.suspend(() => {
+                    attempts += 1;
+                    return Effect.fail(new RetryFailure({ retryable }));
+                  }),
+                })
+                  .annotate(ActivityRetry, {
+                    limit: 2,
+                    while: (error) => {
+                      expect(error).toBeInstanceOf(RetryFailure);
+                      return error instanceof RetryFailure && error.retryable;
+                    },
+                  })
+                  .pipe(Effect.flip);
+                expect(result).toBeInstanceOf(RetryFailure);
+                expect(result.retryable).toBe(retryable);
+                expect(attempts).toBe(retryable ? 3 : 1);
+              }
+              let defectAttempts = 0;
+              const defectExit = yield* Activity.make({
+                name: "predicate-defect",
+                execute: Effect.suspend(() => {
+                  defectAttempts += 1;
+                  return Effect.die(new Error("unretryable defect"));
+                }),
+              })
+                .annotate(ActivityRetry, { limit: 2, while: () => true })
+                .pipe(Effect.exit);
+              expect(Exit.isFailure(defectExit)).toBe(true);
+              expect(defectAttempts).toBe(1);
               yield* Activity.make({
                 name: "activity",
                 execute: Effect.gen(function* () {
@@ -214,16 +267,27 @@ for (const mode of ["engine", "runner"] as const) {
         const unscripted = () => Effect.die("unscripted durable operation");
         const durable: DurableStep["Service"] = {
           step: (options) =>
-            Effect.promise(() =>
-              Effect.runPromise(
-                options.effect.pipe(
-                  Effect.provideService(
-                    DurableStepAttempt,
-                    options.name.startsWith("activity/") ? 3 : 1,
+            Effect.gen(function* () {
+              for (let retry = 0; ; retry += 1) {
+                const exit = yield* Effect.exit(
+                  options.effect.pipe(
+                    Effect.provideService(
+                      DurableStepAttempt,
+                      options.name.startsWith("activity/") ? 3 : 1,
+                    ),
                   ),
-                ),
-              ),
-            ),
+                );
+                if (Exit.isSuccess(exit)) return exit.value;
+                const defect = Cause.squash(exit.cause);
+                if (
+                  retry < (options.retry?.limit ?? 0) &&
+                  defect instanceof Error &&
+                  options.retryWhen?.(defect)
+                )
+                  continue;
+                return yield* Effect.failCause(exit.cause);
+              }
+            }),
           invoke: unscripted,
           wait: unscripted,
           waitForCallback: unscripted,
