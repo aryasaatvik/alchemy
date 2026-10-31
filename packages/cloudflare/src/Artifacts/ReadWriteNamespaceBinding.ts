@@ -72,6 +72,7 @@ const makeBinding = <Self>(tag: Self) =>
       return Effect.fn(function* (namespace: ArtifactsLike) {
         if (!globalThis.__ALCHEMY_RUNTIME__) {
           yield* host.bind(namespace.name, {
+            devRemote: namespace.devRemote ? { [namespace.name]: true } : undefined,
             bindings: [
               {
                 type: "artifacts",

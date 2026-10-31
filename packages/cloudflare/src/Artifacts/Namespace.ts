@@ -1,3 +1,4 @@
+import { ProviderModePolicy } from "alchemy/ProviderMode";
 import { Stack } from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as Data from "effect/Data";
@@ -45,6 +46,8 @@ export type Namespace = {
   kind: NamespaceTypeId;
   name: string;
   namespace: string;
+  /** Dev-only opt-out of the local simulator, selected with `Alchemy.remote()`. */
+  devRemote?: boolean;
 };
 
 export const isNamespace = (value: unknown): value is Namespace =>
@@ -127,6 +130,7 @@ export const Namespace: (
     return yield* Effect.die(new InvalidNamespaceError({ namespace }));
   }
   return {
+    devRemote: (yield* ProviderModePolicy) === true || undefined,
     kind: NamespaceTypeId,
     name,
     namespace,

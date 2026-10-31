@@ -294,7 +294,8 @@ export const bindWorkerAsyncBindings = Effect.fn(function* (
           // binding value; contribute it as binding data so the wire binding
           // stays pure.
           devRemote:
-            (isWorkerOnlyBinding(binding) || isSendEmail(binding)) && binding.devRemote
+            (isWorkerOnlyBinding(binding) || isSendEmail(binding) || isNamespace(binding)) &&
+            binding.devRemote
               ? { [bindingName]: true }
               : undefined,
         });

@@ -8893,6 +8893,9 @@ importers:
       yauzl:
         specifier: 'catalog:'
         version: 3.4.0
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: 'catalog:'

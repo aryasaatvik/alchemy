@@ -737,7 +737,8 @@
     "sharp": "catalog:",
     "unenv": "catalog:",
     "workerd": "catalog:",
-    "yauzl": "catalog:"
+    "yauzl": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "catalog:",

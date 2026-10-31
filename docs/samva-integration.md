@@ -240,3 +240,22 @@ Before planning against S3 state, obtain explicit authorization for the resolved
 bucket, stack/stage prefix, lease acquisition/renewal/release, and any required bucket reconciliation.
 A strict no-provider-writes grant does not cover this path. The native S3 state store has no supported
 strict-read-only plan mode; stop for a scope decision when those backend writes are not authorized.
+
+## Local Artifacts
+
+`alchemy dev` simulates Artifacts bindings by default. `Artifacts.Namespace(...).pipe(Alchemy.remote())`
+selects the real namespace for development acceptance. Deploy always uses the native cloud binding.
+Local metadata, token hashes and bare Git repositories live below the runtime storage directory's
+`artifacts/` subtree; the stack owner removes that directory during teardown. Stopping the runtime
+closes its Git backend and listener while retaining disk-backed state for a restart.
+
+The simulator requires Git 2.32 or newer with `git http-backend` installed. Its Git listener accepts
+Basic `x-access-token` authentication and enforces read/write token scope and expiry. Set
+`ALCHEMY_ARTIFACTS_GIT_PORT` to a supervisor-allocated port when another process needs a stable Git
+base (`http://127.0.0.1:<port>/git/<namespace>`); otherwise the runtime allocates a loopback port.
+The simulator uses host Git and local Durable Object metadata rather than Cloudflare replication,
+quotas or availability; local acceptance does not establish those cloud properties.
+
+The implementation is adapted from Cloudflare Workers SDK / Miniflare revision
+`d8899ac4c85ff839d73daa9055a76a36248cd2e3` under its MIT license. The repository's
+`THIRD_PARTY_LICENSES.md` contains the copyright and license notice, also included in package builds.
