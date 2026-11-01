@@ -338,9 +338,11 @@ type HostedBy<Host> =
  * const engine = AWS.Lambda.DurableFunctionEngine({ host: OrderWorkflows, alias });
  * ```
  *
- * The alias must belong to the supplied host. Invoke and list permissions are
- * scoped to its ARN. Execution and callback APIs use the execution ARN and
- * callback id returned by that target; their IAM permissions remain account-wide.
+ * The alias must belong to the supplied host. Starts invoke its ARN; lookups
+ * search the host function across versions so runs remain reachable after the
+ * alias moves. Their permissions are scoped to the alias and function respectively.
+ * Execution and callback APIs use the execution ARN and callback id returned by
+ * that target; their IAM permissions remain account-wide.
  * Omitting the target preserves the host's Function-owned alias or `$LATEST`.
  * AWS authority and transport are retained at initialization; logs, annotations
  * and tracing use the caller's context for each operation.
@@ -372,15 +374,11 @@ export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHo
           if (!globalThis.__ALCHEMY_RUNTIME__) {
             yield* bind`AWS.Lambda.DurableFunctionEngine(${fn})`({
               policyStatements: [
-                ...(alias
-                  ? [
-                      {
-                        Effect: "Allow" as const,
-                        Action: ["lambda:ListDurableExecutionsByFunction"],
-                        Resource: [alias.aliasArn],
-                      },
-                    ]
-                  : []),
+                {
+                  Effect: "Allow",
+                  Action: ["lambda:ListDurableExecutionsByFunction"],
+                  Resource: [fn.functionArn],
+                },
                 {
                   Effect: "Allow",
                   Action: ["lambda:InvokeFunction"],
@@ -393,7 +391,6 @@ export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHo
                 {
                   Effect: "Allow",
                   Action: [
-                    ...(alias ? [] : ["lambda:ListDurableExecutionsByFunction"]),
                     "lambda:GetDurableExecution",
                     "lambda:GetDurableExecutionHistory",
                     "lambda:StopDurableExecution",
@@ -416,7 +413,6 @@ export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHo
             (effect) => effect.pipe(Effect.provide(context)),
             functionName,
             qualifier,
-            alias !== undefined,
           );
           for (const workflow of host.workflows) routes.set(workflow._tag, calls);
         }
@@ -617,7 +613,6 @@ const makeCalls = (
   provide: <A, E>(effect: Effect.Effect<A, E, LambdaServices>) => Effect.Effect<A, E>,
   functionName: Effect.Effect<string>,
   qualifier: Effect.Effect<string>,
-  qualifiedLookup = false,
 ): Calls => {
   const run = <A, E>(effect: Effect.Effect<A, E, LambdaServices>) =>
     provide(effect).pipe(Effect.orDie);
@@ -645,23 +640,13 @@ const makeCalls = (
         ),
       ),
     find: (executionName) =>
-      Effect.flatMap(Effect.all([functionName, qualifier]), ([name, version]) =>
+      Effect.flatMap(functionName, (FunctionName) =>
         run(
-          // Lambda rejects DurableExecutionName on qualified lists. Keep the
-          // alias scope and search pages locally instead of widening to the function.
-          qualifiedLookup
-            ? Lambda.listDurableExecutionsByFunction
-                .items({ FunctionName: `${name}:${version}` })
-                .pipe(
-                  Stream.filter((execution) => execution.DurableExecutionName === executionName),
-                  Stream.take(1),
-                  Stream.runCollect,
-                  Effect.map((executions) => executions[0]?.DurableExecutionArn),
-                )
-            : Lambda.listDurableExecutionsByFunction({
-                FunctionName: name,
-                DurableExecutionName: executionName,
-              }).pipe(Effect.map((page) => page.DurableExecutions?.[0]?.DurableExecutionArn)),
+          // A qualifier hides runs pinned to earlier versions after an alias moves.
+          Lambda.listDurableExecutionsByFunction({
+            FunctionName,
+            DurableExecutionName: executionName,
+          }).pipe(Effect.map((page) => page.DurableExecutions?.[0]?.DurableExecutionArn)),
         ),
       ),
     get: (executionArn) =>

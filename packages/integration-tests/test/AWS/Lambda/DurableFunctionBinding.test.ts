@@ -432,7 +432,7 @@ test.provider(
 );
 
 test.provider(
-  "binds a separately owned workflow alias and routes every engine operation through it",
+  "starts through a workflow alias and finds older executions after the alias moves",
   (stack) =>
     Effect.gen(function* () {
       yield* stack.destroy();
@@ -447,17 +447,21 @@ test.provider(
       const statements = reconciledBindings
         .get("AliasWorkflowCaller")!
         .flatMap((b) => b.data?.policyStatements ?? []);
-      for (const action of ["lambda:InvokeFunction", "lambda:ListDurableExecutionsByFunction"]) {
+      for (const [action, resource] of [
+        ["lambda:InvokeFunction", "TestWorkflows-deployed:live"],
+        ["lambda:ListDurableExecutionsByFunction", "TestWorkflows-deployed"],
+      ]) {
         expect(statements).toContainEqual({
           Effect: "Allow",
           Action: [action],
-          Resource: ["arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:live"],
+          Resource: [`arn:aws:lambda:us-east-1:123:function:${resource}`],
         });
       }
       const entry = yield* writeBundle(props as FunctionZipProps, "alchemy-alias-engine-");
       const requests: URL[] = [];
       const arn =
         "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:7/durable-execution/execution";
+      let aliasVersion = "7";
       let pending = true;
       const server = yield* Effect.acquireRelease(
         Effect.sync(() =>
@@ -469,15 +473,16 @@ test.provider(
               if (url.pathname.endsWith("/invocations"))
                 return new Response("{}", {
                   status: 202,
-                  headers: { "x-amz-durable-execution-arn": arn },
+                  headers: {
+                    "x-amz-durable-execution-arn": arn.replace(":7/", `:${aliasVersion}/`),
+                  },
                 });
               if (url.pathname.endsWith("/durable-executions")) {
-                expect(decodeURIComponent(url.pathname)).toContain(
+                const qualified = decodeURIComponent(url.pathname).includes(
                   "/functions/TestWorkflows-deployed:live/",
                 );
-                expect(url.searchParams.has("DurableExecutionName")).toBe(false);
-                if (!url.searchParams.has("Marker"))
-                  return Response.json({ DurableExecutions: [], NextMarker: "alias-page-2" });
+                if (qualified && aliasVersion !== "7")
+                  return Response.json({ DurableExecutions: [] });
                 return Response.json({
                   DurableExecutions: [
                     {
@@ -516,14 +521,31 @@ test.provider(
         ...(props.env as Record<string, string>),
       });
       const module = yield* Effect.promise(() => import(`${pathToFileURL(entry).href}?alias`));
-      for (const operation of ["start", "status", "success", "failure", "interrupt", "stop"]) {
+      expect(yield* Effect.promise(() => module.default({ operation: "start" }, {}))).toBe(arn);
+      aliasVersion = "8";
+      expect(yield* Effect.promise(() => module.default({ operation: "status" }, {}))).toEqual({
+        _tag: "Running",
+      });
+      for (const operation of ["success", "failure", "interrupt", "stop"]) {
         yield* Effect.promise(() => module.default({ operation }, {}));
       }
       pending = false;
       yield* Effect.promise(() => module.default({ operation: "interrupt" }, {}));
-      expect(
-        requests.find((u) => u.pathname.endsWith("/invocations"))?.searchParams.get("Qualifier"),
-      ).toBe("live");
+      expect(yield* Effect.promise(() => module.default({ operation: "start" }, {}))).toBe(
+        arn.replace(":7/", ":8/"),
+      );
+      const starts = requests.filter((u) => u.pathname.endsWith("/invocations"));
+      expect(starts).toHaveLength(2);
+      expect(starts.every((u) => u.searchParams.get("Qualifier") === "live")).toBe(true);
+      const lookups = requests.filter((u) => u.pathname.endsWith("/durable-executions"));
+      expect(lookups).toHaveLength(6);
+      for (const url of lookups) {
+        expect(decodeURIComponent(url.pathname)).toContain(
+          "/functions/TestWorkflows-deployed/durable-executions",
+        );
+        expect(url.searchParams.has("Qualifier")).toBe(false);
+        expect(url.searchParams.get("DurableExecutionName")).toBe("Approve-execution");
+      }
       for (const url of requests.filter(
         (u) => u.pathname.includes("/durable-executions/") && !u.pathname.includes("/functions/"),
       ))
