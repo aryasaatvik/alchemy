@@ -273,7 +273,7 @@ const makeRelay = (pendingTimeout: Duration.Duration): Relay => {
       // vanished mid-response cuts the client off.
       upstream.on("error", () => socket.destroy());
       upstream.on("close", (hadError) => {
-        if (hadError || !socket.writableEnded) socket.destroy();
+        if (hadError || !upstream.readableEnded) socket.destroy();
       });
     }
     // From here the socket does the talking; the client closing ends the
@@ -405,6 +405,10 @@ export const WorkerProxyLive = Layer.effect(
       pendingTimeout,
     }: ResolvedOptions) {
       const relay = makeRelay(pendingTimeout);
+      // Registered before the listeners so it runs AFTER they close: the
+      // port's reservation must outlive the listener, or a concurrent
+      // allocation could be handed a port that is still bound.
+      yield* Effect.addFinalizer(() => ports.release(port));
       yield* listen(relay, host, port);
       if (ipv6) {
         // The IPv6 half of `localhost` (see `ipv6Loopback` above). The port

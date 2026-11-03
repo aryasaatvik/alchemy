@@ -37,6 +37,7 @@ const program = Effect.gen(function* () {
     yield* viteBuildInProcess(config.rootDir, config.env, {
       main: config.main,
       framework: config.framework,
+      prerenderWorker: config.prerenderWorker,
       compatibilityDate: config.compatibilityDate,
       compatibilityFlags: config.compatibilityFlags,
       viteEnvironments: config.viteEnvironments,

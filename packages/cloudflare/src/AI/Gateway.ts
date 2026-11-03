@@ -264,6 +264,13 @@ export type GatewayProps = {
    * Whether Zero Data Retention is enabled.
    */
   zdr?: boolean;
+  /**
+   * Require provider credentials: a third-party provider request must carry
+   * its own credentials or use a key stored on the gateway, and never falls
+   * back to Unified Billing. Workers AI requests are unaffected.
+   * @default false
+   */
+  byokOnly?: boolean;
 };
 
 export type Gateway = Resource<
@@ -292,6 +299,7 @@ export type Gateway = Resource<
     stripe: GatewayStripe | undefined;
     spendLimits: GatewaySpendLimits | undefined;
     zdr: boolean;
+    byokOnly: boolean;
   },
   never,
   Providers
@@ -617,6 +625,7 @@ const desired = (id: string, props: GatewayProps | undefined) =>
       stripe: props?.stripe ?? undefined,
       spendLimits: resolveSpendLimits(props?.spendLimits),
       zdr: props?.zdr ?? false,
+      byokOnly: props?.byokOnly ?? false,
     };
   });
 
@@ -675,6 +684,7 @@ const mapGateway = (
   stripe: gateway.stripe ?? undefined,
   spendLimits: normalizeSpendLimits(gateway.spendLimits),
   zdr: gateway.zdr ?? false,
+  byokOnly: gateway.byokOnly ?? false,
 });
 
 // Normalize spend limits into the user-facing shape and drop server-managed
@@ -743,6 +753,7 @@ const mutable = (gateway: Gateway["Attributes"]) => ({
   stripe: gateway.stripe,
   spendLimits: spendLimitsForDiff(gateway.spendLimits),
   zdr: gateway.zdr,
+  byokOnly: gateway.byokOnly,
 });
 
 // Compare spend limits by their user-meaningful shape: drop the
@@ -787,6 +798,7 @@ const createRequest = Effect.fn(function* (id: string, props: GatewayProps | und
     logpush: next.logpush,
     logpushPublicKey: next.logpushPublicKey,
     zdr: next.zdr,
+    byokOnly: next.byokOnly,
   } satisfies aiGateway.CreateAiGatewayRequest;
 });
 
@@ -818,5 +830,6 @@ const updateRequest = Effect.fn(function* (
     stripe: next.stripe,
     spendLimits: next.spendLimits,
     zdr: next.zdr,
+    byokOnly: next.byokOnly,
   } satisfies aiGateway.UpdateAiGatewayRequest;
 });

@@ -1,4 +1,5 @@
 import * as AWS from "@alchemy.run/aws";
+import { makeFunctionHttpHandler } from "@alchemy.run/aws/Lambda/HttpServer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
@@ -45,17 +46,23 @@ export default class InitIOProbe extends AWS.Lambda.Function<InitIOProbe>()(
     functionUrl: true,
   },
   Effect.gen(function* () {
-    const config = yield* TraceConfig;
-
-    return {
-      fetch: Effect.gen(function* () {
-        return yield* HttpServerResponse.json({
-          nonce: config.nonce,
-          traceLength: config.trace.length,
-          hasUag: config.trace.includes("uag="),
-          initFetches: (globalThis as any).__initFetches ?? 0,
-        });
+    const host = yield* AWS.Lambda.Function;
+    yield* host.listen(
+      Effect.gen(function* () {
+        const services = yield* Layer.build(TraceConfigLive);
+        const handler = makeFunctionHttpHandler(
+          Effect.gen(function* () {
+            const config = yield* TraceConfig;
+            return yield* HttpServerResponse.json({
+              nonce: config.nonce,
+              traceLength: config.trace.length,
+              hasUag: config.trace.includes("uag="),
+              initFetches: (globalThis as any).__initFetches ?? 0,
+            }).pipe(Effect.orDie);
+          }).pipe(Effect.provide(services)),
+        );
+        return (event: any) => handler(event)?.pipe(Effect.orDie);
       }),
-    };
-  }).pipe(Effect.provide(TraceConfigLive)),
+    );
+  }),
 ) {}

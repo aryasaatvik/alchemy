@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as AWSBindings from "../AWSBindings.ts";
-import type { Secret } from "./Secret.ts";
+import type { Secret, SecretReference } from "./Secret.ts";
 
 /**
  * Shared scaffolding for the AWS Secrets Manager HTTP bindings.
@@ -13,9 +13,9 @@ import type { Secret } from "./Secret.ts";
 
 /**
  * Build the impl Effect for a Secrets Manager operation scoped to a bound
- * {@link Secret}: the deploy-time half grants `actions` on the secret's ARN,
- * and the runtime half injects the secret ARN as `SecretId` into every
- * request.
+ * {@link Secret} or {@link SecretReference}: the deploy-time half grants
+ * `actions` on the secret's ARN, and the runtime half injects the secret's id
+ * as `SecretId` into every request.
  */
 export const makeSecretHttpBinding = <I extends { SecretId?: string }, A, E, R>(options: {
   /** Fully-qualified binding tag, e.g. `AWS.SecretsManager.GetSecretValue`. */
@@ -29,8 +29,12 @@ export const makeSecretHttpBinding = <I extends { SecretId?: string }, A, E, R>(
     const bind = yield* AWSBindings.Bind;
     const op = yield* AWSBindings.withCredentials(options.operation);
 
-    return Effect.fn(function* (secret: Secret) {
-      const SecretId = yield* secret.secretArn;
+    return Effect.fn(function* (secret: Secret | SecretReference) {
+      // A managed Secret is addressed by its ARN Output; an external
+      // reference by its declared id (its `secretArn` may be an IAM pattern),
+      // which the init code already knows at runtime.
+      const SecretId =
+        "secretId" in secret ? Effect.succeed(secret.secretId) : yield* secret.secretArn;
       if (!globalThis.__ALCHEMY_RUNTIME__) {
         yield* bind`${options.tag}(${secret})`({
           policyStatements: [

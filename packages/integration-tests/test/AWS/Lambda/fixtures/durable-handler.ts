@@ -24,6 +24,9 @@ export class DurableFlow extends Lambda.DurableFunction<DurableFlow>()("DurableF
 export default DurableFlow.make(
   {
     main,
+    ...(process.env.WORKFLOW_FLOCI_ENDPOINT
+      ? { env: { AWS_ENDPOINT_URL: "http://floci:4566" } }
+      : {}),
     executionTimeout: Duration.hours(1),
     retentionPeriod: "1 day",
     // Per-invocation budget (each resume is its own invocation).

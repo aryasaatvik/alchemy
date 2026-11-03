@@ -11,7 +11,7 @@ import * as Path from "effect/Path";
 import { CloudflareEnvironment } from "./CloudflareEnvironment.ts";
 import type { Consumer } from "./Queues/Consumer.ts";
 import type { Queue } from "./Queues/Queue.ts";
-import { LocalEdgeLive } from "./Workers/LocalEdge.ts";
+import { LocalEdge, LocalEdgeLive } from "./Workers/LocalEdge.ts";
 
 /**
  * The Cloudflare provider group module ([Local.ts](./Local.ts)) every
@@ -76,7 +76,14 @@ export const localStorageDirectory = Effect.gen(function* () {
   return path.join(dotAlchemy, "local");
 });
 
-const makeLocalRuntimeServices = () =>
+const makeLocalRuntimeServices = (): Layer.Layer<
+  LocalRuntimeState | LocalEdge | Layer.Success<ReturnType<typeof layerRuntime>>,
+  Layer.Error<ReturnType<typeof layerRuntime>>,
+  | Layer.Services<ReturnType<typeof layerRuntime>>
+  | CloudflareEnvironment
+  | AlchemyContext
+  | Path.Path
+> =>
   RpcProvider.providerServicesEffect(
     Effect.gen(function* () {
       const getEnv = yield* CloudflareEnvironment;
@@ -113,7 +120,8 @@ let _localRuntimeServices: ReturnType<typeof makeLocalRuntimeServices> | undefin
  * per stack build (a fresh build gets a fresh instance via its own memo
  * map; the layer blueprint itself is immutable).
  */
-export const localRuntimeServices = () => (_localRuntimeServices ??= makeLocalRuntimeServices());
+export const localRuntimeServices = (): ReturnType<typeof makeLocalRuntimeServices> =>
+  (_localRuntimeServices ??= makeLocalRuntimeServices());
 
 export const isLocalId = (id: string | undefined): id is string =>
   typeof id === "string" && id.startsWith(LOCAL_ID_PREFIX);

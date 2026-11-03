@@ -320,8 +320,12 @@ export function installResolvedPackages(
         Effect.gen(function* () {
           const hasOverrides =
             options.overrides !== undefined && Object.keys(options.overrides).length > 0;
+          // npm names the lockfile after the manifest, else after the
+          // directory. A fixed name keeps the artifact, and so the code hash,
+          // identical across installs into different scratch directories.
           const manifest = JSON.stringify(
             {
+              name: "alchemy-lambda-packages",
               private: true,
               dependencies: options.resolved,
               ...(hasOverrides ? { overrides: options.overrides } : {}),

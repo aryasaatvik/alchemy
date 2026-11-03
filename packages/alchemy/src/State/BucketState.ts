@@ -1,7 +1,6 @@
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import { decodeFqn, encodeFqn } from "../FQN.ts";
@@ -133,17 +132,11 @@ const amortizeCheck = (
   ttlMs: number,
 ): Effect.Effect<void, StateStoreError> => {
   let lastOkAt: number | undefined;
-  return Effect.suspend(() => {
-    if (lastOkAt !== undefined && Date.now() - lastOkAt < ttlMs) {
-      return Effect.void;
-    }
-    return checkLive.pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          lastOkAt = Date.now();
-        }),
-      ),
-    );
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (lastOkAt !== undefined && now - lastOkAt < ttlMs) return;
+    yield* checkLive;
+    lastOkAt = now;
   });
 };
 
@@ -288,18 +281,7 @@ export const makeBucketState = (options: BucketStateOptions) =>
             if (next === undefined) cursor.lost = true;
             else cursor.version = next;
           }),
-        ).pipe(
-          Effect.retry({
-            while: () => !cursor.lost,
-            schedule: Schedule.spaced("1 second"),
-            times: 3,
-          }),
-          Effect.catch(() =>
-            Effect.sync(() => {
-              cursor.lost = true;
-            }),
-          ),
-        );
+        ).pipe(Effect.ignore);
 
         const verify = Semaphore.withPermits(
           gate,

@@ -361,16 +361,31 @@ const packageExport = (exports: unknown, main: string | undefined, subpath: stri
     entries.some(([key]) => key.startsWith(".")) ? entries : [[".", exports]],
   );
   if (map.has(subpath)) return exportTarget(map.get(subpath), "");
+  let best: { pattern: string; target: unknown; star: number } | undefined;
   for (const [pattern, target] of map) {
     const star = pattern.indexOf("*");
-    if (star === -1) continue;
+    if (star === -1 || pattern.indexOf("*", star + 1) !== -1) continue;
     const prefix = pattern.slice(0, star);
     const suffix = pattern.slice(star + 1);
-    if (subpath.startsWith(prefix) && subpath.endsWith(suffix)) {
-      return exportTarget(target, subpath.slice(prefix.length, subpath.length - suffix.length));
+    if (
+      subpath.length >= pattern.length &&
+      subpath.startsWith(prefix) &&
+      subpath.endsWith(suffix) &&
+      (best === undefined ||
+        star > best.star ||
+        (star === best.star && pattern.length > best.pattern.length))
+    ) {
+      best = { pattern, target, star };
     }
   }
-  return undefined;
+  // Node ranks patterns by prefix length, then total length, before resolving a target.
+  // A blocked winning export must not fall through to a broader pattern.
+  return best === undefined
+    ? undefined
+    : exportTarget(
+        best.target,
+        subpath.slice(best.star, subpath.length - (best.pattern.length - best.star - 1)),
+      );
 };
 
 /**

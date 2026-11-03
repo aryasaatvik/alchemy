@@ -393,7 +393,11 @@ describe("Lambda external packages", { tags: ["unit", "local"] }, () => {
             }),
         });
 
-        expect(artifactPackageJson).toEqual({ private: true, dependencies: { sharp: "^0.34.5" } });
+        expect(artifactPackageJson).toEqual({
+          name: "alchemy-lambda-packages",
+          private: true,
+          dependencies: { sharp: "^0.34.5" },
+        });
         // No lockfile in the fixture means nothing to pin, so the install is a
         // single plain `npm install` instead of the lockfile-generate + ci pair.
         expect(installArgs).toEqual([npmPlainInstallArgs("arm64")]);
@@ -1315,6 +1319,49 @@ describe("Lambda external packages", { tags: ["unit", "local"] }, () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 });
+
+describe.skipIf(spawnSync("npm", ["--version"], { stdio: "ignore" }).status !== 0)(
+  "Lambda external packages with npm",
+  { tags: ["unit", "local"] },
+  () => {
+    it.effect(
+      "installs the same files for the same packages, whatever its scratch directory",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const source = yield* fs.makeTempDirectory({
+            prefix: "alchemy-local-package-",
+          });
+          try {
+            yield* fs.writeFileString(
+              path.join(source, "package.json"),
+              JSON.stringify({ name: "local-package", version: "1.0.0" }),
+            );
+            yield* fs.writeFileString(path.join(source, "index.js"), "module.exports = 1;\n");
+            const install = installResolvedPackages({
+              resolved: { "local-package": `file:${source}` },
+              architecture: "arm64",
+            }).pipe(
+              Effect.map((files) =>
+                files
+                  .filter((file) => file.path.endsWith("package-lock.json"))
+                  .map((file) => new TextDecoder().decode(file.content)),
+              ),
+            );
+            const first = yield* install;
+            const second = yield* install;
+
+            expect(first.length).toBeGreaterThan(0);
+            expect(second).toEqual(first);
+          } finally {
+            yield* fs.remove(source, { recursive: true }).pipe(Effect.ignore);
+          }
+        }).pipe(Effect.provide(NodeServices.layer)),
+      { timeout: 60_000 },
+    );
+  },
+);
 
 describe.skipIf(!integrationEnabled)(
   "Lambda external packages integration",

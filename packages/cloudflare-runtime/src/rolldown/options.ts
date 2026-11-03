@@ -1,3 +1,5 @@
+import type { Assets } from "../core/RuntimeWorker.ts";
+
 export interface BasePluginOptions {
   /**
    * The main entry point to use.
@@ -5,6 +7,17 @@ export interface BasePluginOptions {
    * @default undefined
    */
   main?: string;
+  /**
+   * Separate, never-deployed Worker for framework prerender previews.
+   * Uses the deployed Worker's compatibility settings. Preview selects this
+   * entry while `TSS_PRERENDERING` is `"true"`, with an `ASSETS` binding to the
+   * client output. All options are plain data so builds can run in a child.
+   */
+  prerenderWorker?: {
+    main: string;
+    env?: Record<string, string>;
+    assets?: Assets;
+  };
   /**
    * The compatibility date to use. This is optional, but should be defined to avoid unexpected behavior.
    * @default undefined

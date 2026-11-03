@@ -59,7 +59,18 @@ export const RemoteBindingsLive = Layer.effect(
         if (prefetched) {
           prefetches.delete(hash);
         }
-        const deploy = prefetched ? Fiber.join(prefetched) : remoteWorker.deploy(json);
+        const deploy = prefetched
+          ? Fiber.join(prefetched).pipe(
+              Effect.catchIf(
+                (error) => error._tag === "ApiError" && error.timeoutMs !== undefined,
+                () =>
+                  Effect.logWarning({
+                    event_name: "cloudflare.preview.prefetch.retry",
+                    worker: json.name,
+                  }).pipe(Effect.andThen(remoteWorker.deploy(json))),
+              ),
+            )
+          : remoteWorker.deploy(json);
         return yield* deploy.pipe(
           Effect.flatMap((result) => HttpServerResponse.json({ ok: true, result })),
           Effect.tapCause((cause) => cause.pipe(Cause.pretty, Effect.logError)),
@@ -136,7 +147,12 @@ export const RemoteBindingsLive = Layer.effect(
                 return {
                   name: "remote-bindings:client",
                   props: {
-                    json: JSON.stringify({ binding: binding.name }),
+                    json: JSON.stringify({
+                      binding: binding.name,
+                      ...(binding.type === "artifacts"
+                        ? { artifactsNamespace: binding.namespace }
+                        : {}),
+                    }),
                   },
                 };
               }),

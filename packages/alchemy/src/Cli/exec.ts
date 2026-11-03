@@ -14,7 +14,7 @@ import * as Schema from "effect/Schema";
 import { resolveStackEntrypoint } from "../Alchemist/Entrypoint.ts";
 import { StackModuleLoader } from "../Alchemist/Entrypoint.ts";
 import * as Alchemist from "../Alchemist/index.ts";
-import { AlchemyContextLive } from "../AlchemyContext.ts";
+import { AlchemyContextLive, withDataDir } from "../AlchemyContext.ts";
 import { ArtifactStore, createArtifactStore } from "../Artifacts.ts";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileStoreLive } from "../Auth/Profile.ts";
@@ -260,6 +260,7 @@ const makeExec = () => {
         ? runBunDevWatcher(options)
         : runNodeDevWatcher(options);
   }).pipe(
+    withDataDir(options.dataDir),
     logShutdown("exec"),
     // Spans join the trace `alchemy dev` passed down, like the records
     // logged outside them already do.

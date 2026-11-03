@@ -41,6 +41,7 @@ export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
   subtag: Schema.String,
   message: Schema.String,
   hint: Schema.optional(Schema.String),
+  timeoutMs: Schema.optional(Schema.Number),
   detail: Schema.optional(Schema.Unknown),
   cause: Schema.optional(Schema.Defect()),
 }) {}

@@ -3,7 +3,9 @@ import { stripVTControlCharacters } from "node:util";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import { SystemError } from "effect/PlatformError";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schedule from "effect/Schedule";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as LocalProvider from "../Local/LocalProvider.ts";
 import * as ProviderLayer from "../Local/ProviderLayer.ts";
@@ -11,7 +13,14 @@ import * as Provider from "../Provider.ts";
 import { Resource } from "../Resource.ts";
 import { moduleExtension } from "../Util/Node.ts";
 import { makeResourceOutput } from "../Util/ResourceOutput.ts";
-import { CommandExecutor, UnexpectedExit, makeCommandError, type CommandProps } from "./Command.ts";
+import {
+  CommandExecutor,
+  UnexpectedExit,
+  makeCommandError,
+  type CommandProps,
+  type CommandRunProps,
+} from "./Command.ts";
+import { guardDevProcessGroup } from "./DevGuardian.ts";
 import { makeCommandRedactor } from "./Redaction.ts";
 
 export interface DevProps extends CommandProps {
@@ -38,6 +47,8 @@ export interface DevProps extends CommandProps {
    * another process already listens on the port when the command starts.
    */
   port?: number;
+  /** Idempotent command run after the dev process stops. */
+  cleanup?: CommandRunProps;
 }
 
 export interface Dev extends Resource<
@@ -164,13 +175,14 @@ export const DevProviderLocal = () =>
     Dev,
     import.meta.resolve(`./Local${moduleExtension(import.meta.url)}`, import.meta.url),
     Effect.gen(function* () {
-      const { spawn } = yield* CommandExecutor;
+      const { run, spawn } = yield* CommandExecutor;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
       return {
         // The dev process is spawned into the instance scope the helper
         // provides: it keeps running after `start` returns (readiness) and
         // is killed when the helper closes the scope on restart/delete.
-        start: Effect.fn(function* ({ fqn, news: props, invalidate }) {
+        start: Effect.fn(function* ({ fqn, news: props, invalidate, session }) {
           const { port } = props;
           // A restart has already killed the previous process group, so a
           // listener now is someone else's (an orphaned server, say), and
@@ -187,8 +199,17 @@ export const DevProviderLocal = () =>
               }),
             );
           }
+          if (props.cleanup !== undefined) {
+            const cleanup = props.cleanup;
+            yield* Effect.addFinalizer(() => run(cleanup, session).pipe(Effect.ignore));
+          }
+          const guardianScope = yield* Scope.fork(yield* Effect.scope, "sequential");
           const child = yield* spawn(
             port === undefined ? props : { ...props, env: { ...props.env, PORT: `${port}` } },
+          );
+          yield* guardDevProcessGroup(child.pid).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Scope.provide(guardianScope),
           );
           const redactor = makeCommandRedactor(props.env);
           // Through the logger, never a raw fd write: the process that owns
@@ -282,6 +303,13 @@ export const DevProviderLocal = () =>
           );
 
           return { url };
+        }),
+        // A sidecar that was killed never ran the instance finalizers. Delete
+        // replays the cleanup from the persisted props.
+        stop: Effect.fn(function* ({ olds, session }) {
+          if (olds?.cleanup !== undefined) {
+            yield* run(olds.cleanup, session);
+          }
         }),
       } satisfies LocalProvider.LocalProviderSpec<Dev>;
     }),

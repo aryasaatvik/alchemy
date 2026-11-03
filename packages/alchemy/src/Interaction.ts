@@ -27,7 +27,6 @@ import * as Option from "effect/Option";
 import { ChildProcess } from "effect/process";
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import type * as Scope from "effect/Scope";
-import type { ReactNode } from "react";
 import { UserFacingError } from "./UserFacingError.ts";
 import { ANSI_DIM, ANSI_RESET, ansiFg, colorsEnabled, unicodeEnabled } from "./Util/Terminal.ts";
 import { glyphsFor, statusColor, type StatusVariant } from "./Util/Theme.ts";
@@ -140,8 +139,33 @@ export interface ProgressOptions {
   readonly spinning?: boolean;
 }
 
-/** A composable layout. Views are inert; only a renderer draws them. */
-export type View = ReactNode;
+/**
+ * An element a renderer draws: structurally React's `ReactElement`, declared
+ * here so this module's public types do not load React's (and with them
+ * React's global DOM declarations) into every consumer. `type` stays `any`
+ * because React's element-constructor union is not expressible without it.
+ */
+export interface ViewElement {
+  readonly type: any;
+  readonly props: unknown;
+  readonly key: string | null;
+}
+
+type SyncView =
+  | ViewElement
+  | string
+  | number
+  | bigint
+  | boolean
+  | null
+  | undefined
+  | Iterable<View>;
+
+/**
+ * A composable layout: structurally React's `ReactNode`. Views are inert;
+ * only a renderer draws them.
+ */
+export type View = SyncView | Promise<SyncView>;
 
 /** What the terminal behind this process can do. */
 export interface TerminalCapabilities {

@@ -88,9 +88,9 @@ export const functionDomainUrl = (domain: FunctionDomain | undefined): string | 
 interface FunctionDomainHost {
   readonly LogicalId: string;
   readonly Mode: ProviderMode | undefined;
-  readonly functionArn: Output.Output<string>;
-  readonly functionName: Output.Output<string>;
-  readonly qualifiedArn: Output.Output<string>;
+  readonly functionArn: Output.Output<string, never>;
+  readonly functionName: Output.Output<string, never>;
+  readonly qualifiedArn: Output.Output<string, never>;
 }
 
 /**

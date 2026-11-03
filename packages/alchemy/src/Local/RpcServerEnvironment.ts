@@ -11,6 +11,7 @@ import { withProfileOverride } from "../Auth/Resolve.ts";
 import { Stack } from "../Stack.ts";
 import { Stage } from "../Stage.ts";
 import { loadConfigProvider } from "../Util/ConfigProvider.ts";
+import { ProviderSessionConfig } from "./ProviderSessionConfig.ts";
 
 /**
  * The stack-specific half of the sidecar environment. One sidecar process
@@ -25,9 +26,15 @@ export interface SessionEnvironment {
     name: string;
     stage: string;
   };
+  /**
+   * The stack's {@link ProviderSessionConfig}, when any provider group set
+   * one. Provided to every provider group built for this session.
+   */
+  providers?: Readonly<Record<string, unknown>>;
 }
 
 export interface RpcServerEnvironment {
+  providers?: SessionEnvironment["providers"];
   profile: string | undefined;
   envFile: string | undefined;
   /**
@@ -72,6 +79,7 @@ export const layer = (
       actions: {},
     }),
     Layer.succeed(Stage, environment.stack.stage),
+    Layer.succeed(ProviderSessionConfig, environment.providers ?? {}),
   );
 
 export const RPC_SERVER_ENVIRONMENT_KEY = "ALCHEMY_RPC_SERVER_ENVIRONMENT" as const;
@@ -104,6 +112,7 @@ export const fromEnv = () =>
                 envFile: environment.envFile,
                 stack: environment.stack,
                 alchemyContext: environment.alchemyContext,
+                providers: environment.providers,
               }),
             ),
       ),

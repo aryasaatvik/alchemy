@@ -56,7 +56,7 @@ export const toRuntimeBinding = Effect.fn(function* (
    * Dev-only channel from the Worker's binding data (see the `devRemote`
    * member of the Worker binding contract): binding name → opt-out of local
    * emulation for the capabilities that support it (browser / images /
-   * stream / send_email).
+   * stream / send_email / artifacts).
    */
   devRemote?: Record<string, boolean>,
 ) {
@@ -75,7 +75,16 @@ export const toRuntimeBinding = Effect.fn(function* (
     case "analytics_engine":
       return AnalyticsEngine.local(b.name, b.dataset);
     case "artifacts":
-      return Artifacts.remote(b.name, b.namespace);
+      return devRemote?.[b.name]
+        ? Artifacts.remote(b.name, b.namespace)
+        : Artifacts.local({
+            binding: b.name,
+            namespace: b.namespace,
+            gitPort:
+              process.env.ALCHEMY_ARTIFACTS_GIT_PORT === undefined
+                ? undefined
+                : Number(process.env.ALCHEMY_ARTIFACTS_GIT_PORT),
+          });
     case "assets":
       return Assets.local(b.name);
     case "browser":

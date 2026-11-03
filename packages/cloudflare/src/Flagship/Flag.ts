@@ -146,9 +146,10 @@ export type FlagProps = {
   variations: Record<string, unknown>;
   /**
    * Targeting rules evaluated in ascending `priority`; the first matching
-   * rule wins. An empty array means the flag always serves
-   * `defaultVariation`.
-   * @default []
+   * rule wins. An empty array clears every rule, so the flag always serves
+   * `defaultVariation`. When omitted, the flag is created without rules and
+   * the live rules are left unmanaged: rules edited in the dashboard or
+   * through the API survive every deploy.
    */
   rules?: FlagRule[];
   /**
@@ -354,7 +355,6 @@ export const FlagProviderLive = () =>
         enabled: news.enabled ?? true,
         defaultVariation: news.defaultVariation,
         variations: news.variations,
-        rules: news.rules ?? [],
         description: news.description,
       };
 
@@ -372,6 +372,7 @@ export const FlagProviderLive = () =>
             appId,
             key,
             ...desired,
+            rules: news.rules ?? [],
             type: news.type,
           })
           .pipe(Effect.catchTag("FlagshipFlagAlreadyExists", () => Effect.undefined));
@@ -384,6 +385,9 @@ export const FlagProviderLive = () =>
       // a PUT that takes the full body, so send everything, but skip the
       // call entirely on a no-op.
       const live = observed ?? (yield* getFlag(accountId, appId, key));
+      // Omitted rules are unmanaged: the full-body PUT carries the live
+      // rules back unchanged, so rules edited outside Alchemy survive.
+      const rules = normalizeRules(news.rules ?? live?.rules ?? []);
       if (live) {
         const observedShape = {
           enabled: live.enabled,
@@ -392,11 +396,7 @@ export const FlagProviderLive = () =>
           rules: normalizeRules(live.rules),
           description: live.description ?? undefined,
         };
-        const desiredShape = {
-          ...desired,
-          rules: normalizeRules(desired.rules),
-        };
-        if (deepEqual(observedShape, desiredShape)) {
+        if (deepEqual(observedShape, { ...desired, rules })) {
           return toAttributes(live, accountId, appId);
         }
       }
@@ -406,6 +406,7 @@ export const FlagProviderLive = () =>
         flagKey: key,
         key,
         ...desired,
+        rules,
         type: news.type,
       });
       return toAttributes(updated, accountId, appId);
@@ -483,7 +484,7 @@ export const FlagProviderLocal = () =>
       // (the written definition converges on every reconcile).
       return output ?? undefined;
     }),
-    reconcile: Effect.fn(function* ({ id, news }) {
+    reconcile: Effect.fn(function* ({ id, news, output }) {
       const appId = news.appId as string;
       const key = yield* createFlagKey(id, news.key);
       if (!isLocalId(appId)) {
@@ -498,7 +499,7 @@ export const FlagProviderLocal = () =>
         enabled: news.enabled ?? true,
         defaultVariation: news.defaultVariation,
         variations: news.variations,
-        rules: news.rules ?? [],
+        rules: news.rules ?? output?.rules ?? [],
       };
       // An atomic overwrite — idempotent, so re-running after a crash
       // converges.

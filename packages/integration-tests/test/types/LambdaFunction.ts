@@ -190,3 +190,34 @@ const imageProps: FunctionImageProps = {
 
 // @ts-expect-error Image functions use the Dockerfile's handler.
 LambdaFunction("image-inline-rejected", imageProps, Effect.void);
+
+export type _ZipRuntimePinAccepted = Assert<
+  {
+    main: "./handler.ts";
+    runtimeManagementConfig: {
+      updateRuntimeOn: "Manual";
+      runtimeVersionArn: "arn:aws:lambda:us-east-1::runtime:pinned";
+    };
+  } extends FunctionProps
+    ? true
+    : false
+>;
+
+export type _ManualRuntimeRequiresVersion = Assert<
+  {
+    main: "./handler.ts";
+    runtimeManagementConfig: { updateRuntimeOn: "Manual" };
+  } extends FunctionProps
+    ? false
+    : true
+>;
+
+export type _ImageRuntimePinRejected = Assert<
+  {
+    image: { context: "./lambda"; dockerfile: "Dockerfile" };
+    architecture: "x86_64";
+    runtimeManagementConfig: { updateRuntimeOn: "Auto" };
+  } extends FunctionProps
+    ? false
+    : true
+>;

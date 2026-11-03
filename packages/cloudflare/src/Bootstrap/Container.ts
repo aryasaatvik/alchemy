@@ -19,7 +19,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import { MinimumLogLevel } from "effect/References";
-import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { runtimeIdentityLayer } from "../CloudflareEnvironment.ts";
 
 export interface ContainerBootstrapOptions {
   /** Stack identity baked in at deploy time. */
@@ -51,21 +51,8 @@ export const bootstrapContainer = (
       entrypointLayer(entrypoint).pipe(
         Layer.provideMerge(stackConstant(options.stack.name, options.stack.stage)),
         Layer.provideMerge(runtime.httpServer),
-        // Capability bindings that talk to Cloudflare's HTTP API from inside
-        // the container (e.g. R2/KV/Queue `*Http` bindings) resolve their
-        // account via `CloudflareEnvironment` at runtime, exactly like the
-        // Worker bridge does (the service value is an `Effect` of the
-        // resolved credentials). The per-operation account/token are read
-        // from the container's env (the bound token outputs), so an absent
-        // account id here is harmless.
-        Layer.provideMerge(
-          Layer.succeed(
-            CloudflareEnvironment,
-            Effect.succeed({
-              account: process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
-            }) as any,
-          ),
-        ),
+        // HTTP capabilities need the account identity, never deployer credentials.
+        Layer.provideMerge(runtimeIdentityLayer(process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID)),
         Layer.provideMerge(platform),
         Layer.provideMerge(
           Layer.succeed(

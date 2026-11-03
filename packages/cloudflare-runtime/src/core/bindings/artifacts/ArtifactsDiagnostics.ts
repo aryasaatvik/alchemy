@@ -1,0 +1,273 @@
+const operations = [
+  "metadata",
+  "create",
+  "import",
+  "list",
+  "delete",
+  "info",
+  "createToken",
+  "listTokens",
+  "revokeToken",
+  "fork",
+  "readBlob",
+  "readTree",
+  "readCommit",
+  "readFile",
+  "log",
+  "session",
+] as const;
+const stages = [
+  "session-open",
+  "dispatch",
+  "native-get",
+  "native-call",
+  "native-createToken",
+  "native-dispose",
+  "serialize",
+  "envelope",
+  "methods-dispose",
+  "session-dispose",
+  "forward",
+] as const;
+const outcomes = ["begin", "success", "failure"] as const;
+const origins = ["native", "bridge-fallback"] as const;
+const transports = ["rpc", "fetch", "envelope"] as const;
+const codes = [
+  "ALREADY_EXISTS",
+  "NOT_FOUND",
+  "CREATE_IN_PROGRESS",
+  "IMPORT_IN_PROGRESS",
+  "FORK_IN_PROGRESS",
+  "INVALID_INPUT",
+  "INVALID_REPO_NAME",
+  "INVALID_TTL",
+  "INVALID_URL",
+  "REMOTE_AUTH_REQUIRED",
+  "UPSTREAM_UNAVAILABLE",
+  "MEMORY_LIMIT",
+  "INTERNAL_ERROR",
+] as const satisfies ReadonlyArray<ArtifactsErrorCode>;
+
+export type ArtifactsOperation = (typeof operations)[number];
+type Stage = (typeof stages)[number];
+export interface ArtifactsDiagnostic {
+  readonly operation: ArtifactsOperation;
+  readonly stage: Stage;
+  readonly outcome: (typeof outcomes)[number];
+  readonly origin?: (typeof origins)[number];
+  readonly code?: ArtifactsErrorCode;
+  readonly numericCode?: number;
+  readonly httpStatus?: number;
+  readonly upgrade?: boolean;
+  readonly transport?: (typeof transports)[number];
+  readonly fetchErrorKind?: (typeof errorKinds)[number];
+  readonly rpcErrorKind?: (typeof errorKinds)[number];
+  readonly closeCode?: number;
+  readonly connectionFailed?: true;
+  readonly fetchErrorCode?: (typeof fetchErrorCodes)[number];
+  /** The forwarding request signal, independently of the caller's command signal. */
+  readonly requestAborted?: boolean;
+  readonly sessionAgeMs?: number;
+}
+
+const errorKinds = ["error", "type-error", "abort", "timeout", "unknown"] as const;
+const fetchErrorCodes = [
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+] as const;
+const MAX_FETCH_CAUSE_LINKS = 3;
+const MAX_SESSION_AGE_MS = 3_000_000;
+const MAX_EVENTS = 16;
+const member = <A extends string>(values: readonly A[], value: unknown) =>
+  values.find((candidate) => candidate === value);
+const own = (value: unknown, key: PropertyKey): unknown => {
+  try {
+    return (typeof value === "object" && value !== null) || typeof value === "function"
+      ? Object.getOwnPropertyDescriptor(value, key)?.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const bounded = (value: unknown, min: number, max: number): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+
+/** Diagnostics read data properties only; rejected capabilities and getters stay untouched. */
+export const artifactErrorFields = (error: unknown) => {
+  const code = member(codes, own(error, "code"));
+  const numericCode = own(error, "numericCode");
+  return {
+    ...(code === undefined ? {} : { code }),
+    ...(bounded(numericCode, 0, 2_147_483_647) ? { numericCode } : {}),
+  };
+};
+
+const errorKind = (error: unknown): (typeof errorKinds)[number] => {
+  switch (own(error, "name")) {
+    case "Error":
+      return "error";
+    case "TypeError":
+      return "type-error";
+    case "AbortError":
+      return "abort";
+    case "TimeoutError":
+      return "timeout";
+    default:
+      return "unknown";
+  }
+};
+
+/** Cap'n Web supplies transport context as text; only finite signals may leave this boundary. */
+export const artifactRpcErrorFields = (error: unknown) => {
+  const message = own(error, "message");
+  const match =
+    typeof message === "string" ? /^Peer closed WebSocket: (\d{4})\b/.exec(message) : null;
+  const closeCode = match === null ? undefined : Number(match[1]);
+  return {
+    ...artifactErrorFields(error),
+    rpcErrorKind: errorKind(error),
+    ...(bounded(closeCode, 1000, 4999) ? { closeCode } : {}),
+    ...(message === "WebSocket connection failed." ? { connectionFailed: true as const } : {}),
+  };
+};
+
+/** Only own data can classify a fetch rejection; prototypes and accessors stay untouched. */
+export const artifactFetchErrorFields = (error: unknown) => {
+  let fetchErrorKind: NonNullable<ArtifactsDiagnostic["fetchErrorKind"]> = "unknown";
+  let fetchErrorCode: ArtifactsDiagnostic["fetchErrorCode"];
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth <= MAX_FETCH_CAUSE_LINKS; depth++) {
+    if (
+      !((typeof current === "object" && current !== null) || typeof current === "function") ||
+      seen.has(current)
+    )
+      break;
+    seen.add(current);
+    if (fetchErrorKind === "unknown") fetchErrorKind = errorKind(current);
+    fetchErrorCode ??= member(fetchErrorCodes, own(current, "code"));
+    if (depth < MAX_FETCH_CAUSE_LINKS) current = own(current, "cause");
+  }
+  return {
+    fetchErrorKind,
+    ...(fetchErrorCode === undefined ? {} : { fetchErrorCode }),
+  };
+};
+
+const safeDiagnostic = (value: unknown): ArtifactsDiagnostic | undefined => {
+  const operation = member(operations, own(value, "operation"));
+  const stage = member(stages, own(value, "stage"));
+  const outcome = member(outcomes, own(value, "outcome"));
+  if (operation === undefined || stage === undefined || outcome === undefined) return;
+  const origin = member(origins, own(value, "origin"));
+  const transport = member(transports, own(value, "transport"));
+  const httpStatus = own(value, "httpStatus");
+  const upgrade = own(value, "upgrade");
+  const fetchErrorKind = member(errorKinds, own(value, "fetchErrorKind"));
+  const fetchErrorCode = member(fetchErrorCodes, own(value, "fetchErrorCode"));
+  const rpcErrorKind = member(errorKinds, own(value, "rpcErrorKind"));
+  const closeCode = own(value, "closeCode");
+  const connectionFailed = own(value, "connectionFailed");
+  const requestAborted = own(value, "requestAborted");
+  const sessionAgeMs = own(value, "sessionAgeMs");
+  return {
+    operation,
+    stage,
+    outcome,
+    ...artifactErrorFields(value),
+    ...(origin === undefined ? {} : { origin }),
+    ...(transport === undefined ? {} : { transport }),
+    ...(bounded(httpStatus, 100, 599) ? { httpStatus } : {}),
+    ...(typeof upgrade === "boolean" ? { upgrade } : {}),
+    ...(fetchErrorKind === undefined ? {} : { fetchErrorKind }),
+    ...(fetchErrorCode === undefined ? {} : { fetchErrorCode }),
+    ...(rpcErrorKind === undefined ? {} : { rpcErrorKind }),
+    ...(bounded(closeCode, 1000, 4999) ? { closeCode } : {}),
+    ...(connectionFailed === true ? { connectionFailed } : {}),
+    ...(typeof requestAborted === "boolean" ? { requestAborted } : {}),
+    ...(bounded(sessionAgeMs, 0, MAX_SESSION_AGE_MS) ? { sessionAgeMs } : {}),
+  };
+};
+
+/** This prefix is emitted by local workerd into the native runtime's output sink. */
+export const emitArtifactDiagnostic = (value: unknown) => {
+  try {
+    const event = safeDiagnostic(value);
+    if (event !== undefined) console.log(`[artifacts-rpc] ${JSON.stringify(event)}`);
+  } catch {
+    // Observability must never replace the operation or its disposal error.
+  }
+};
+
+/** Only the bounded sidecar is inspected; business values and error messages are never logged. */
+export const relayArtifactDiagnostics = (result: unknown) => {
+  try {
+    const envelope = typeof result === "string" ? JSON.parse(result) : result;
+    const events = own(envelope, "diagnostics");
+    if (!Array.isArray(events)) return true;
+    for (let index = 0; index < MAX_EVENTS; index++) {
+      const event = safeDiagnostic(own(events, index));
+      if (event !== undefined) emitArtifactDiagnostic(event);
+    }
+    return true;
+  } catch {
+    // Decoding the business envelope remains the facade's responsibility.
+    return false;
+  }
+};
+
+/** One finite sidecar travels with the native envelope, independently of remote console output. */
+export class ArtifactsDiagnostics {
+  readonly events: ArtifactsDiagnostic[] = [];
+  constructor(readonly operation: ArtifactsOperation) {}
+  record(
+    stage: Stage,
+    outcome: ArtifactsDiagnostic["outcome"],
+    error?: unknown,
+    origin: ArtifactsDiagnostic["origin"] = "native",
+  ) {
+    if (this.events.length < MAX_EVENTS)
+      this.events.push({
+        operation: this.operation,
+        stage,
+        outcome,
+        ...(outcome === "failure" ? { origin, ...artifactErrorFields(error) } : {}),
+      });
+  }
+  async run<A>(stage: Stage, operation: () => Promise<A>): Promise<A> {
+    this.record(stage, "begin");
+    try {
+      const value = await operation();
+      this.record(stage, "success");
+      return value;
+    } catch (error) {
+      this.record(stage, "failure", error);
+      throw error;
+    }
+  }
+  lifetime(repository: ArtifactsRepo): Disposable {
+    // `using` captures the disposer before invoking the operation, including its receiver.
+    const dispose = repository[Symbol.dispose];
+    return {
+      [Symbol.dispose]: () => {
+        this.record("native-dispose", "begin");
+        try {
+          dispose.call(repository);
+          this.record("native-dispose", "success");
+        } catch (error) {
+          this.record("native-dispose", "failure", error);
+          throw error;
+        }
+      },
+    };
+  }
+}

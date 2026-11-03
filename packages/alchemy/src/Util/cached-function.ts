@@ -64,22 +64,13 @@ export const makeCachedFunction = <A extends Array<any>, B, E, R>(
         return Deferred.await(existing);
       }
 
-      // Create a new deferred and store it. Only the call itself is
-      // interruptible, so an interrupted first caller still settles its
-      // waiters and evicts the key instead of leaving it pending forever.
-      return Effect.uninterruptibleMask((restore) =>
-        Effect.gen(function* () {
-          const deferred = yield* Deferred.make<B, E>();
-          cache.set(cacheKey, deferred);
-
-          const exit = yield* Effect.exit(restore(fn(...args)));
-          yield* Deferred.done(deferred, exit);
-
-          if (exit._tag === "Failure") {
-            cache.delete(cacheKey);
-          }
-
-          return yield* exit;
+      // Publish the pending result before yielding so concurrent callers share it.
+      const deferred = Deferred.makeUnsafe<B, E>();
+      cache.set(cacheKey, deferred);
+      return Effect.suspend(() => fn(...args)).pipe(
+        Effect.onExit((exit) => {
+          if (exit._tag === "Failure") cache.delete(cacheKey);
+          return Deferred.done(deferred, exit);
         }),
       );
     });

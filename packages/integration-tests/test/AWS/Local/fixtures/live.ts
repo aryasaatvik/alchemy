@@ -22,6 +22,9 @@ export const liveContext = Layer.mergeAll(
   Region.fromEnvironment,
   Credentials.fromEnvironment,
   Endpoint.fromEnvironment,
+  // The dev ambient routes services to the emulator through the service
+  // resolver; reset it so live probes reach AWS.
+  Endpoint.services({}),
 ).pipe(
   Layer.provideMerge(DefaultEnvironment),
   Layer.provideMerge(AwsAuth),

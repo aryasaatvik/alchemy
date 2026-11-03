@@ -25,7 +25,14 @@ import { isLocalId } from "./LocalRuntime.ts";
  * to the providers' shared runtime — same `.alchemy/local` storage
  * directory — so it reads and writes the same simulator data.
  */
-export const localGatewayRuntime = Layer.unwrap(
+export const localGatewayRuntime: Layer.Layer<
+  Layer.Success<ReturnType<typeof layerRuntime>>,
+  Layer.Error<ReturnType<typeof layerRuntime>>,
+  | Layer.Services<ReturnType<typeof layerRuntime>>
+  | CloudflareEnvironment
+  | AlchemyContext
+  | Path.Path
+> = Layer.unwrap(
   Effect.gen(function* () {
     const getEnv = yield* CloudflareEnvironment;
     const { dotAlchemy } = yield* AlchemyContext;

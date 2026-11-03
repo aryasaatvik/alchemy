@@ -73,6 +73,9 @@
       "path": "./scripts/tsconfig.json"
     },
     {
+      "path": "./scripts/integration-pack/tsconfig.json"
+    },
+    {
       "path": "./stacks/tsconfig.json"
     },
     {

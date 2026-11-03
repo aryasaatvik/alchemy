@@ -11,7 +11,14 @@ import {
   makeCurrentActivity,
   payloadCodec,
 } from "alchemy/WorkflowEncoding";
-import { type Implemented, implemented } from "alchemy/Workflows";
+import {
+  type Implemented,
+  implemented,
+  StartReceipt,
+  ExecutionReference,
+  NotYetWaiting,
+} from "alchemy/Workflows";
+import * as Cause from "effect/Cause";
 import type { ConfigError } from "effect/Config";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -28,7 +35,13 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { Activity, Workflow, WorkflowEngine } from "effect/workflow";
 import * as AWSBindings from "../AWSBindings.ts";
-import { DurableStep } from "./Durable.ts";
+import type { Alias } from "./Alias.ts";
+import {
+  DurableStep,
+  DurableStepAttempt,
+  type DurableCallbackConfig,
+  type DurableRetryPolicy,
+} from "./Durable.ts";
 import {
   DurableFunction,
   type DurableFunctionImpl,
@@ -93,6 +106,23 @@ export interface WorkflowFunctionClass<
  * in between. `DurableDeferred.await` waits for a callback, completed with a
  * run's `signal`. A workflow's child workflows run in the same function.
  *
+ * Activities retain services and telemetry provided at their call site across
+ * the native SDK callback. Each receives its own WorkflowInstance and attempt.
+ *
+ * Activities (name + attempt), clocks and deferreds are memoized by name within
+ * each execution, matching Effect's identity semantics. Loop iterations must use
+ * distinct names, for example `apply/${pass}`. Reusing a name replays its result.
+ *
+ * Complete an open wait with Workflows.completeDeferred or a Run's complete
+ * API: an absent or closed wait returns typed NotYetWaiting, with no retry or
+ * buffering. Plain DurableDeferred.done and the legacy Run.signal API raise a
+ * clear defect in that case.
+ * Lambda history is the sole source of callback state.
+ *
+ * Use ActivityRetry annotations for durable SDK retries. Native Activity.retry
+ * is in-process only and is not durable on this engine. DurableDeferred.raceAll
+ * is unsupported on this engine; use DeferredWait for callback deadlines.
+ *
  * Other functions start and read its runs with
  * {@link DurableFunctionEngine | AWS.Lambda.DurableFunctionEngine}.
  *
@@ -115,7 +145,7 @@ export interface WorkflowFunctionClass<
  * );
  * ```
  *
- * The Layer must implement every workflow the function lists: leaving one out
+ * The workflow Layer must implement every workflow the function lists: leaving one out
  * is a type error.
  *
  * @resource
@@ -147,9 +177,118 @@ export const WorkflowFunction =
     );
   };
 
+/**
+ * Lambda callback timeout and heartbeat deadline for the enclosed deferred await.
+ * Provide with Effect.provideService(DeferredWait, { timeout: "1 day" }). A timeout
+ * is a typed DeferredWaitFailure; declare that schema in the deferred's error union.
+ */
+export const DeferredWait = Context.Reference<DurableCallbackConfig>(
+  "alchemy/AWS/Lambda/DeferredWait",
+  { defaultValue: () => ({}) },
+);
+
+/** A native callback deadline or externally failed wait. Declare in the deferred error schema. */
+export class DeferredWaitFailure extends Schema.TaggedError<DeferredWaitFailure>()(
+  "DeferredWaitFailure",
+  {
+    kind: Schema.Literals(["timed_out", "failed"]),
+    message: Schema.String,
+  },
+) {}
+
+const waitFailureOf = (defect: unknown): DeferredWaitFailure | undefined => {
+  let current = defect;
+  let message: string | undefined;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth++) {
+    if (message === undefined && "message" in current && typeof current.message === "string")
+      message = current.message;
+    if ("errorType" in current) {
+      if (current.errorType === "CallbackTimeoutError")
+        return DeferredWaitFailure.make({
+          kind: "timed_out",
+          message: "The callback deadline expired",
+        });
+      if (current.errorType === "CallbackExternalError")
+        return DeferredWaitFailure.make({
+          kind: "failed",
+          message: message ?? "The callback was failed externally",
+        });
+    }
+    current = "cause" in current ? current.cause : undefined;
+  }
+};
+
+/**
+ * Annotate an Activity with a Lambda-native retry policy. The SDK checkpoints
+ * failed attempts and backoff; typed failures are decoded after exhaustion.
+ * Effect's Activity.retry is an outer Effect combinator and does not expose its
+ * policy to WorkflowEngine, so use this annotation for SDK-managed retries.
+ */
+export interface ActivityRetryPolicy extends DurableRetryPolicy {
+  /** Retry only typed failures accepted by this predicate. Receives the decoded Activity error. */
+  readonly while?: (error: unknown) => boolean;
+}
+
+export const ActivityRetry = Context.Reference<ActivityRetryPolicy | undefined>(
+  "alchemy/AWS/Lambda/ActivityRetry",
+  { defaultValue: () => undefined },
+);
+
+const ACTIVITY_FAILURE = "alchemy/ActivityFailure";
+const DEFERRED_FAILURE = "alchemy/DeferredFailure";
+const failureText = (error: unknown, name: string): string | undefined => {
+  let node = error;
+  for (let depth = 0; depth < 8 && typeof node === "object" && node !== null; depth++) {
+    if (
+      "message" in node &&
+      typeof node.message === "string" &&
+      node.message.startsWith(`${name}:`)
+    )
+      return node.message.slice(name.length + 1);
+    if (
+      "name" in node &&
+      node.name === name &&
+      "message" in node &&
+      typeof node.message === "string"
+    )
+      return node.message;
+    node = "cause" in node ? node.cause : undefined;
+  }
+  return undefined;
+};
+
+const memo = <A>(
+  run: CurrentRun["Service"],
+  key: string,
+  effect: Effect.Effect<A>,
+): Effect.Effect<A> =>
+  Effect.gen(function* () {
+    let cached = run.results.get(key);
+    if (!cached) {
+      cached = yield* Effect.cached(effect);
+      run.results.set(key, cached);
+    }
+    return yield* cached;
+  });
+
 // ---------------------------------------------------------------- callers
 
-type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? WorkflowNames<W> : never;
+/** A workflow host routed through an independently owned Lambda alias. */
+export interface WorkflowFunctionTarget<
+  Host extends WorkflowFunctionClass<any, any> = WorkflowFunctionClass<any, any>,
+> {
+  readonly host: Host;
+  /** Alias that invokes this host. The engine does not manage its lifecycle. */
+  readonly alias: Alias;
+}
+
+type EngineHost = WorkflowFunctionClass<any, any> | WorkflowFunctionTarget;
+type HostedBy<Host> =
+  Host extends WorkflowFunctionTarget<infer H>
+    ? HostedBy<H>
+    : Host extends WorkflowFunctionClass<any, infer W>
+      ? WorkflowNames<W>
+      : never;
 
 /**
  * Run workflows hosted by {@link WorkflowFunction | AWS.Lambda.WorkflowFunction}s
@@ -164,6 +303,7 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  * **Example:** An API that starts orders
  * ```typescript
  * import * as AWS from "@alchemy.run/aws";
+ * import * as Layer from "effect/Layer";
  * import * as Workflows from "alchemy/Workflows";
  * import * as Effect from "effect/Effect";
  * import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -191,13 +331,29 @@ type HostedBy<Host> = Host extends WorkflowFunctionClass<any, infer W> ? Workflo
  * Effect.provide(AWS.Lambda.DurableFunctionEngine(OrderWorkflows, BillingWorkflows))
  * ```
  *
+ * **Example:** A separately managed alias
+ * ```typescript
+ * const fn = yield* OrderWorkflows;
+ * const version = yield* AWS.Lambda.Version("OrdersVersion", { function: fn });
+ * const alias = yield* AWS.Lambda.Alias("OrdersLive", { version, aliasName: "live" });
+ * const engine = AWS.Lambda.DurableFunctionEngine({ host: OrderWorkflows, alias });
+ * ```
+ *
+ * The alias must belong to the supplied host. Starts invoke its ARN; lookups
+ * search the host function across versions so runs remain reachable after the
+ * alias moves. Their permissions are scoped to the alias and function respectively.
+ * Execution and callback APIs use the execution ARN and callback id returned by
+ * that target; their IAM permissions remain account-wide.
+ * Omitting the target preserves the host's Function-owned alias or `$LATEST`.
+ * AWS authority and transport are retained at initialization; logs, annotations
+ * and tracing use the caller's context for each operation.
+ *
  * @layer
  * @provides WorkflowEngine
  * @product Lambda
  */
-export const DurableFunctionEngine = <
-  const Hosts extends ReadonlyArray<WorkflowFunctionClass<any, any>>,
->(
+/* oxlint-disable effecttsgo/unsafe-effect-type-assertion -- host init supplies runtime context for bound outputs */
+export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHost>>(
   ...hosts: Hosts
 ): Layer.Layer<
   WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
@@ -209,24 +365,34 @@ export const DurableFunctionEngine = <
       WorkflowEngine.WorkflowEngine,
       Effect.gen(function* () {
         const bind = yield* AWSBindings.Bind;
-        const context = yield* Effect.context<LambdaServices>();
+        const context = yield* Effect.context<LambdaServices>().pipe(
+          Effect.map(AWSBindings.operationContext),
+        );
         const routes = new Map<string, Calls>();
-        for (const host of hosts) {
+        for (const entry of hosts) {
+          const host = "host" in entry ? entry.host : entry;
+          const alias = "host" in entry ? entry.alias : undefined;
           const fn = yield* host;
           if (!globalThis.__ALCHEMY_RUNTIME__) {
             yield* bind`AWS.Lambda.DurableFunctionEngine(${fn})`({
               policyStatements: [
                 {
                   Effect: "Allow",
+                  Action: ["lambda:ListDurableExecutionsByFunction"],
+                  Resource: [fn.functionArn],
+                },
+                {
+                  Effect: "Allow",
                   Action: ["lambda:InvokeFunction"],
-                  Resource: [fn.functionArn, Output.interpolate`${fn.functionArn}:*`],
+                  Resource: alias
+                    ? [alias.aliasArn]
+                    : [fn.functionArn, Output.interpolate`${fn.functionArn}:*`],
                 },
                 // Durable execution ARNs aren't function ARNs, so reading and
                 // signalling runs is granted account-wide, as the host's own is.
                 {
                   Effect: "Allow",
                   Action: [
-                    "lambda:ListDurableExecutionsByFunction",
                     "lambda:GetDurableExecution",
                     "lambda:GetDurableExecutionHistory",
                     "lambda:StopDurableExecution",
@@ -238,10 +404,12 @@ export const DurableFunctionEngine = <
               ],
             });
           }
-          const functionName = yield* fn.functionName;
+          const functionName = alias
+            ? yield* alias.functionName.bind(`${fn.LogicalId}.engineFunctionName`)
+            : yield* fn.functionName;
           // Runs start on the host's alias when it sets one.
           // oxlint-disable-next-line effecttsgo/unsafe-effect-type-assertion -- the host provides RuntimeContext at runtime
-          const qualifier = yield* qualifierOf(fn).bind(
+          const qualifier = yield* (alias ? alias.aliasName : qualifierOf(fn)).bind(
             `${fn.LogicalId}.qualifier`,
           ) as Effect.Effect<Effect.Effect<string>>;
           const calls = makeCalls(
@@ -264,13 +432,17 @@ export const DurableFunctionEngine = <
       }),
     ),
     implemented(
-      hosts.flatMap((host) => host.workflows.map((workflow) => workflow._tag)),
+      hosts.flatMap((entry) =>
+        ("host" in entry ? entry.host : entry).workflows.map((workflow) => workflow._tag),
+      ),
     ) as Layer.Layer<ImplementedEach<HostedBy<Hosts[number]>>>,
   ) as Layer.Layer<
     WorkflowEngine.WorkflowEngine | ImplementedEach<HostedBy<Hosts[number]>>,
     never,
     LambdaServices | Function["Providers"]
   >;
+
+/* oxlint-enable effecttsgo/unsafe-effect-type-assertion */
 
 // ---------------------------------------------------------------- hosting
 
@@ -290,7 +462,7 @@ type LambdaServices = Credentials | HttpClient.HttpClient;
  * The durable function body that runs the given workflows: each invocation is
  * one run of one workflow. Child workflows start in the same function.
  */
-const makeWorkflowRunner = <ROut, E, RIn>(
+export const makeWorkflowRunner = <ROut, E, RIn>(
   workflows: Layer.Layer<ROut, E, RIn>,
 ): Effect.Effect<
   DurableFunctionImpl<WorkflowInvocation, string>,
@@ -298,7 +470,9 @@ const makeWorkflowRunner = <ROut, E, RIn>(
   Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
 > =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<LambdaServices>();
+    const context = yield* Effect.context<LambdaServices>().pipe(
+      Effect.map(AWSBindings.operationContext),
+    );
     const functionName = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_NAME);
     // Child workflows start on the version this function is running.
     const version = yield* Effect.sync(() => process.env.AWS_LAMBDA_FUNCTION_VERSION ?? "$LATEST");
@@ -330,7 +504,6 @@ const makeWorkflowRunner = <ROut, E, RIn>(
           return yield* Effect.die(new Error(`Workflow ${invocation.workflow} is not hosted here`));
         }
         const durable = yield* DurableStep;
-        const runContext = yield* Effect.context<never>();
         const { workflow, execute } = registration;
         const payload = yield* Schema.decodeEffect(payloadCodec(workflow))(invocation.payload).pipe(
           Effect.orDie,
@@ -344,8 +517,8 @@ const makeWorkflowRunner = <ROut, E, RIn>(
               Layer.succeed(WorkflowEngine.WorkflowEngine, engine),
               Layer.succeed(CurrentRun, {
                 durable,
-                context: runContext,
                 clocks: new Map(),
+                results: new Map(),
                 instance,
                 waited: new Map(),
               }),
@@ -385,8 +558,8 @@ class CurrentRun extends Context.Service<
   CurrentRun,
   {
     readonly durable: DurableStep["Service"];
-    readonly context: Context.Context<never>;
     readonly clocks: Map<string, Duration.Duration>;
+    readonly results: Map<string, Effect.Effect<any>>;
     readonly instance: WorkflowEngine.WorkflowInstance["Service"];
     /** Waits run outside the activity that reached them, by deferred name. */
     readonly waited: Map<string, string>;
@@ -399,6 +572,7 @@ class CurrentRun extends Context.Service<
 interface Pending {
   readonly name: string;
   readonly clockMillis?: number;
+  readonly config?: DurableCallbackConfig;
 }
 
 /** An interrupt fails the callback a run waits on: the run is interrupted there. */
@@ -426,9 +600,39 @@ const waitFor = (run: CurrentRun["Service"], pending: Pending) =>
     }
     const text = yield* interruptible(
       run,
-      run.durable.waitForCallback<string>({ name: pending.name, submitter: () => Effect.void }),
+      run.durable
+        .waitForCallback<string>({
+          ...pending.config,
+          name: pending.name,
+          submitter: () => Effect.void,
+        })
+        .pipe(
+          Effect.catchDefect((defect) => {
+            if (isInterrupt(defect)) return Effect.die(defect);
+            const encoded = failureText(defect, DEFERRED_FAILURE);
+            if (encoded !== undefined) return Effect.succeed(encoded);
+            const failure = waitFailureOf(defect);
+            return failure === undefined
+              ? Effect.die(defect)
+              : Schema.encodeEffect(DeferredWaitFailure)(failure).pipe(
+                  Effect.orDie,
+                  Effect.flatMap((encoded) => encodeExit(Exit.fail(encoded))),
+                );
+          }),
+        ),
     );
-    return typeof text === "string" ? text : JSON.stringify(text);
+    const encoded = typeof text === "string" ? text : JSON.stringify(text);
+    const exit = yield* decodeExit(encoded);
+    if (Exit.isFailure(exit)) {
+      const defect = exit.cause.reasons.find(Cause.isDieReason);
+      const failure = defect === undefined ? undefined : waitFailureOf(defect.defect);
+      if (failure !== undefined)
+        return yield* Schema.encodeEffect(DeferredWaitFailure)(failure).pipe(
+          Effect.orDie,
+          Effect.flatMap((error) => encodeExit(Exit.fail(error))),
+        );
+    }
+    return encoded;
   });
 
 const currentRun = (operation: string) =>
@@ -472,15 +676,20 @@ const isInterrupt = (defect: unknown) => {
 
 /** Lambda's calls for one host function. */
 interface Calls {
-  readonly start: (executionName: string, invocation: WorkflowInvocation) => Effect.Effect<void>;
+  readonly start: (executionName: string, invocation: WorkflowInvocation) => Effect.Effect<string>;
+  readonly target: Effect.Effect<string>;
   readonly find: (executionName: string) => Effect.Effect<string | undefined>;
   readonly get: (
     executionArn: string,
   ) => Effect.Effect<{ readonly status: string; readonly result: string | undefined }>;
   readonly history: (executionArn: string) => Effect.Effect<ReadonlyArray<Lambda.Event>>;
+  readonly historyPage: (
+    executionArn: string,
+    marker?: string,
+  ) => Effect.Effect<Lambda.GetDurableExecutionHistoryResponse>;
   readonly stop: (executionArn: string) => Effect.Effect<void>;
   readonly succeed: (callbackId: string, result: string) => Effect.Effect<void>;
-  readonly fail: (callbackId: string, errorType: string) => Effect.Effect<void>;
+  readonly fail: (callbackId: string, errorType: string, message?: string) => Effect.Effect<void>;
 }
 
 const unwrap = (value: string | Redacted.Redacted<string> | undefined) =>
@@ -494,6 +703,10 @@ const makeCalls = (
   const run = <A, E>(effect: Effect.Effect<A, E, LambdaServices>) =>
     provide(effect).pipe(Effect.orDie);
   return {
+    target: Effect.map(
+      Effect.all([functionName, qualifier]),
+      ([name, version]) => `${name}:${version}`,
+    ),
     start: (executionName, invocation) =>
       Effect.flatMap(Effect.all([functionName, qualifier]), ([FunctionName, Qualifier]) =>
         run(
@@ -504,15 +717,18 @@ const makeCalls = (
             DurableExecutionName: executionName,
             Payload: JSON.stringify(invocation),
           }).pipe(
-            // Already started: the same key always names the same run.
-            Effect.catchTag("DurableExecutionAlreadyStartedException", () => Effect.void),
-            Effect.asVoid,
+            Effect.flatMap((result) =>
+              result.DurableExecutionArn
+                ? Effect.succeed(result.DurableExecutionArn)
+                : Effect.die(new Error("Lambda Invoke did not return DurableExecutionArn")),
+            ),
           ),
         ),
       ),
     find: (executionName) =>
       Effect.flatMap(functionName, (FunctionName) =>
         run(
+          // A qualifier hides runs pinned to earlier versions after an alias moves.
           Lambda.listDurableExecutionsByFunction({
             FunctionName,
             DurableExecutionName: executionName,
@@ -535,6 +751,15 @@ const makeCalls = (
           Effect.map((events) => [...events]),
         ),
       ),
+    historyPage: (executionArn, marker) =>
+      run(
+        Lambda.getDurableExecutionHistory({
+          DurableExecutionArn: executionArn,
+          ReverseOrder: true,
+          MaxItems: 20,
+          Marker: marker,
+        }),
+      ),
     stop: (executionArn) =>
       run(Lambda.stopDurableExecution({ DurableExecutionArn: executionArn }).pipe(Effect.asVoid)),
     succeed: (callbackId, result) =>
@@ -543,15 +768,33 @@ const makeCalls = (
           Effect.asVoid,
         ),
       ),
-    fail: (callbackId, errorType) =>
+    fail: (callbackId, errorType, message = errorType) =>
       run(
         Lambda.sendDurableExecutionCallbackFailure({
           CallbackId: callbackId,
-          Error: { ErrorType: errorType, ErrorMessage: errorType },
+          Error: { ErrorType: errorType, ErrorMessage: message },
         }).pipe(Effect.asVoid),
       ),
   };
 };
+
+/**
+ * Build the runtime engine without deploy-time host binding. AWS authority and
+ * transport are retained; telemetry comes from the caller of each operation.
+ * @internal
+ */
+export const makeWorkflowEngine = (functionName: string, qualifier: string) =>
+  Effect.gen(function* () {
+    const context = yield* Effect.context<LambdaServices>().pipe(
+      Effect.map(AWSBindings.operationContext),
+    );
+    const calls = makeCalls(
+      (effect) => Effect.provide(effect, context),
+      Effect.succeed(functionName),
+      Effect.succeed(qualifier),
+    );
+    return makeEngine({ route: () => Effect.succeed(calls), register: () => undefined });
+  });
 
 /**
  * A durable execution's name: the workflow and execution id, within Lambda's
@@ -617,32 +860,62 @@ const finished = (calls: Calls, executionArn: string) =>
   Effect.map(calls.get(executionArn), ({ status }) => status !== "RUNNING");
 
 /**
- * Find a waiting run's callback, retrying while the run is on its way to the
- * wait. Undefined once the wait is over, or the run is: a signal sent again,
- * or after the run finished, has nothing to complete.
+ * Scan newest first, carrying terminal ids and context names across page boundaries.
+ * The SDK's callback is unnamed; its enclosing WaitForCallback context owns the
+ * deferred name. Terminal ids exclude their starts even across page boundaries.
  */
-const findCallback = (calls: Calls, executionName: string, deferredName: string) =>
+const findCallback = (calls: Calls, executionArn: string, deferredName: string) =>
   Effect.gen(function* () {
-    const arn = yield* calls.find(executionName);
-    if (!arn) return yield* Effect.fail("not started" as const);
-    const { pending, completed } = callbacksOf(yield* calls.history(arn));
-    const callback = pending.find((waiting) => waiting.name === deferredName);
-    if (callback) return callback.callbackId;
-    if (completed.has(deferredName) || (yield* finished(calls, arn))) return undefined;
-    return yield* Effect.fail("not waiting" as const);
-  }).pipe(
-    Effect.retry({
-      schedule: Schedule.min([Schedule.exponential("200 millis"), Schedule.spaced("5 seconds")]),
-      times: 40,
-    }),
-    Effect.catch((reason) =>
-      Effect.die(
-        new Error(
-          `Workflow execution ${executionName} is ${reason === "not started" ? "not started" : `not waiting on ${deferredName}`}`,
-        ),
-      ),
-    ),
-  );
+    const closed = new Set<string>();
+    const names = new Map<string, string>();
+    const starts: Array<{
+      id: string;
+      callbackId: string;
+      parentId: string | undefined;
+      name: string | undefined;
+    }> = [];
+    let marker: string | undefined;
+    const markers = new Set<string>();
+    do {
+      const page = yield* calls.historyPage(executionArn, marker);
+      for (const event of page.Events) {
+        if (!event.Id) continue;
+        if (event.SubType === "WaitForCallback" && event.Name) names.set(event.Id, event.Name);
+        if (
+          event.CallbackSucceededDetails ||
+          event.CallbackFailedDetails ||
+          event.CallbackTimedOutDetails
+        )
+          closed.add(event.Id);
+        if (event.CallbackStartedDetails)
+          starts.push({
+            id: event.Id,
+            callbackId: event.CallbackStartedDetails.CallbackId,
+            parentId: event.ParentId,
+            name: event.Name,
+          });
+      }
+      let unresolved = false;
+      for (const start of starts) {
+        if (closed.has(start.id)) continue;
+        const name = start.parentId ? names.get(start.parentId) : start.name;
+        if (name === undefined) {
+          unresolved = true;
+          continue;
+        }
+        if (name === deferredName && !unresolved) return start.callbackId;
+      }
+      marker = page.NextMarker;
+      if (marker !== undefined) {
+        if (markers.has(marker))
+          return yield* Effect.die(
+            new Error(`Lambda returned a repeated history marker for ${executionArn}`),
+          );
+        markers.add(marker);
+      }
+    } while (marker !== undefined);
+    return undefined;
+  });
 
 /** Read a run's result from Lambda: undefined while it runs. */
 const readResult = (calls: Calls, workflow: Workflow.AnyWithProps, executionArn: string) =>
@@ -668,6 +941,10 @@ const makeEngine = (options: {
   readonly register: (workflow: Workflow.AnyWithProps, execute: Execute) => void;
 }): WorkflowEngine.WorkflowEngine["Service"] => {
   const { route } = options;
+  const find = (calls: Calls, name: string) =>
+    Effect.flatMap(ExecutionReference, (arn) =>
+      arn === undefined ? calls.find(name) : Effect.succeed(arn),
+    );
   const engine: WorkflowEngine.WorkflowEngine["Service"] = WorkflowEngine.makeUnsafe({
     register: (workflow, execute) =>
       Effect.sync(() => options.register(workflow as Workflow.AnyWithProps, execute)),
@@ -679,43 +956,32 @@ const makeEngine = (options: {
         const payload = yield* Schema.encodeEffect(payloadCodec(workflow as Workflow.AnyWithProps))(
           opts.payload,
         ).pipe(Effect.orDie);
-        yield* calls.start(executionName, {
-          workflow: workflow._tag,
-          executionId: opts.executionId,
-          payload,
-        });
-        if (opts.discard) return undefined;
+        const invocation = { workflow: workflow._tag, executionId: opts.executionId, payload };
         const run = yield* Effect.serviceOption(CurrentRun);
-        if (Option.isNone(run)) {
-          const arn = yield* calls.find(executionName);
-          const result = arn
-            ? yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)
-            : undefined;
-          return result ?? Workflow.Suspended.make({});
+        if (Option.isSome(run) && !opts.discard) {
+          const text = yield* memo(
+            run.value,
+            `child/${executionName}`,
+            Effect.flatMap(calls.target, (target) =>
+              run.value.durable.invoke<string>(`child/${executionName}`, target, invocation),
+            ),
+          );
+          return yield* decodeResult(workflow as Workflow.AnyWithProps, text);
         }
-        // A child workflow: wait for it here, with durable waits between checks.
-        for (let check = 0; ; check++) {
-          const text = yield* run.value.durable.step({
-            name: `child/${executionName}/${check}`,
-            effect: Effect.gen(function* () {
-              const arn = yield* calls.find(executionName);
-              const result = arn
-                ? yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)
-                : undefined;
-              return result
-                ? yield* encodeResult(workflow as Workflow.AnyWithProps, result.exit)
-                : "";
-            }),
-          });
-          if (text !== "") return yield* decodeResult(workflow as Workflow.AnyWithProps, text);
-          yield* run.value.durable.wait(`child-wait/${executionName}/${check}`, "5 seconds");
-        }
+        const arn = yield* calls.start(executionName, invocation);
+        const receipt = yield* Effect.serviceOption(StartReceipt);
+        if (Option.isSome(receipt)) receipt.value.record(arn);
+        if (opts.discard) return undefined;
+        return (
+          (yield* readResult(calls, workflow as Workflow.AnyWithProps, arn)) ??
+          Workflow.Suspended.make({})
+        );
       }) as Effect.Effect<any>,
 
     poll: (workflow, executionId) =>
       Effect.gen(function* () {
         const calls = yield* route(workflow._tag);
-        const arn = yield* calls.find(executionNameOf(workflow._tag, executionId));
+        const arn = yield* find(calls, executionNameOf(workflow._tag, executionId));
         if (!arn) return Option.none();
         const result = yield* readResult(calls, workflow as Workflow.AnyWithProps, arn);
         return Option.some(result ?? Workflow.Suspended.make({}));
@@ -729,7 +995,7 @@ const makeEngine = (options: {
         const calls = yield* route(workflow._tag);
         const executionName = executionNameOf(workflow._tag, executionId);
         const target = yield* Effect.gen(function* () {
-          const arn = yield* calls.find(executionName);
+          const arn = yield* find(calls, executionName);
           if (!arn) return yield* Effect.fail({ arn } as const);
           const events = yield* calls.history(arn);
           const pending = pendingCallbacks(events);
@@ -762,7 +1028,7 @@ const makeEngine = (options: {
     interruptUnsafe: (workflow, executionId) =>
       Effect.gen(function* () {
         const calls = yield* route(workflow._tag);
-        const arn = yield* calls.find(executionNameOf(workflow._tag, executionId));
+        const arn = yield* find(calls, executionNameOf(workflow._tag, executionId));
         if (arn) yield* calls.stop(arn);
       }),
 
@@ -781,60 +1047,111 @@ const makeEngine = (options: {
         });
       }),
 
+    /* oxlint-disable effecttsgo/unsafe-effect-type-assertion -- the captured Activity caller context and engine-owned services are restored for the SDK callback */
     activityExecute: (activity, attempt) =>
       Effect.gen(function* () {
         const run = yield* currentRun("activity execution");
+        // The SDK callback runs on a fresh fiber; capture services and telemetry
+        // here so providers around the Activity take precedence over invocation init.
+        const context = yield* Effect.context<never>();
         const instance = yield* WorkflowEngine.WorkflowInstance;
         const activityInstance = WorkflowEngine.WorkflowInstance.initial(
           instance.workflow,
           instance.executionId,
         );
         activityInstance.interrupted = instance.interrupted;
-        // A step can't hold a durable operation. An activity that reaches a
-        // wait inside its step suspends, and records the wait: it runs here,
-        // and the activity again under a new step name, which finds it done.
-        // An activity that suspends on a failure waits for a resume, or an
-        // interrupt, the same way.
+        const retry = Context.get(activity.annotations, ActivityRetry);
         for (let generation = 0; ; generation++) {
           const step: { pending?: Pending } = {};
-          const text = yield* run.durable.step({
-            name:
-              generation === 0
-                ? `${activity.name}/${attempt}`
-                : `${activity.name}/${attempt}/resumed-${generation}`,
-            effect: activity.executeEncoded.pipe(
-              Workflow.intoResult,
-              Effect.flatMap((result) =>
-                result._tag === "Complete"
-                  ? encodeExit(result.exit)
-                  : Effect.succeed(`${SUSPENDED}${JSON.stringify(step.pending ?? null)}`),
-              ),
-              // The run's services, with the step's own instance.
-              Effect.provide(
-                Layer.succeedContext(
-                  run.context.pipe(
-                    Context.add(WorkflowEngine.WorkflowInstance, activityInstance),
-                    // The step runs on its own fiber: carry the attempt `Activity.retry` set.
-                    Context.add(Activity.CurrentAttempt, attempt),
-                    // A durable clock or deferred inside the activity needs the engine.
-                    Context.add(WorkflowEngine.WorkflowEngine, engine),
-                    Context.add(CurrentRun, { ...run, step }),
-                    Context.add(
-                      CurrentActivity,
-                      makeCurrentActivity(
-                        instance.workflow._tag,
-                        instance.executionId,
-                        activity.name,
+          const stepName =
+            generation === 0
+              ? `${activity.name}/${attempt}`
+              : `${activity.name}/${attempt}/resumed-${generation}`;
+          const text = yield* memo(
+            run,
+            `activity/${stepName}`,
+            run.durable
+              .step({
+                name: stepName,
+                ...(retry
+                  ? {
+                      retry,
+                      retryWhen: (error: Error) =>
+                        failureText(error, ACTIVITY_FAILURE) !== undefined,
+                    }
+                  : { retry: { limit: 0 } }),
+                effect: Effect.flatMap(DurableStepAttempt, (nativeAttempt) =>
+                  activity.executeEncoded.pipe(
+                    Effect.provideService(Activity.CurrentAttempt, attempt + nativeAttempt - 1),
+                    Workflow.intoResult,
+                    Effect.flatMap((result) =>
+                      result._tag === "Complete"
+                        ? Effect.flatMap(encodeExit(result.exit), (text) =>
+                            retry &&
+                            Exit.isFailure(result.exit) &&
+                            Cause.hasFails(result.exit.cause) &&
+                            !Cause.hasInterrupts(result.exit.cause)
+                              ? Effect.gen(function* () {
+                                  const failure = Exit.isFailure(result.exit)
+                                    ? Cause.findErrorOption(result.exit.cause)
+                                    : Option.none();
+                                  if (retry.while && Option.isSome(failure)) {
+                                    if (
+                                      !("errorSchema" in activity) ||
+                                      !Schema.isSchema(activity.errorSchema)
+                                    ) {
+                                      return yield* Effect.die(
+                                        new Error(
+                                          "Activity retry predicate requires an error schema",
+                                        ),
+                                      );
+                                    }
+                                    const decoded = yield* Schema.decodeUnknownEffect(
+                                      Schema.toCodecJson(activity.errorSchema),
+                                    )(failure.value).pipe(Effect.orDie);
+                                    if (!retry.while(decoded)) return text;
+                                  }
+                                  return yield* Effect.die(
+                                    Object.assign(new Error(`${ACTIVITY_FAILURE}:${text}`), {
+                                      name: ACTIVITY_FAILURE,
+                                    }),
+                                  );
+                                })
+                              : Effect.succeed(text),
+                          )
+                        : Effect.succeed(`${SUSPENDED}${JSON.stringify(step.pending ?? null)}`),
+                    ),
+                    // Preserve the Activity caller, with engine-owned per-attempt services.
+                    Effect.provide(
+                      Layer.succeedContext(
+                        context.pipe(
+                          Context.add(DurableStepAttempt, nativeAttempt),
+                          Context.add(CurrentRun, { ...run, step }),
+                          Context.add(WorkflowEngine.WorkflowEngine, engine),
+                          Context.add(WorkflowEngine.WorkflowInstance, activityInstance),
+                          Context.add(
+                            CurrentActivity,
+                            makeCurrentActivity(
+                              instance.workflow._tag,
+                              instance.executionId,
+                              activity.name,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
+                ) as Effect.Effect<string>,
+              })
+              .pipe(
+                Effect.catchDefect((error) => {
+                  const text = failureText(error, ACTIVITY_FAILURE);
+                  return text === undefined ? Effect.die(error) : Effect.succeed(text);
+                }),
               ),
-            ) as Effect.Effect<string>,
-          });
-          if (!text.startsWith(SUSPENDED)) {
+          );
+          if (!text.startsWith(SUSPENDED))
             return new Workflow.Complete({ exit: yield* decodeExit(text) });
-          }
           const pending = JSON.parse(text.slice(SUSPENDED.length)) as Pending | null;
           if (pending) {
             run.waited.set(pending.name, yield* waitFor(run, pending));
@@ -849,6 +1166,8 @@ const makeEngine = (options: {
           );
         }
       }),
+
+    /* oxlint-enable effecttsgo/unsafe-effect-type-assertion */
 
     // A clock's sleep is a durable wait; a signal is a callback to wait for.
     deferredResult: (deferred) =>
@@ -868,6 +1187,7 @@ const makeEngine = (options: {
         const duration = run.clocks.get(deferred.name);
         const pending: Pending = {
           name: deferred.name,
+          config: yield* DeferredWait,
           ...(duration === undefined ? {} : { clockMillis: Duration.toMillis(duration) }),
         };
         // Inside a step: the activity suspends, and the wait runs after it.
@@ -881,10 +1201,21 @@ const makeEngine = (options: {
     deferredDone: (opts) =>
       Effect.gen(function* () {
         const calls = yield* route(opts.workflowName);
-        const executionName = executionNameOf(opts.workflowName, opts.executionId);
-        const callbackId = yield* findCallback(calls, executionName, opts.deferredName);
-        if (callbackId === undefined) return;
-        yield* calls.succeed(callbackId, yield* encodeExit(opts.exit));
+        const arn = yield* find(calls, executionNameOf(opts.workflowName, opts.executionId));
+        const callbackId =
+          arn === undefined ? undefined : yield* findCallback(calls, arn, opts.deferredName);
+        if (callbackId === undefined)
+          return yield* Effect.die(
+            new NotYetWaiting({
+              workflowName: opts.workflowName,
+              executionId: opts.executionId,
+              deferredName: opts.deferredName,
+            }),
+          );
+        const text = yield* encodeExit(opts.exit);
+        if (Exit.isFailure(opts.exit))
+          yield* calls.fail(callbackId, DEFERRED_FAILURE, `${DEFERRED_FAILURE}:${text}`);
+        else yield* calls.succeed(callbackId, text);
       }),
 
     scheduleClock: (_workflow, opts) =>

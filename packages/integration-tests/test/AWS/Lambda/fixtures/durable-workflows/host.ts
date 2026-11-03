@@ -15,11 +15,12 @@ export class TestWorkflows extends Lambda.WorkflowFunction<TestWorkflows>()("Tes
 export default TestWorkflows.make(
   {
     main,
+    ...(process.env.WORKFLOW_FLOCI_ENDPOINT
+      ? { env: { AWS_ENDPOINT_URL: "http://floci:4566" } }
+      : {}),
     executionTimeout: Duration.hours(1),
     retentionPeriod: "1 day",
     timeout: Duration.seconds(60),
-    // Runs start on the alias, not `$LATEST`.
-    alias: "live",
   },
   WorkflowsLive.pipe(Layer.provide(JournalLive)),
 );

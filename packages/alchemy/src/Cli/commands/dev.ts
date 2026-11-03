@@ -20,6 +20,7 @@ import { consoleSettingsEnv, currentConsoleSettings, RunLog } from "../GlobalLog
 import { suppressInterruptMessages } from "./errors.ts";
 import {
   configPath,
+  dataDir,
   envFile,
   force,
   include,
@@ -52,6 +53,7 @@ export const devCommand = Command.make(
     config: optionalConfig,
     configPath,
     envFile,
+    dataDir,
     stage: devStage,
     profile,
   },

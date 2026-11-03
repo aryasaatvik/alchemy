@@ -1,4 +1,4 @@
-import { AlchemyContext, AlchemyContextLive } from "alchemy/AlchemyContext";
+import { AlchemyContext, AlchemyContextLive, dataDirLayer } from "alchemy/AlchemyContext";
 import { ArtifactStore, createArtifactStore } from "alchemy/Artifacts";
 import { CredentialsStoreLive } from "alchemy/Auth/Credentials";
 import { ProfileStoreLive } from "alchemy/Auth/Profile";
@@ -189,11 +189,30 @@ const cli = Command.run(root, {
     devRunMode === undefined ? packageJson.version : `${packageJson.version} (${devRunMode})`,
 });
 
+// Logging is built before command parsing, so select its directory alongside
+// the other early CLI capabilities. The command parser still validates the flag.
+const flagArgs = argv.slice(0, argv.indexOf("--") === -1 ? undefined : argv.indexOf("--"));
+const dataDirFlag = flagArgs.findIndex(
+  (arg) => arg === "--data-dir" || arg.startsWith("--data-dir="),
+);
+const initialDataDir =
+  dataDirFlag === -1
+    ? undefined
+    : flagArgs[dataDirFlag] === "--data-dir"
+      ? flagArgs[dataDirFlag + 1]
+      : flagArgs[dataDirFlag].slice("--data-dir=".length);
+const contextServices = Layer.provideMerge(
+  initialDataDir === undefined
+    ? AlchemyContextLive
+    : Layer.provideMerge(dataDirLayer(initialDataDir), AlchemyContextLive),
+  PlatformServices,
+);
+
 const services = Layer.mergeAll(
   CliConfig.layer({
     builtIns: [GlobalFlag.Help, GlobalFlag.Version, GlobalFlag.Completions],
   }),
-  Layer.provideMerge(AlchemyContextLive, PlatformServices),
+  contextServices,
   Layer.provide(ProfileStoreLive, PlatformServices),
   Layer.provide(CredentialsStoreLive, PlatformServices),
   // Ambient per-CLI-run artifact root. Commands that define their own run
@@ -206,7 +225,7 @@ const services = Layer.mergeAll(
   // Debug run log in the project's .alchemy/log — the console noise floor stays at
   // Info, but full causes and auth-flow breadcrumbs land in the file so
   // support can ask users for it.
-  Layer.provide(GlobalLogLive, PlatformServices),
+  Layer.provide(GlobalLogLive, contextServices),
   TelemetryLive,
 );
 
