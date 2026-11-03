@@ -1,5 +1,4 @@
 import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Node } from "tsrs/unstable/ast";
 import { run } from "./io.ts";
@@ -171,7 +170,7 @@ export const withCleanBuildOutputs = async <A>(
   use: () => Promise<A>,
 ): Promise<A> => {
   const targets = await packageBuildOutputs(workspace);
-  const backup = await mkdtemp(join(tmpdir(), "alchemy-integration-build-"));
+  const backup = await mkdtemp(join(workspace.directory, ".alchemy-integration-build-"));
   const moved = new Map<string, string>();
   let prepared = false;
   let result: A;

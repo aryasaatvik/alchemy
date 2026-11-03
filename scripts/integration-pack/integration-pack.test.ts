@@ -660,6 +660,8 @@ await Bun.write("tsconfig.tsbuildinfo", "fresh metadata");
       expect(await Bun.file(join(directory, "tsconfig.tsbuildinfo")).text()).toBe("fresh metadata");
 
       let backup: string | undefined;
+      const originalTmp = process.env.TMPDIR;
+      process.env.TMPDIR = "/dev/null/unusable-build-temp";
       try {
         await withCleanBuildOutputs(workspace, async () => {
           await Bun.write(join(directory, "lib", "failed.js"), "failed replacement");
@@ -672,7 +674,14 @@ await Bun.write("tsconfig.tsbuildinfo", "fresh metadata");
         expect(error.message).toContain("original outputs restored");
         backup = /replacement output retained at (.+)$/.exec(error.message)?.[1];
         expect(backup).toBeDefined();
+        // Quarantine must share the output filesystem even when OS temp is elsewhere.
+        expect(backup?.startsWith(join(directory, ".alchemy-integration-build-"))).toBe(true);
+        expect(await Bun.file(join(backup!, "failed-0", "failed.js")).text()).toBe(
+          "failed replacement",
+        );
       } finally {
+        if (originalTmp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = originalTmp;
         if (backup !== undefined) await rm(backup, { recursive: true, force: true });
       }
       expect(await Bun.file(join(directory, "lib", "index.js")).text()).toContain("current");
