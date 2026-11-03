@@ -30,7 +30,7 @@ const MANAGED_LAYER =
   "arn:aws:lambda:us-east-1:901920570463:layer:aws-otel-collector-amd64-ver-0-102-1:1";
 
 /** In-memory IAM + Lambda account served over a fake HTTP client. */
-const makeCloud = (options: { failCreateFunction?: boolean } = {}) => {
+const makeCloud = (options: { failCreateFunction?: boolean; aliasVersion?: string } = {}) => {
   const roles = new Map<string, Set<string>>();
   const functions = new Set<string>();
   const inlinePolicies = new Map<string, Map<string, string>>();
@@ -135,6 +135,16 @@ const makeCloud = (options: { failCreateFunction?: boolean } = {}) => {
         FunctionArn: `arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${name}`,
       });
     }
+    if (pathname.endsWith("/versions") && method === "POST")
+      return lambdaJson(201, { Version: "7" });
+    if (pathname.endsWith("/aliases/live") && method === "GET")
+      return options.aliasVersion
+        ? lambdaJson(200, { FunctionVersion: options.aliasVersion })
+        : lambdaJson(404, {}, "ResourceNotFoundException");
+    if (pathname.endsWith("/aliases/live") && method === "PUT") return lambdaJson(200, {});
+    if (pathname.endsWith("/aliases") && method === "POST") return lambdaJson(201, {});
+    if (pathname.endsWith("/runtime-management-config"))
+      return lambdaJson(200, { UpdateRuntimeOn: "Manual", RuntimeVersionArn: "old-pin" });
     // Precreate prefers updating a function `observe` admitted; a missing
     // one falls back to create.
     const code = pathname.match(/^\/2015-03-31\/functions\/([^/]+)\/code$/);
@@ -153,7 +163,7 @@ const makeCloud = (options: { failCreateFunction?: boolean } = {}) => {
   const client = HttpClient.make((request) =>
     Effect.sync(() => {
       const url = new URL(request.url);
-      requests.push(`${request.method} ${url.hostname}${url.pathname}`);
+      requests.push(`${request.method} ${url.hostname}${url.pathname}${url.search}`);
       const raw = request.body as { body?: Uint8Array };
       const body = new TextDecoder().decode(raw.body ?? new Uint8Array());
       const logs = () => {
@@ -387,3 +397,34 @@ test.provider(
       expect(cloud.requests).toHaveLength(0);
     }),
 );
+
+for (const runtimeManagementConfig of [
+  { updateRuntimeOn: "Manual", runtimeVersionArn: "new-pin" },
+  { updateRuntimeOn: "Auto" },
+] as const) {
+  test.provider(
+    `precreate pins the serving numbered version before alias creation: ${runtimeManagementConfig.updateRuntimeOn}`,
+    () =>
+      Effect.gen(function* () {
+        const cloud = makeCloud({
+          aliasVersion: runtimeManagementConfig.updateRuntimeOn === "Auto" ? "6" : undefined,
+        });
+        yield* precreate("PinnedAlias", cloud, [], { alias: "live", runtimeManagementConfig });
+        const publish = cloud.requests.findIndex(
+          (r) => r.startsWith("POST ") && r.endsWith("/versions"),
+        );
+        const pin = cloud.requests.findIndex(
+          (r) => r.startsWith("PUT ") && r.endsWith("/runtime-management-config?Qualifier=7"),
+        );
+        const alias = cloud.requests.findIndex(
+          (r) =>
+            (r.startsWith("POST ") && r.endsWith("/aliases")) ||
+            (r.startsWith("PUT ") && r.endsWith("/aliases/live")),
+        );
+        expect(publish).toBeGreaterThan(-1);
+        expect(pin).toBeGreaterThan(publish);
+        expect(alias).toBeGreaterThan(pin);
+      }),
+    { tags: ["unit", "local", "provider:aws:lambda"] },
+  );
+}

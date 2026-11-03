@@ -2946,10 +2946,12 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
         functionName,
         functionArn,
         alias,
+        runtimeManagementConfig,
       }: {
         functionName: string;
         functionArn: string;
         alias: string;
+        runtimeManagementConfig?: RuntimeManagementConfig;
       }) {
         const deleteHint = `Delete versions no alias serves (\`aws lambda list-versions-by-function --function-name ${functionName}\`, then \`aws lambda delete-function --function-name ${functionName} --qualifier <version>\`)`;
         const published = yield* Lambda.publishVersion({ FunctionName: functionName }).pipe(
@@ -2976,6 +2978,15 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           }),
         );
         const version = published.Version!;
+        // Runtime management is version-specific and is not inherited from $LATEST.
+        // Pin the published version before any alias can serve it.
+        if (runtimeManagementConfig !== undefined) {
+          yield* syncRuntimeManagementConfig({
+            functionName,
+            qualifier: version,
+            desired: runtimeManagementConfig,
+          });
+        }
         const desired = {
           FunctionName: functionName,
           Name: alias,
@@ -3222,7 +3233,10 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             // Compared against the live config, so a runtime moved
             // out-of-band (or a pin applied by hand) is repaired.
             const desired = news.runtimeManagementConfig ?? DefaultRuntimeManagementConfig;
-            const observed = yield* observeRuntimeManagementConfig(output.functionName);
+            const observed = yield* observeRuntimeManagementConfig(
+              output.functionName,
+              output.aliasName ? output.version : undefined,
+            );
             if (!isSameRuntimeManagementConfig(observed, desired)) {
               return { action: "update" };
             }
@@ -3293,7 +3307,7 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             (olds !== undefined &&
               !isFunctionImageProps(olds) &&
               olds.runtimeManagementConfig !== undefined)
-              ? yield* observeRuntimeManagementConfig(fn.FunctionName)
+              ? yield* observeRuntimeManagementConfig(fn.FunctionName, alias?.FunctionVersion)
               : undefined;
           // Reuse the persisted output where we have it (e.g. code hash) so
           // diff doesn't see drift it can't reconstruct from the API.
@@ -3449,9 +3463,18 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
           // Consumers in a cycle with this Function wire the alias before
           // reconcile runs, so the alias must already exist (serving the
           // stub until reconcile advances it).
+          const runtimeManagementConfig =
+            !isFunctionImageProps(news) && isResolved(news.runtimeManagementConfig)
+              ? news.runtimeManagementConfig
+              : undefined;
           const alias =
             typeof news.alias === "string"
-              ? yield* syncAlias({ functionName, functionArn, alias: news.alias })
+              ? yield* syncAlias({
+                  functionName,
+                  functionArn,
+                  alias: news.alias,
+                  runtimeManagementConfig,
+                })
               : undefined;
 
           return {
@@ -3668,24 +3691,6 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
             reservedConcurrentExecutions: news.reservedConcurrentExecutions,
           });
 
-          // With an alias, every consumer invokes the alias: publish the
-          // settled code as a version and advance the alias before the URL
-          // and async-invoke config are attached to it.
-          const alias = news.alias
-            ? yield* syncAlias({ functionName, functionArn, alias: news.alias })
-            : undefined;
-          const previousAlias = output?.aliasName;
-
-          yield* syncEventInvokeConfig({
-            functionName,
-            qualifier: news.alias,
-            config: news.eventInvokeConfig,
-          });
-          if (news.alias) {
-            // The config moved to the alias; `$LATEST` falls back to defaults.
-            yield* syncEventInvokeConfig({ functionName, config: undefined });
-          }
-
           // Applied after the code and configuration update settles: Lambda
           // rejects the put while the function is mid-update.
           const runtimeManagementConfig =
@@ -3703,6 +3708,29 @@ export const FunctionProvider = (options: FunctionProviderOptions = {}) =>
               : undefined;
           if (runtimeManagementConfig !== undefined) {
             yield* waitForFunctionUpdate(functionName, session, vpc !== undefined);
+          }
+
+          // With an alias, every consumer invokes the alias: publish the
+          // settled code as a version and advance the alias before the URL
+          // and async-invoke config are attached to it.
+          const alias = news.alias
+            ? yield* syncAlias({
+                functionName,
+                functionArn,
+                alias: news.alias,
+                runtimeManagementConfig,
+              })
+            : undefined;
+          const previousAlias = output?.aliasName;
+
+          yield* syncEventInvokeConfig({
+            functionName,
+            qualifier: news.alias,
+            config: news.eventInvokeConfig,
+          });
+          if (news.alias) {
+            // The config moved to the alias; `$LATEST` falls back to defaults.
+            yield* syncEventInvokeConfig({ functionName, config: undefined });
           }
 
           const functionUrl = yield* createOrUpdateFunctionUrl({

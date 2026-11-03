@@ -41,6 +41,7 @@ interface ObservedConfig {
 const makeCloud = (initial: ObservedConfig) => {
   let config = initial;
   const puts: Array<Record<string, unknown>> = [];
+  const qualifiers: Array<string | null> = [];
 
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), {
@@ -53,6 +54,7 @@ const makeCloud = (initial: ObservedConfig) => {
       const url = new URL(request.url);
       const raw = request.body as { body?: Uint8Array };
       const body = new TextDecoder().decode(raw.body ?? new Uint8Array());
+      qualifiers.push(url.searchParams.get("Qualifier"));
       const path = `/2021-07-20/functions/${FUNCTION_NAME}/runtime-management-config`;
       if (url.pathname !== path) {
         throw new Error(`unexpected Lambda request ${request.method} ${url.pathname}`);
@@ -96,7 +98,7 @@ const makeCloud = (initial: ObservedConfig) => {
     ),
   );
 
-  return { puts, layer, current: () => config };
+  return { puts, qualifiers, layer, current: () => config };
 };
 
 const { test } = Test.make({
@@ -209,4 +211,20 @@ test.provider(
       });
     }),
   { tags, timeout: 60_000 },
+);
+
+test.provider(
+  "removing a pin resets the exact serving version to Auto",
+  () =>
+    Effect.gen(function* () {
+      const cloud = makeCloud({ UpdateRuntimeOn: "Manual", RuntimeVersionArn: PINNED });
+      yield* syncRuntimeManagementConfig({
+        functionName: FUNCTION_NAME,
+        qualifier: "7",
+        desired: undefined,
+      }).pipe(Effect.provide(cloud.layer));
+      expect(cloud.qualifiers).toEqual(["7", "7"]);
+      expect(cloud.puts).toEqual([{ UpdateRuntimeOn: "Auto" }]);
+    }),
+  { tags },
 );

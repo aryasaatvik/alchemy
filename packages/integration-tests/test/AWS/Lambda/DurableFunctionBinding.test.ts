@@ -463,6 +463,8 @@ test.provider(
         "arn:aws:lambda:us-east-1:123:function:TestWorkflows-deployed:7/durable-execution/execution";
       let aliasVersion = "7";
       let pending = true;
+      let starts = 0;
+      let executionName = "";
       const server = yield* Effect.acquireRelease(
         Effect.sync(() =>
           Bun.serve({
@@ -470,6 +472,16 @@ test.provider(
             fetch(request) {
               const url = new URL(request.url);
               requests.push(url);
+              if (url.pathname.endsWith("/invocations"))
+                executionName = request.headers.get("X-Amz-Durable-Execution-Name")!;
+              if (url.pathname.endsWith("/invocations") && ++starts > 1)
+                return Response.json(
+                  { message: "same durable execution name with a different payload" },
+                  {
+                    status: 409,
+                    headers: { "x-amzn-errortype": "DurableExecutionAlreadyStartedException" },
+                  },
+                );
               if (url.pathname.endsWith("/invocations"))
                 return new Response("{}", {
                   status: 202,
@@ -483,11 +495,23 @@ test.provider(
                 );
                 if (qualified && aliasVersion !== "7")
                   return Response.json({ DurableExecutions: [] });
+                if (!url.searchParams.has("Marker"))
+                  return Response.json({
+                    DurableExecutions: [
+                      {
+                        DurableExecutionArn: arn.replace("execution", "other"),
+                        DurableExecutionName: `${executionName}-other`,
+                        Status: "RUNNING",
+                        StartTimestamp: 1,
+                      },
+                    ],
+                    NextMarker: "exact-page",
+                  });
                 return Response.json({
                   DurableExecutions: [
                     {
                       DurableExecutionArn: arn,
-                      DurableExecutionName: "Approve-execution",
+                      DurableExecutionName: executionName,
                       FunctionArn: arn.split("/durable-execution")[0],
                       Status: "RUNNING",
                       StartTimestamp: 1,
@@ -531,20 +555,22 @@ test.provider(
       }
       pending = false;
       yield* Effect.promise(() => module.default({ operation: "interrupt" }, {}));
-      expect(yield* Effect.promise(() => module.default({ operation: "start" }, {}))).toBe(
-        arn.replace(":7/", ":8/"),
-      );
-      const starts = requests.filter((u) => u.pathname.endsWith("/invocations"));
-      expect(starts).toHaveLength(2);
-      expect(starts.every((u) => u.searchParams.get("Qualifier") === "live")).toBe(true);
+      expect(
+        yield* Effect.promise(() =>
+          module.default({ operation: "start", note: "changed payload" }, {}),
+        ),
+      ).toBe(arn);
+      const startRequests = requests.filter((u) => u.pathname.endsWith("/invocations"));
+      expect(startRequests).toHaveLength(2);
+      expect(startRequests.every((u) => u.searchParams.get("Qualifier") === "live")).toBe(true);
       const lookups = requests.filter((u) => u.pathname.endsWith("/durable-executions"));
-      expect(lookups).toHaveLength(6);
+      expect(lookups).toHaveLength(14);
       for (const url of lookups) {
         expect(decodeURIComponent(url.pathname)).toContain(
           "/functions/TestWorkflows-deployed/durable-executions",
         );
         expect(url.searchParams.has("Qualifier")).toBe(false);
-        expect(url.searchParams.get("DurableExecutionName")).toBe("Approve-execution");
+        expect(url.searchParams.get("DurableExecutionName")).toBe(executionName);
       }
       for (const url of requests.filter(
         (u) => u.pathname.includes("/durable-executions/") && !u.pathname.includes("/functions/"),

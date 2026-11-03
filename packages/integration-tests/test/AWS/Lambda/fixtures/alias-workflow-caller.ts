@@ -4,8 +4,8 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import { WorkflowEngine } from "effect/workflow";
-import { Approve, Approval } from "../../../Workflows/conformance/workflows.ts";
-import { TestWorkflows, liveAlias } from "./alias-workflow-host.ts";
+import { Approval } from "../../../Workflows/conformance/workflows.ts";
+import { Approve, TestWorkflows, liveAlias } from "./alias-workflow-host.ts";
 
 export class AliasWorkflowCaller extends Lambda.Function<AliasWorkflowCaller>()(
   "AliasWorkflowCaller",
@@ -16,12 +16,15 @@ export default AliasWorkflowCaller.make(
     const client = yield* Workflows.RunWorkflow(Approve);
     const engine = yield* WorkflowEngine.WorkflowEngine;
     const host = yield* Lambda.Function;
-    yield* host.listen((event: { operation: string }) =>
+    yield* host.listen((event: { operation: string; note?: string }) =>
       Effect.gen(function* () {
-        const run = client.get("execution");
+        const executionId = yield* Approve.executionId({ id: "execution", note: event.note });
+        const run = client.get(executionId);
         switch (event.operation) {
           case "start":
-            return yield* client.start({ id: "execution" }).pipe(Effect.map((r) => r.executionRef));
+            return yield* client
+              .start({ id: "execution", note: event.note })
+              .pipe(Effect.map((r) => r.executionRef));
           case "status":
             return yield* run.status;
           case "success":
@@ -31,7 +34,7 @@ export default AliasWorkflowCaller.make(
           case "interrupt":
             return yield* run.interrupt;
           case "stop":
-            return yield* engine.interruptUnsafe(Approve, "execution");
+            return yield* engine.interruptUnsafe(Approve, executionId);
           default:
             return yield* Effect.die("unknown operation");
         }

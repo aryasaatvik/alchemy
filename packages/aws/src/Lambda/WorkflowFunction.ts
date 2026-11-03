@@ -43,6 +43,8 @@ import {
   type DurableRetryPolicy,
 } from "./Durable.ts";
 import {
+  AmbiguousDurableExecutionIdentity,
+  DurableExecutionIdentityUnavailable,
   DurableFunction,
   type DurableFunctionImpl,
   type DurableFunctionInitServices,
@@ -702,6 +704,31 @@ const makeCalls = (
 ): Calls => {
   const run = <A, E>(effect: Effect.Effect<A, E, LambdaServices>) =>
     provide(effect).pipe(Effect.orDie);
+  const find = (FunctionName: string, executionName: string) =>
+    // A qualifier hides executions pinned to versions an alias no longer serves.
+    Lambda.listDurableExecutionsByFunction
+      .items({ FunctionName, DurableExecutionName: executionName })
+      .pipe(
+        Stream.runCollect,
+        Effect.flatMap((executions) => {
+          const arns = [
+            ...new Set(
+              [...executions]
+                .filter((execution) => execution.DurableExecutionName === executionName)
+                .map((execution) => execution.DurableExecutionArn),
+            ),
+          ];
+          return arns.length > 1
+            ? Effect.fail(
+                new AmbiguousDurableExecutionIdentity({
+                  functionName: FunctionName,
+                  executionName,
+                  executionArns: arns,
+                }),
+              )
+            : Effect.succeed(arns[0]);
+        }),
+      );
   return {
     target: Effect.map(
       Effect.all([functionName, qualifier]),
@@ -717,6 +744,25 @@ const makeCalls = (
             DurableExecutionName: executionName,
             Payload: JSON.stringify(invocation),
           }).pipe(
+            Effect.catchTag("DurableExecutionAlreadyStartedException", () =>
+              find(FunctionName, executionName).pipe(
+                Effect.repeat({
+                  schedule: Schedule.spaced("100 millis"),
+                  until: (arn) => arn !== undefined,
+                  times: 2,
+                }),
+                Effect.flatMap((arn) =>
+                  arn === undefined
+                    ? Effect.fail(
+                        new DurableExecutionIdentityUnavailable({
+                          functionName: FunctionName,
+                          executionName,
+                        }),
+                      )
+                    : Effect.succeed({ DurableExecutionArn: arn }),
+                ),
+              ),
+            ),
             Effect.flatMap((result) =>
               result.DurableExecutionArn
                 ? Effect.succeed(result.DurableExecutionArn)
@@ -726,15 +772,7 @@ const makeCalls = (
         ),
       ),
     find: (executionName) =>
-      Effect.flatMap(functionName, (FunctionName) =>
-        run(
-          // A qualifier hides runs pinned to earlier versions after an alias moves.
-          Lambda.listDurableExecutionsByFunction({
-            FunctionName,
-            DurableExecutionName: executionName,
-          }).pipe(Effect.map((page) => page.DurableExecutions?.[0]?.DurableExecutionArn)),
-        ),
-      ),
+      Effect.flatMap(functionName, (FunctionName) => run(find(FunctionName, executionName))),
     get: (executionArn) =>
       run(
         Lambda.getDurableExecution({ DurableExecutionArn: executionArn }).pipe(

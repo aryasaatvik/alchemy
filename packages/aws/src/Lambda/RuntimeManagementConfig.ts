@@ -50,12 +50,16 @@ export const managesRuntime = (
 ): boolean => news !== undefined || olds !== undefined;
 
 /**
- * Read the unqualified function's runtime management config. Lambda reports
+ * Read the selected function version's runtime management config. Lambda reports
  * `RuntimeVersionArn` only in `"Manual"` mode.
  */
-export const observeRuntimeManagementConfig = Effect.fn(function* (functionName: string) {
+export const observeRuntimeManagementConfig = Effect.fn(function* (
+  functionName: string,
+  qualifier?: string,
+) {
   const observed = yield* Lambda.getRuntimeManagementConfig({
     FunctionName: functionName,
+    Qualifier: qualifier,
   });
   switch (observed.UpdateRuntimeOn) {
     case "Manual": {
@@ -87,7 +91,7 @@ export const observeRuntimeManagementConfig = Effect.fn(function* (functionName:
 });
 
 /**
- * Converge the unqualified function's runtime management config to
+ * Converge the selected function version's runtime management config to
  * `desired` (`undefined` means AWS's default, `"Auto"`). Diffs against the
  * observed config so a converged deploy skips the write. Call it only while
  * the function is not mid-update; Lambda rejects the put with
@@ -95,17 +99,20 @@ export const observeRuntimeManagementConfig = Effect.fn(function* (functionName:
  */
 export const syncRuntimeManagementConfig = Effect.fn(function* ({
   functionName,
+  qualifier,
   desired = DefaultRuntimeManagementConfig,
 }: {
   functionName: string;
+  qualifier?: string;
   desired: RuntimeManagementConfig | undefined;
 }) {
-  const observed = yield* observeRuntimeManagementConfig(functionName);
+  const observed = yield* observeRuntimeManagementConfig(functionName, qualifier);
   if (isSameRuntimeManagementConfig(observed, desired)) {
     return observed;
   }
   yield* Lambda.putRuntimeManagementConfig({
     FunctionName: functionName,
+    Qualifier: qualifier,
     UpdateRuntimeOn: desired.updateRuntimeOn,
     RuntimeVersionArn: desired.runtimeVersionArn,
   }).pipe(
