@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +10,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
@@ -145,11 +147,67 @@ it.live(
   () =>
     Effect.gen(function* () {
       let remote = "";
-      const storageLayer = Storage.layerTemp();
+      let userUrl: URL | undefined;
+      let runtimeReleased = false;
+      let firstRemoval: unknown;
+      const removalFailures: unknown[] = [];
+      const listenerState = (url: URL | undefined) =>
+        new Promise<boolean | "unknown" | "timeout">((resolve) => {
+          if (!url) return resolve("unknown");
+          const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+          const done = (state: boolean | "timeout") => {
+            socket.destroy();
+            resolve(state);
+          };
+          socket.once("connect", () => done(true));
+          socket.once("error", () => done(false));
+          socket.setTimeout(1000, () => done("timeout"));
+        });
+      const observedFs = Layer.effect(
+        FileSystem.FileSystem,
+        Effect.map(FileSystem.FileSystem, (fs) =>
+          FileSystem.FileSystem.of({
+            ...fs,
+            remove: (directory, options) =>
+              Effect.gen(function* () {
+                if (firstRemoval === undefined) {
+                  const [files, userListener, gitListener] = yield* Effect.promise(() =>
+                    Promise.all([
+                      readdir(directory, { recursive: true }).catch((error: unknown) => [
+                        String(error),
+                      ]),
+                      listenerState(userUrl),
+                      listenerState(remote ? new URL(remote) : undefined),
+                    ]),
+                  );
+                  firstRemoval = { runtimeReleased, userListener, gitListener, files };
+                }
+                return yield* fs.remove(directory, options).pipe(
+                  Effect.tapError((error) =>
+                    Effect.sync(() => {
+                      removalFailures.push({
+                        runtimeReleased,
+                        reason: error.reason,
+                        message: error.message,
+                      });
+                    }),
+                  ),
+                );
+              }),
+          }),
+        ),
+      );
+      const storageLayer = Storage.layerTemp().pipe(Layer.provide(observedFs));
       const runtimeLayer = artifactsRuntimeLayer(storageLayer);
       const root = yield* Effect.gen(function* () {
         const storage = yield* Storage.Storage;
         if (!("disk" in storage) || !storage.disk) throw new Error("Expected disk storage");
+        // Registered before start: this runs after the runtime's child scopes close.
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            runtimeReleased = true;
+          }),
+        );
         const worker = yield* startTestWorker({
           name: "artifacts-cleanup",
           compatibilityDate: "2026-09-03",
@@ -157,6 +215,7 @@ it.live(
           modules: [{ name: "main.js", type: "ESModule", content: script }],
           bindings: [Artifacts.local({ binding: "REPOS", namespace: "cleanup" })],
         });
+        userUrl = worker.baseUrl;
         const created = yield* worker.fetchJson<{ remote: string; token: string }>("/", {
           method: "POST",
           body: JSON.stringify({ op: "create" }),
@@ -178,7 +237,15 @@ it.live(
           ),
         ).toContainEqual(expect.stringMatching(/\.git[\\/]HEAD$/));
         return storage.disk.path;
-      }).pipe(Effect.provide(runtimeLayer), Effect.scoped);
+      }).pipe(
+        // Close Runtime.start's child scopes before releasing the storage layer.
+        Effect.scoped,
+        Effect.provide(runtimeLayer),
+      );
+      const cleanupDetails = JSON.stringify({ firstRemoval, removalFailures });
+      expect(firstRemoval, cleanupDetails).toMatchObject({
+        runtimeReleased: true,
+      });
       expect(
         yield* Effect.promise(() =>
           stat(root).then(
@@ -189,6 +256,7 @@ it.live(
             },
           ),
         ),
+        cleanupDetails,
       ).toBe(false);
       expect(
         // Like Workerd.test, avoid Undici's macOS setTypeOfService exception
@@ -201,6 +269,7 @@ it.live(
           Effect.catch(() => Effect.succeed(false)),
           Effect.provide(NodeHttpClient.layerNodeHttp),
         ),
+        cleanupDetails,
       ).toBe(false);
     }).pipe(Effect.scoped),
   { timeout: 60000 },
