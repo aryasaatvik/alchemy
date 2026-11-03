@@ -219,6 +219,17 @@ describe("Cloudflare DNS record diff: canonical names", () => {
 });
 
 describe("Cloudflare DNS record diff: unresolved identity", () => {
+  it.effect("a concrete zone move replaces even when content is unresolved", () =>
+    Effect.gen(function* () {
+      const result = yield* diff({
+        olds: { zoneId: "old-zone", name: "record.example.com", type: "TXT" },
+        news: { zoneId: ZONE, name: "record.example.com", type: "TXT", content: unresolvedName() },
+        output: attributes({ zoneId: "old-zone" }),
+      });
+      expect(result?.action).toBe("replace");
+    }),
+  );
+
   it.effect("an Output-derived name defers to the generic planner", () =>
     Effect.gen(function* () {
       const result = yield* diff({
@@ -240,7 +251,7 @@ describe("Cloudflare DNS record diff: unresolved identity", () => {
     }),
   );
 
-  it.effect("an Output-derived content also defers", () =>
+  it.effect("a concrete name change replaces even when content is unresolved", () =>
     Effect.gen(function* () {
       const result = yield* diff({
         olds: {
@@ -257,7 +268,7 @@ describe("Cloudflare DNS record diff: unresolved identity", () => {
         },
         output: attributes(),
       });
-      expect(result).toBeUndefined();
+      expect(result?.action).toBe("replace");
     }),
   );
 });
@@ -382,3 +393,35 @@ describe("Cloudflare DNS record diff: zone-qualified identity", () => {
     );
   }
 });
+
+it.effect(
+  "a zone replacement deletes the observed old identity despite unresolved new content",
+  () =>
+    Effect.gen(function* () {
+      const old = attributes();
+      const replacement = yield* diff({
+        olds: { zoneId: ZONE },
+        news: { zoneId: "new-zone", type: "TXT", content: unresolvedName() },
+        output: old,
+      });
+      expect(replacement?.action).toBe("replace");
+      const requests: string[] = [];
+      const client = HttpClient.make((request, url) =>
+        Effect.sync(() => {
+          requests.push(`${request.method} ${url.pathname}`);
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({ success: true, result: { id: RECORD_ID }, errors: [], messages: [] }),
+          );
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const provider = yield* Provider<Record>("Cloudflare.DNS.Record");
+        yield* provider.delete!({ ...diffInput({ news: {}, output: old }), output: old } as never);
+      }).pipe(
+        Effect.provide(RecordProvider()),
+        Effect.provide(Layer.merge(env, Layer.succeed(HttpClient.HttpClient, client))),
+      );
+      expect(requests).toEqual([`DELETE /client/v4/zones/${ZONE}/dns_records/${RECORD_ID}`]);
+    }),
+);

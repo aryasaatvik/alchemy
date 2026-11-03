@@ -1,7 +1,6 @@
 import * as dns from "@distilled.cloud/cloudflare/dns";
 import * as zones from "@distilled.cloud/cloudflare/zones";
 import { Unowned } from "alchemy/AdoptPolicy";
-import { isResolved } from "alchemy/Diff";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import { arrayEqualsUnordered } from "alchemy/Util/equal";
@@ -298,13 +297,12 @@ export const RecordProvider = () =>
     }),
 
     diff: Effect.fn(function* ({ olds = {}, news, output }) {
-      // Derived record identity can remain an Output expression until apply
-      // (for example ACM's validation name/type). Never compare that proxy to
-      // a concrete prior identity: the generic planner will conservatively
-      // update and resolve it once its upstream is available.
-      if (!isResolved(news)) return undefined;
+      // Compare each concrete identity independently: unresolved content must
+      // not hide a known zone/name/type replacement. A whole-props expression
+      // still defers to the generic planner until its fields are available.
+      if (typeof news !== "object" || news === null || !("zoneId" in news)) return undefined;
       const o = olds as RecordProps;
-      const n = news as RecordProps;
+      const n = news;
       // Prefer refreshed provider attributes for identity. Persisted props can
       // omit or retain expression-shaped inputs when a record name/type/zone
       // came from another resource; the observed record is the concrete
@@ -312,13 +310,18 @@ export const RecordProvider = () =>
       const oldType = output?.type ?? o.type;
       const oldName = output?.name ?? o.name;
       const oldZoneId = output?.zoneId ?? o.zoneId;
-      if (oldType !== undefined && oldType !== n.type) {
+      if (oldType !== undefined && typeof n.type === "string" && oldType !== n.type) {
         return { action: "replace" } as const;
       }
-      if (typeof oldZoneId === "string" && oldZoneId !== n.zoneId) {
+      if (typeof oldZoneId === "string" && typeof n.zoneId === "string" && oldZoneId !== n.zoneId) {
         return { action: "replace" } as const;
       }
-      if (oldName !== undefined && canonicalRecordName(oldName) !== canonicalRecordName(n.name)) {
+      if (
+        oldName !== undefined &&
+        typeof n.name === "string" &&
+        typeof n.zoneId === "string" &&
+        canonicalRecordName(oldName) !== canonicalRecordName(n.name)
+      ) {
         // Cloudflare observes FQDNs even when the declaration uses @ or a
         // relative name. Compare both identities in the authoritative zone.
         const zone = yield* zones.getZone({ zoneId: n.zoneId });
