@@ -112,11 +112,13 @@ class ArtifactsRepositoryMethodsBridge
   implements ArtifactsRepositoryWireOperations
 {
   readonly #name: string;
+  readonly #id: string;
   readonly #open: OpenArtifactsSession;
 
-  constructor(name: string, open: OpenArtifactsSession) {
+  constructor(name: string, id: string, open: OpenArtifactsSession) {
     super();
     this.#name = name;
+    this.#id = id;
     this.#open = open;
   }
 
@@ -128,6 +130,7 @@ class ArtifactsRepositoryMethodsBridge
       // Keep the capability promise unresolved so its method shares the same RPC round trip.
       const methods = callArtifacts(stub, "getMethods", [
         this.#name,
+        this.#id,
         true,
       ]) as RpcPromise<ArtifactsRepositoryWireOperations>;
       const dispose = methods[Symbol.dispose];
@@ -209,7 +212,8 @@ const artifactsOperation = (open: OpenArtifactsSession, prop: string | symbol) =
       return async (name: string) =>
         (await call("metadata", "getMetadata", [name, true])) as ArtifactsRepositoryMetadataResult;
     case "artifactsGetMethods":
-      return async (name: string) => new ArtifactsRepositoryMethodsBridge(name, open);
+      return async (name: string, id: string) =>
+        new ArtifactsRepositoryMethodsBridge(name, id, open);
     default:
       return undefined;
   }

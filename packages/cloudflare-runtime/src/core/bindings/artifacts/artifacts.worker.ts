@@ -11,7 +11,10 @@ interface ProxyClient {
   list(...args: Parameters<Artifacts["list"]>): Promise<string>;
   delete(...args: Parameters<Artifacts["delete"]>): Promise<string>;
   artifactsGetMetadata(name: string): Promise<ArtifactsRepositoryMetadataResult>;
-  artifactsGetMethods(name: string): Promise<ArtifactsRepositoryWireOperations & Disposable>;
+  artifactsGetMethods(
+    name: string,
+    id: string,
+  ): Promise<ArtifactsRepositoryWireOperations & Disposable>;
 }
 
 interface Env {
@@ -43,7 +46,7 @@ export default function makeBinding(env: Env): Artifacts {
     async get(name) {
       const result = await env.proxyClient.artifactsGetMetadata(name);
       if (!result.ok) throw Object.assign(new Error(result.error.message), result.error);
-      const methods = await env.proxyClient.artifactsGetMethods(name);
+      const methods = await env.proxyClient.artifactsGetMethods(name, result.metadata.id);
       return {
         [Symbol.dispose]: () => methods[Symbol.dispose](),
         info: async () => decode(await methods.info()),

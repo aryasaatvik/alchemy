@@ -365,7 +365,7 @@ async function withNewRepository(
     // All initialization and cleanup happens under an owned staging directory.
     // A failed clone or fork must not remove a repository created concurrently
     // at the final path by another host process.
-    const stagingDirectory = await mkdtemp(path.join(root, ".artifacts-stage-"));
+    const stagingDirectory = await mkdtemp(path.join(root, `.artifacts-stage-${process.pid}-`));
     const staged = git.withRepository(path.join(stagingDirectory, "repo.git"));
     try {
       await initialize(staged);
@@ -403,19 +403,22 @@ async function retireRepository(repository: string): Promise<void> {
 
 async function cleanupInterruptedRepositories(root: string): Promise<void> {
   const retired = /^[0-9a-f]{32}\.git\.deleting-[0-9a-f]{32}$/;
-  const partialImport = /^\.artifacts-import-[a-zA-Z0-9]{6}$/;
-  const partialCreation = /^\.artifacts-stage-[a-zA-Z0-9]{6}$/;
-  // Only staging and retired directories are safe to remove. A creation
-  // lock may still be held by another process, so never clear it here.
+  // PID ownership is part of the directory name from its atomic creation.
+  // A second sidecar can share this root while an import/fork is still running.
+  const staging = /^\.artifacts-(?:import|stage)-(\d+)-[a-zA-Z0-9]{6}$/;
   for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (
-      entry.isDirectory() &&
-      (retired.test(entry.name) ||
-        partialImport.test(entry.name) ||
-        partialCreation.test(entry.name))
-    ) {
-      await removeDir(path.join(root, entry.name));
+    if (!entry.isDirectory()) continue;
+    const owner = staging.exec(entry.name);
+    let abandoned = false;
+    if (owner) {
+      try {
+        process.kill(Number(owner[1]), 0);
+      } catch (error) {
+        abandoned = (error as NodeJS.ErrnoException).code === "ESRCH";
+      }
     }
+    // Legacy staging names have no provable owner; retain ambiguous data.
+    if (retired.test(entry.name) || abandoned) await removeDir(path.join(root, entry.name));
   }
 }
 

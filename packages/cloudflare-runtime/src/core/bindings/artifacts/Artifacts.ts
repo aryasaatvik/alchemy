@@ -49,7 +49,7 @@ export const ArtifactsLive = Layer.effect(
       Effect.gen(function* () {
         const services: WorkerdConfig.Service[] = [];
         const sockets: WorkerdConfig.Socket[] = [];
-        const namespaces = new Map<string, WorkerdConfig.ServiceDesignator>();
+        const namespaces = new Map<string, Promise<WorkerdConfig.ServiceDesignator>>();
         return {
           extensions: [
             {
@@ -73,76 +73,86 @@ export const ArtifactsLive = Layer.effect(
                   }
                   const existing = namespaces.get(props.namespace);
                   if (existing) return existing;
-                  const diskPath = "disk" in storage ? storage.disk?.path : undefined;
-                  if (!diskPath)
-                    throw new Error("Local Artifacts requires disk-backed runtime storage");
-                  const id = createHash("sha256")
-                    .update(props.namespace)
-                    .digest("hex")
-                    .slice(0, 32);
-                  const root = path.join(diskPath, "artifacts", id);
-                  const metadata = path.join(root, "metadata");
-                  await mkdir(metadata, { recursive: true });
-                  const { sidecar, port } = await controller.get(
-                    path.join(root, "git"),
-                    props.gitPort,
-                  );
-                  const name = `artifacts-${id}`;
-                  const service = { name, entrypoint: "LocalArtifactsNamespace" };
-                  const script = await loadInternalWorker(
-                    "#cloudflare-runtime-core-worker/bindings/artifacts/local-artifacts.worker",
-                  );
-                  services.push(
-                    { name: `${name}-storage`, disk: { path: metadata, writable: true } },
-                    {
-                      name: `${name}-backend`,
-                      external: {
-                        address: sidecar.address,
-                        http: {
-                          injectRequestHeaders: [
-                            { name: "X-Local-Artifacts-Backend", value: sidecar.secret },
-                          ],
+                  const registration = (async () => {
+                    const diskPath = "disk" in storage ? storage.disk?.path : undefined;
+                    if (!diskPath)
+                      throw new Error("Local Artifacts requires disk-backed runtime storage");
+                    const id = createHash("sha256")
+                      .update(props.namespace)
+                      .digest("hex")
+                      .slice(0, 32);
+                    const root = path.join(diskPath, "artifacts", id);
+                    const metadata = path.join(root, "metadata");
+                    await mkdir(metadata, { recursive: true });
+                    const { sidecar, port } = await controller.get(
+                      path.join(root, "git"),
+                      props.gitPort,
+                    );
+                    const name = `artifacts-${id}`;
+                    const service = { name, entrypoint: "LocalArtifactsNamespace" };
+                    const script = await loadInternalWorker(
+                      "#cloudflare-runtime-core-worker/bindings/artifacts/local-artifacts.worker",
+                    );
+                    services.push(
+                      { name: `${name}-storage`, disk: { path: metadata, writable: true } },
+                      {
+                        name: `${name}-backend`,
+                        external: {
+                          address: sidecar.address,
+                          http: {
+                            injectRequestHeaders: [
+                              { name: "X-Local-Artifacts-Backend", value: sidecar.secret },
+                            ],
+                          },
                         },
                       },
-                    },
-                    {
-                      name,
-                      worker: {
-                        compatibilityDate: "2026-09-03",
-                        modules: formatInternalWorkerModules(script),
-                        bindings: [
-                          {
-                            name: "config",
-                            json: JSON.stringify({
-                              namespace: props.namespace,
-                              origin: `http://127.0.0.1:${port}`,
-                            }),
-                          },
-                          {
-                            name: "localArtifactsNamespace",
-                            durableObjectNamespace: { className: "LocalArtifactsNamespaceObject" },
-                          },
-                          { name: "gitBackend", service: { name: `${name}-backend` } },
-                        ],
-                        durableObjectNamespaces: [
-                          {
-                            className: "LocalArtifactsNamespaceObject",
-                            uniqueKey: id,
-                            enableSql: true,
-                          },
-                        ],
-                        durableObjectStorage: { localDisk: `${name}-storage` },
+                      {
+                        name,
+                        worker: {
+                          compatibilityDate: "2026-09-03",
+                          modules: formatInternalWorkerModules(script),
+                          bindings: [
+                            {
+                              name: "config",
+                              json: JSON.stringify({
+                                namespace: props.namespace,
+                                origin: `http://127.0.0.1:${port}`,
+                              }),
+                            },
+                            {
+                              name: "localArtifactsNamespace",
+                              durableObjectNamespace: {
+                                className: "LocalArtifactsNamespaceObject",
+                              },
+                            },
+                            { name: "gitBackend", service: { name: `${name}-backend` } },
+                          ],
+                          durableObjectNamespaces: [
+                            {
+                              className: "LocalArtifactsNamespaceObject",
+                              uniqueKey: id,
+                              enableSql: true,
+                            },
+                          ],
+                          durableObjectStorage: { localDisk: `${name}-storage` },
+                        },
                       },
-                    },
-                  );
-                  sockets.push({
-                    name: `${name}-git`,
-                    address: `127.0.0.1:${port}`,
-                    http: {},
-                    service,
+                    );
+                    sockets.push({
+                      name: `${name}-git`,
+                      address: `127.0.0.1:${port}`,
+                      http: {},
+                      service,
+                    });
+                    return service;
+                  })();
+                  // Publish the pending registration before another binding can enter.
+                  namespaces.set(props.namespace, registration);
+                  void registration.catch(() => {
+                    if (namespaces.get(props.namespace) === registration)
+                      namespaces.delete(props.namespace);
                   });
-                  namespaces.set(props.namespace, service);
-                  return service;
+                  return registration;
                 },
                 catch: (cause) =>
                   ConfigError.make({

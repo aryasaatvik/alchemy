@@ -170,7 +170,7 @@ const startFakeEdge = Effect.acquireRelease(
         webSocket.on("close", () => edge.sockets.delete(webSocket));
         const transport = new GatedWebSocketTransport(webSocket as never);
         class GatedArtifactsProxy extends ArtifactsBindingProxy {
-          override async getMethods(name: string, diagnostics = false) {
+          override async getMethods(name: string, id: string, diagnostics = false) {
             if (gateNextMethodsReply) {
               gateNextMethodsReply = false;
               transport.holdMethodsReply();
@@ -184,9 +184,9 @@ const startFakeEdge = Effect.acquireRelease(
                   return result;
                 }
               }
-              return new FaultedMethods(artifacts, name, diagnostics);
+              return new FaultedMethods(artifacts, name, id, diagnostics);
             }
-            return super.getMethods(name, diagnostics);
+            return super.getMethods(name, id, diagnostics);
           }
         }
         new RpcSession(transport, new GatedArtifactsProxy(artifacts)).getRemoteMain();

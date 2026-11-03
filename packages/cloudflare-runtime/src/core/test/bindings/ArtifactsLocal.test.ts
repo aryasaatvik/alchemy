@@ -1,13 +1,19 @@
 import { execFile } from "node:child_process";
-import { readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
+import * as Scope from "effect/Scope";
 import * as Artifacts from "../../bindings/artifacts/Artifacts.ts";
-import { gitEnvironment } from "../../bindings/artifacts/git-client.ts";
+import { GitClient, gitEnvironment } from "../../bindings/artifacts/git-client.ts";
+import { startGitSidecar } from "../../bindings/artifacts/git-sidecar.ts";
 import * as Docker from "../../Docker.ts";
 import * as Globals from "../../globals/Globals.ts";
 import * as Internet from "../../globals/Internet.ts";
@@ -131,7 +137,8 @@ describe("local Artifacts", () => {
   );
 });
 
-it.effect(
+// Windows may briefly retain workerd file locks; storage cleanup retries use real time.
+it.live(
   "closes listeners and removes temporary repository state with the runtime scope",
   () =>
     Effect.gen(function* () {
@@ -223,3 +230,108 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   { timeout: 60000 },
 );
+
+it.effect(
+  "shares the Git backend across two live runtimes with separate listeners and concurrent bindings",
+  () =>
+    Effect.gen(function* () {
+      const start = (name: string) =>
+        startTestWorker({
+          name,
+          compatibilityDate: "2026-09-03",
+          compatibilityFlags: [],
+          modules: [{ name: "main.js", type: "ESModule", content: script }],
+          // Registration is concurrent; both bindings must resolve to one service/socket.
+          bindings: [
+            Artifacts.local({ binding: "REPOS", namespace: "shared" }),
+            Artifacts.local({ binding: "OTHER", namespace: "shared" }),
+          ],
+        });
+      const firstScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+        Scope.close(scope, Exit.void),
+      );
+      const first = yield* start("artifacts-first").pipe(
+        Effect.provideService(Scope.Scope, firstScope),
+      );
+      const created = yield* first.fetchJson<{ id: string; token: string; remote: string }>("/", {
+        method: "POST",
+        body: JSON.stringify({ op: "create" }),
+      });
+      const second = yield* start("artifacts-second");
+      const metadata = yield* second.fetchJson<{ id: string; remote: string }>("/", {
+        method: "POST",
+        body: JSON.stringify({ op: "get" }),
+      });
+      expect(metadata.id).toBe(created.id);
+      expect(metadata.remote).not.toBe(created.remote);
+      yield* Scope.close(firstScope, Exit.void);
+      // Closing the first workerd listener must leave the shared backend usable.
+
+      for (const remote of [metadata.remote]) {
+        const response = yield* Effect.promise(() =>
+          fetch(`${remote}/info/refs?service=git-upload-pack`, {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`x-access-token:${created.token}`).toString("base64")}`,
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        yield* Effect.promise(() => response.arrayBuffer());
+      }
+    }).pipe(Effect.scoped, Effect.provide(artifactsRuntimeLayer(Storage.layerTemp()))),
+  { timeout: 60000 },
+);
+
+it("preserves a live import when another sidecar starts and cleans proven abandoned staging", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "artifacts-owners-"));
+  let accept!: () => void;
+  let release!: () => void;
+  const accepted = new Promise<void>((resolve) => {
+    accept = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const origin = createServer(async (_request, response) => {
+    accept();
+    await held;
+    response.writeHead(503).end();
+  });
+  await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+  const address = origin.address();
+  if (!address || typeof address === "string") throw new Error("Expected origin port");
+  const first = await startGitSidecar(root);
+  let second: Awaited<ReturnType<typeof startGitSidecar>> | undefined;
+  const importing = new GitClient(path.join(root, `${"a".repeat(32)}.git`))
+    .importFrom(`http://127.0.0.1:${address.port}/source.git`)
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  try {
+    await accepted;
+    const active = (await readdir(root)).find((name) =>
+      name.startsWith(`.artifacts-import-${process.pid}-`),
+    );
+    expect(active).toBeDefined();
+    // Obtain a PID which has actually exited, rather than guessing a free PID.
+    const { stdout } = await exec(process.execPath, [
+      "-e",
+      "process.stdout.write(String(process.pid))",
+    ]);
+    const abandoned = `.artifacts-stage-${stdout}-ABCDEF`;
+    await mkdir(path.join(root, abandoned));
+    second = await startGitSidecar(root);
+    expect(await readdir(root)).toContain(active);
+    expect(await readdir(root)).not.toContain(abandoned);
+    await writeFile(path.join(root, active!, "still-owned"), "untouched");
+  } finally {
+    release();
+    expect(await importing).toBeInstanceOf(Error);
+    await second?.close();
+    await first.close();
+    origin.closeAllConnections();
+    await new Promise<void>((resolve) => origin.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);

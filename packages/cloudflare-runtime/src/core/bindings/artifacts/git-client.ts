@@ -364,7 +364,9 @@ export class GitClient {
       // Clone into a private, atomically reserved sibling. Even if another
       // process creates the final path during the clone, cleanup only touches
       // the directory we own, never that other process's repository.
-      const staged = await mkdtemp(path.join(path.dirname(this.repository), ".artifacts-import-"));
+      const staged = await mkdtemp(
+        path.join(path.dirname(this.repository), `.artifacts-import-${process.pid}-`),
+      );
       // An import may carry credentials. Never let Git redirect them to a
       // different destination (or silently expand the requested network access).
       const args = [

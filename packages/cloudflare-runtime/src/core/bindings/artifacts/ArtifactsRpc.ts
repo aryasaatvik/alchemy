@@ -99,12 +99,14 @@ export class ArtifactsRepositoryMethods
 {
   readonly #binding: Artifacts;
   readonly #name: string;
+  readonly #id: string;
   readonly #diagnostics: boolean;
 
-  constructor(binding: Artifacts, name: string, diagnostics = false) {
+  constructor(binding: Artifacts, name: string, id: string, diagnostics = false) {
     super();
     this.#binding = binding;
     this.#name = name;
+    this.#id = id;
     this.#diagnostics = diagnostics;
   }
 
@@ -115,6 +117,14 @@ export class ArtifactsRepositoryMethods
         ? trace.run("native-get", () => this.#binding.get(this.#name))
         : this.#binding.get(this.#name));
       using _lifetime = trace ? trace.lifetime(repository) : repository;
+      // A fresh session must never transfer an old handle to a replacement repository.
+      if ((await repository.info()).id !== this.#id) {
+        throw Object.assign(new Error(`Artifacts repository ${this.#name} no longer exists`), {
+          name: "ArtifactsError",
+          code: "NOT_FOUND",
+          numericCode: 10200,
+        });
+      }
       return await (trace
         ? trace.run(name === "createToken" ? "native-createToken" : "native-call", () =>
             operation(repository),
@@ -209,7 +219,11 @@ export class ArtifactsBindingProxy extends RpcTarget {
     }
   }
 
-  async getMethods(name: string, diagnostics = false): Promise<ArtifactsRepositoryWireOperations> {
-    return new ArtifactsRepositoryMethods(this.#binding, name, diagnostics);
+  async getMethods(
+    name: string,
+    id: string,
+    diagnostics = false,
+  ): Promise<ArtifactsRepositoryWireOperations> {
+    return new ArtifactsRepositoryMethods(this.#binding, name, id, diagnostics);
   }
 }

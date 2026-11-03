@@ -124,7 +124,11 @@ const fixture = () => {
 
 type RemoteArtifacts = {
   getMetadata(name: string, diagnostics?: boolean): Promise<ArtifactsRepositoryMetadataResult>;
-  getMethods(name: string, diagnostics?: boolean): Promise<ArtifactsRepositoryWireOperations>;
+  getMethods(
+    name: string,
+    id: string,
+    diagnostics?: boolean,
+  ): Promise<ArtifactsRepositoryWireOperations>;
 };
 const connect = (proxy: ArtifactsBindingProxy) => {
   const channel = new MessageChannel();
@@ -149,7 +153,7 @@ describe("Artifacts remote binding", () => {
     using session = connect(new ArtifactsBindingProxy(api.binding));
     expect(await session.client.getMetadata("starter")).toEqual({ ok: true, metadata });
     expect(api.disposed).toBe(1);
-    using methods = await session.client.getMethods("starter");
+    using methods = await session.client.getMethods("starter", metadata.id);
     api.updateInfo({ ...metadata, description: "changed" });
     expect(value(await methods.info())).toEqual({ ...metadata, description: "changed" });
     expect(value(await methods.createToken("read", 3600))).toMatchObject({
@@ -182,7 +186,7 @@ describe("Artifacts remote binding", () => {
   it("serializes Git records, blob bytes, missing values and operation errors", async () => {
     const api = fixture();
     using session = connect(new ArtifactsBindingProxy(api.binding));
-    using methods = await session.client.getMethods("starter");
+    using methods = await session.client.getMethods("starter", metadata.id);
     expect(value(await methods.readTree("tree"))).toEqual(tree);
     expect(value(await methods.readCommit("commit"))).toEqual(commit);
     expect(value(await methods.log({ ref: "main", limit: 2, offset: 1 }))).toEqual([commit]);
@@ -214,8 +218,8 @@ describe("Artifacts local facade", () => {
         list: remote.list.bind(remote),
         delete: remote.delete.bind(remote),
         artifactsGetMetadata: remote.getMetadata.bind(remote),
-        artifactsGetMethods: async (name) =>
-          Object.assign(await remote.getMethods(name), {
+        artifactsGetMethods: async (name, id) =>
+          Object.assign(await remote.getMethods(name, id), {
             [Symbol.dispose]: () => {
               disposed = true;
             },
@@ -229,6 +233,23 @@ describe("Artifacts local facade", () => {
       },
     };
   };
+
+  it("rejects old handles after replacement, including token creation, and disposes fresh capabilities", async () => {
+    const api = fixture();
+    const facade = local(api);
+    using repository = await facade.binding.get("starter");
+    const before = api.disposed;
+    api.updateInfo({ ...metadata, id: "replacement-id" });
+    await expect(repository.readFile({ path: "fixture.bin" })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      numericCode: 10200,
+    });
+    await expect(repository.createToken("write")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(api.calls).toEqual([]);
+    expect(api.disposed).toBe(before + 2);
+    using replacement = await facade.binding.get("starter");
+    expect((await replacement.info()).id).toBe("replacement-id");
+  });
 
   it("exposes the full native API, reconstructs Blobs and disposes its local methods stub", async () => {
     const api = fixture();
@@ -443,8 +464,8 @@ describe("Artifacts diagnostic safety", () => {
         },
       });
       using session = connect(new ArtifactsBindingProxy(api.binding));
-      using original = await session.client.getMethods("starter");
-      using traced = await session.client.getMethods("starter", true);
+      using original = await session.client.getMethods("starter", metadata.id);
+      using traced = await session.client.getMethods("starter", metadata.id, true);
       const before = JSON.parse(await original.createToken("read", 60));
       const { diagnostics, ...after } = JSON.parse(await traced.createToken("read", 60));
       expect(after).toEqual(before);
