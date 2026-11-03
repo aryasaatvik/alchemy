@@ -4,11 +4,13 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Artifacts from "../../bindings/artifacts/Artifacts.ts";
@@ -155,11 +157,21 @@ it.live(
           modules: [{ name: "main.js", type: "ESModule", content: script }],
           bindings: [Artifacts.local({ binding: "REPOS", namespace: "cleanup" })],
         });
-        const created = yield* worker.fetchJson<{ remote: string }>("/", {
+        const created = yield* worker.fetchJson<{ remote: string; token: string }>("/", {
           method: "POST",
           body: JSON.stringify({ op: "create" }),
         });
         remote = created.remote;
+        expect(
+          yield* HttpClient.get(`${remote}/info/refs?service=git-upload-pack`, {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`x-access-token:${created.token}`).toString("base64")}`,
+            },
+          }).pipe(
+            Effect.flatMap((response) => Effect.as(response.text, response.status)),
+            Effect.provide(NodeHttpClient.layerNodeHttp),
+          ),
+        ).toBe(200);
         expect(
           yield* Effect.promise(() =>
             readdir(`${storage.disk.path}/artifacts`, { recursive: true }),
@@ -179,11 +191,15 @@ it.live(
         ),
       ).toBe(false);
       expect(
-        yield* Effect.promise(() =>
-          fetch(`${remote}/info/refs?service=git-upload-pack`).then(
-            () => true,
-            () => false,
-          ),
+        // Like Workerd.test, avoid Undici's macOS setTypeOfService exception
+        // outside the fetch promise when connecting during shutdown. This
+        // probe owns its HTTP agent and consumes any unexpected response.
+        yield* HttpClient.get(`${remote}/info/refs?service=git-upload-pack`).pipe(
+          // Receiving any response proves the listener is still open, even if
+          // its body fails while draining. Only connection/request failure is false.
+          Effect.flatMap((response) => response.text.pipe(Effect.ignore, Effect.as(true))),
+          Effect.catch(() => Effect.succeed(false)),
+          Effect.provide(NodeHttpClient.layerNodeHttp),
         ),
       ).toBe(false);
     }).pipe(Effect.scoped),
