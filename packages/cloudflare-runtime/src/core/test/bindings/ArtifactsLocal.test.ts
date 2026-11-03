@@ -176,7 +176,7 @@ it.live(
           yield* Effect.promise(() =>
             readdir(`${storage.disk.path}/artifacts`, { recursive: true }),
           ),
-        ).toContainEqual(expect.stringMatching(/\.git\/HEAD$/));
+        ).toContainEqual(expect.stringMatching(/\.git[\\/]HEAD$/));
         return storage.disk.path;
       }).pipe(Effect.provide(runtimeLayer), Effect.scoped);
       expect(
@@ -247,7 +247,8 @@ it.effect(
   { timeout: 60000 },
 );
 
-it.effect(
+// Native process shutdown and Windows storage-lock retries need wall-clock time.
+it.live(
   "shares the Git backend across two live runtimes with separate listeners and concurrent bindings",
   () =>
     Effect.gen(function* () {
