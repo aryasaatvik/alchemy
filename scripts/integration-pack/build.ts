@@ -170,7 +170,18 @@ export const withCleanBuildOutputs = async <A>(
   use: () => Promise<A>,
 ): Promise<A> => {
   const targets = await packageBuildOutputs(workspace);
-  const backup = await mkdtemp(join(workspace.directory, ".alchemy-integration-build-"));
+  // Keep quarantine on this filesystem and out of a parent repository's
+  // submodule dirty-state check. Both native repositories ignore .cache/.tmp.
+  const backupRoot = [".cache", ".tmp"]
+    .map((name) => join(workspace.directory, name))
+    .find((root) => !targets.some((target) => target === root || within(target, root)));
+  if (backupRoot === undefined)
+    throw new Error(`${workspace.name} has no safe output quarantine directory`);
+  if ((await exists(backupRoot)) && (await lstat(backupRoot)).isSymbolicLink()) {
+    throw new Error(`${workspace.name} output quarantine crosses a symbolic link: ${backupRoot}`);
+  }
+  await mkdir(backupRoot, { recursive: true });
+  const backup = await mkdtemp(join(backupRoot, "alchemy-integration-build-"));
   const moved = new Map<string, string>();
   let prepared = false;
   let result: A;

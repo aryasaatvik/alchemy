@@ -633,14 +633,19 @@ build(import.meta.dirname, { readme: true, thirdPartyLicenses: true, steps: [] }
 await Bun.write("tsconfig.tsbuildinfo", "fresh metadata");
 `,
       );
-      await writeFile(join(directory, ".gitignore"), "lib/\n*.tsbuildinfo\n");
+      await writeFile(join(directory, ".gitignore"), "lib/\n*.tsbuildinfo\n.cache/\n.tmp/\n");
       await trackAll(directory);
       await mkdir(join(directory, "lib"));
       await writeFile(join(directory, "lib", "obsolete.js"), "export const removed = true;\n");
       await writeFile(join(directory, "tsconfig.tsbuildinfo"), "old metadata");
       const workspace = { name: manifest.name, directory, manifest, localDependencies: [] };
+      const gitState = await run(["git", "status", "--porcelain"], { cwd: directory, quiet: true });
       const archive = await withCleanBuildOutputs(workspace, async () => {
         expect(await Bun.file(join(directory, "lib", "obsolete.js")).exists()).toBe(false);
+        // An enclosing repository must not observe temporary submodule dirtiness.
+        expect(await run(["git", "status", "--porcelain"], { cwd: directory, quiet: true })).toBe(
+          gitState,
+        );
         expect(await Bun.file(join(directory, "tsconfig.tsbuildinfo")).exists()).toBe(false);
         await run([process.execPath, "scripts/build.ts"], { cwd: directory });
         return stageCollectionPackage({
@@ -675,7 +680,9 @@ await Bun.write("tsconfig.tsbuildinfo", "fresh metadata");
         backup = /replacement output retained at (.+)$/.exec(error.message)?.[1];
         expect(backup).toBeDefined();
         // Quarantine must share the output filesystem even when OS temp is elsewhere.
-        expect(backup?.startsWith(join(directory, ".alchemy-integration-build-"))).toBe(true);
+        expect(backup?.startsWith(join(directory, ".cache", "alchemy-integration-build-"))).toBe(
+          true,
+        );
         expect(await Bun.file(join(backup!, "failed-0", "failed.js")).text()).toBe(
           "failed replacement",
         );
