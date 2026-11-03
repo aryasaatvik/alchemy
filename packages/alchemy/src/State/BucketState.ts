@@ -130,11 +130,12 @@ interface HeldLease {
 const amortizeCheck = (
   checkLive: Effect.Effect<void, StateStoreError>,
   ttlMs: number,
+  expiresAt: () => number,
 ): Effect.Effect<void, StateStoreError> => {
   let lastOkAt: number | undefined;
   return Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
-    if (lastOkAt !== undefined && now - lastOkAt < ttlMs) return;
+    if (lastOkAt !== undefined && now - lastOkAt < ttlMs && now < expiresAt()) return;
     yield* checkLive;
     lastOkAt = now;
   });
@@ -263,7 +264,7 @@ export const makeBucketState = (options: BucketStateOptions) =>
         }
 
         heldInProcess.add(token);
-        const cursor = { version, lost: false };
+        const cursor = { version, expiresAt: fresh.expiresAt, lost: false };
         const gate = Semaphore.makeUnsafe(1);
 
         const renew = Semaphore.withPermits(
@@ -279,7 +280,10 @@ export const makeBucketState = (options: BucketStateOptions) =>
               { ifVersion: cursor.version },
             );
             if (next === undefined) cursor.lost = true;
-            else cursor.version = next;
+            else {
+              cursor.version = next;
+              cursor.expiresAt = renewedAt + LEASE_TTL_MS;
+            }
           }),
         ).pipe(Effect.ignore);
 
@@ -310,9 +314,11 @@ export const makeBucketState = (options: BucketStateOptions) =>
                 return yield* lostError(stack, stage);
               }
               cursor.version = reclaimed;
+              cursor.expiresAt = observedAt + LEASE_TTL_MS;
               return;
             }
             cursor.version = existing.version;
+            cursor.expiresAt = existing.record.expiresAt;
           }),
         );
 
@@ -345,7 +351,9 @@ export const makeBucketState = (options: BucketStateOptions) =>
           Effect.forkIn(leaseScope),
         );
 
-        return { checkLive: amortizeCheck(verify, LEASE_CHECK_TTL_MS) } satisfies HeldLease;
+        return {
+          checkLive: amortizeCheck(verify, LEASE_CHECK_TTL_MS, () => cursor.expiresAt),
+        } satisfies HeldLease;
       });
 
     // One lease per (stack, stage), taken on the first operation and held

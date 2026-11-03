@@ -1,7 +1,9 @@
 import { describe, expect, it } from "@alchemy.run/test";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import { makeBucketState, type BucketObjects } from "@/State/BucketState.ts";
+import { StateStoreError } from "@/State/State.ts";
 
 const LEASE_TTL_MS = 60_000;
 const stack = "bucket-state-test";
@@ -123,6 +125,37 @@ describe("makeBucketState lease", { tags: ["unit"] }, () => {
         const error = yield* Effect.flip(holder.setOutput({ stack, stage, value: { step: 3 } }));
         expect(error.message).toContain("was lost mid-run");
       }).pipe(Effect.scoped, Effect.provideService(Clock.Clock, clock));
+    }),
+  );
+  it.effect("never caches write permission past expiry after failed renewals and takeover", () =>
+    Effect.gen(function* () {
+      const bucket = memoryBucket();
+      let failedRenewals = 0;
+      let failRenew = true;
+      const objects: BucketObjects = {
+        ...bucket,
+        write: (key, body, condition) =>
+          key.endsWith("/__lease__.json") && condition && "ifVersion" in condition && failRenew
+            ? Effect.suspend(() => {
+                failedRenewals++;
+                return Effect.fail(new StateStoreError({ message: "transient renewal failure" }));
+              })
+            : bucket.write(key, body, condition),
+      };
+      yield* Effect.gen(function* () {
+        const holder = yield* makeStore(objects);
+        yield* holder.setOutput({ stack, stage, value: "first" });
+        yield* TestClock.adjust(LEASE_TTL_MS - 1);
+        expect(failedRenewals).toBeGreaterThan(0);
+        yield* holder.getOutput({ stack, stage });
+        yield* TestClock.adjust(2);
+        failRenew = false;
+        const other = yield* makeStore(bucket);
+        yield* other.setOutput({ stack, stage, value: "second" });
+        const error = yield* Effect.flip(holder.setOutput({ stack, stage, value: "stale" }));
+        expect(error.message).toContain("was lost mid-run");
+        expect(yield* other.getOutput({ stack, stage })).toBe("second");
+      }).pipe(Effect.scoped);
     }),
   );
 });
