@@ -259,3 +259,11 @@ quotas or availability; local acceptance does not establish those cloud properti
 The implementation is adapted from Cloudflare Workers SDK / Miniflare revision
 `d8899ac4c85ff839d73daa9055a76a36248cd2e3` under its MIT license. The repository's
 `THIRD_PARTY_LICENSES.md` contains the copyright and license notice, also included in package builds.
+
+## Immutable managed dev runs
+
+`ALCHEMY_DEV_WATCH=false` suppresses stack import file watching in Node and Bun. It leaves
+`alchemy dev` planning, apply, host lifetime and error handling unchanged. The default is `true`;
+interactive development still reloads when a project dependency changes. Use this only when the
+supervisor freezes source for the lifetime of a run. `ALCHEMY_DEV_ONCE` remains a separate
+single-pass mode that changes apply rendering and exits after apply.

@@ -66,6 +66,9 @@ const devOnce = Config.String("ALCHEMY_DEV_ONCE").pipe(
   Effect.map((value) => value === "1" || value === "true"),
 );
 
+/** Immutable managed runs keep dev hosts alive without observing source edits. */
+export const devWatch = Config.Boolean("ALCHEMY_DEV_WATCH").pipe(Config.withDefault(true));
+
 const runDev = Effect.fn(function* (options: DevOptions) {
   const snapshot = yield* Alchemist.importStack(options.main).pipe(
     Effect.flatMap((stack) =>
@@ -254,7 +257,7 @@ const makeExec = () => {
     yield* forwardSidecarLogs;
     // Single-pass runs park nothing. Otherwise Node reloads the stack graph in
     // this process; Bun exits for the supervisor to respawn (see above).
-    return yield* (yield* devOnce)
+    return yield* (yield* devOnce) || !(yield* devWatch)
       ? devKeepAlive(runDev(options))
       : process.versions.bun !== undefined
         ? runBunDevWatcher(options)
