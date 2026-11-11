@@ -33,6 +33,7 @@
  *   an engine-driven converge.
  */
 
+import { immutableRun } from "alchemy/Bundle/Bundle";
 import { diffBindings, havePropsChanged, isResolved, stripEffects } from "alchemy/Diff";
 import { canonicalHash } from "alchemy/Local/LocalProvider";
 import * as RpcProvider from "alchemy/Local/RpcProvider";
@@ -231,6 +232,7 @@ export const makeDevWatchProvider = <
     providersUrl,
     Effect.gen(function* () {
       const scope = yield* Effect.scope;
+      const immutable = yield* immutableRun.pipe(Effect.orDie);
       const ambient = yield* Effect.context<never>();
 
       // The floci override context (emulator endpoint, dummy credentials,
@@ -340,6 +342,9 @@ export const makeDevWatchProvider = <
           attrs,
         };
         watches.set(input.id, entry);
+        // The live reconcile already published the immutable artifact. Keep
+        // its registry entry for diff/reconcile, without opening a watcher.
+        if (immutable) return;
         // One watcher-driven reconcile, UNLOCKED: callers take the per-id lock.
         const rerun = Effect.gen(function* () {
           const previous = entry.attrs as Attrs | undefined;

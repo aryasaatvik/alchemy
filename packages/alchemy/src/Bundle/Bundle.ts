@@ -15,10 +15,13 @@ import { StackContext } from "../StackContext.ts";
 import { LogAnnotation } from "../Util/LogAnnotation.ts";
 import { sha256, sha256Object } from "../Util/sha256.ts";
 import { bundleAnalyzerPlugin, type BundleAnalyzerPluginOptions } from "./BundleAnalyzerPlugin.ts";
+import * as IsolatedBuild from "./IsolatedBuild.ts";
 import { namespaceImportPlugin } from "./NamespaceImportPlugin.ts";
 import { purePlugin, type PurePluginOptions } from "./PurePlugin.ts";
 import { rawPlugin } from "./RawPlugin.ts";
 import { unreachableChunksPlugin } from "./UnreachableChunksPlugin.ts";
+
+export { immutableRun } from "./IsolatedBuild.ts";
 
 /**
  * `resolve.conditionNames` for a bundle that runs on bun / node.
@@ -368,6 +371,17 @@ export const build = (
     Effect.flatMap(bundleOutputFromFiles),
   );
 
+/** One-shot native compiler for a supervisor-owned immutable run. */
+export const buildIsolated = (
+  inputOptions: rolldown.InputOptions,
+  outputOptions?: rolldown.OutputOptions,
+  extra?: BundleExtraOptions,
+): Effect.Effect<BundleOutput, BundleError> =>
+  resolveOutputOptions(outputOptions).pipe(
+    Effect.flatMap((options) => IsolatedBuild.build(inputOptions, options, extra)),
+    buildPermits.withPermits(1),
+  );
+
 /**
  * Watch for changes in the bundle and return a stream of bundle output.
  * @param inputOptions - The input options for the bundle.
@@ -518,7 +532,7 @@ export const virtualEntryPlugin = Effect.gen(function* () {
 
   return (content: (importPath: string) => string) => {
     const entries = new Map<string, string>();
-    return {
+    const plugin = {
       name: "alchemy:virtual-entry",
       options: {
         order: "pre",
@@ -578,6 +592,8 @@ export const virtualEntryPlugin = Effect.gen(function* () {
         },
       },
     } satisfies rolldown.Plugin;
+    IsolatedBuild.registerVirtualEntry(plugin, content);
+    return plugin;
   };
 });
 

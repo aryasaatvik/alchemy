@@ -190,6 +190,20 @@ export const makeFunctionBundler = Effect.gen(function* () {
       }
       return matchesConfiguredExternal(configuredExternal, moduleId, parentId, isResolved);
     };
+    const external =
+      !(yield* Bundle.immutableRun.pipe(Effect.orDie)) || typeof configuredExternal === "function"
+        ? externalOption
+        : [
+            /^@aws-sdk\//,
+            ...[...installRoots].map(
+              (root) => new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`),
+            ),
+            ...(configuredExternal === undefined
+              ? []
+              : Array.isArray(configuredExternal)
+                ? configuredExternal
+                : [configuredExternal]),
+          ];
 
     const entryPlugin = props.isExternal
       ? undefined
@@ -208,7 +222,7 @@ export default await bootstrap(entrypoint);
         ...inputOptions,
         input: realMain,
         cwd,
-        external: externalOption,
+        external,
         platform: "node",
         // The zip runtime is Node (`nodejs22.x` | `nodejs24.x`): resolve with
         // the node conditions and let rolldown supply the import kind. A
@@ -316,7 +330,10 @@ export default await bootstrap(entrypoint);
         return yield* prebuiltCode(realMain);
       }
       const plan = yield* resolveBundlePlan(props, options);
-      const bundleOutput = yield* Bundle.build(plan.inputOptions, plan.outputOptions, plan.extra);
+      const build = (yield* Bundle.immutableRun.pipe(Effect.orDie))
+        ? Bundle.buildIsolated
+        : Bundle.build;
+      const bundleOutput = yield* build(plan.inputOptions, plan.outputOptions, plan.extra);
       return yield* finishBundle(plan, bundleOutput);
     });
 

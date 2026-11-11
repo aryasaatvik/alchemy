@@ -267,3 +267,15 @@ The implementation is adapted from Cloudflare Workers SDK / Miniflare revision
 interactive development still reloads when a project dependency changes. Use this only when the
 supervisor freezes source for the lifetime of a run. `ALCHEMY_DEV_ONCE` remains a separate
 single-pass mode that changes apply rendering and exits after apply.
+
+`ALCHEMY_DEV_IMMUTABLE=true` additionally compiles Lambda ZIP, WebFunction and MicroVM programs in
+one-shot child processes, bounded by `ALCHEMY_BUNDLE_CONCURRENCY`. Each child exits before its
+artifact is returned, releasing the native compiler graph. AWS local providers keep the artifact
+published by their initial reconcile without starting file watchers or a second Lambda compile.
+The default is `false`, retaining interactive watch and hot swapping. Set both switches when the
+supervisor freezes all source for a managed run.
+
+Immutable compilation preserves declarative Rolldown options and Alchemy's generated entry modules.
+Executable user plugins and callback-valued build options cannot cross the process boundary and
+fail the build explicitly; use interactive mode for those configurations. Prebuilt (`bundle: false`)
+directories and container-image functions retain their existing packaging/build paths.

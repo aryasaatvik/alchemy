@@ -97,7 +97,10 @@ export const bundleMicrovmProgram = Effect.fn(function* ({
   const cwd = yield* findCwdForBundle(realMain);
 
   const buildBundle = Effect.fn(function* (entry: string, plugins?: rolldown.RolldownPluginOption) {
-    return yield* Bundle.build(
+    const compile = (yield* Bundle.immutableRun.pipe(Effect.orDie))
+      ? Bundle.buildIsolated
+      : Bundle.build;
+    return yield* compile(
       {
         ...build?.input,
         input: entry,
