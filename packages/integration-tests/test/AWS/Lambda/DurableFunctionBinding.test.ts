@@ -585,3 +585,66 @@ test.provider(
     }),
   { timeout: 120_000, exclusive: true },
 );
+
+test.provider(
+  "bundled Lambda listeners retain registration services and fresh invocation scopes",
+  (stack) =>
+    Effect.gen(function* () {
+      const { default: ListenerProbe } = yield* Effect.promise(
+        () => import("./fixtures/listener-probe.ts"),
+      );
+      yield* stack.deploy(ListenerProbe);
+      const props = reconciled.get("ListenerProbe") as FunctionZipProps;
+      const entry = yield* writeBundle(props, "alchemy-listener-context-");
+      yield* setRuntimeEnv({
+        ...baseRuntimeEnv("http://127.0.0.1:0"),
+        ALCHEMY_AWS_ACCOUNT_ID: "123456789012",
+      });
+
+      const module = (yield* Effect.promise(() => import(pathToFileURL(entry).href))) as {
+        default: (event: object, context: object) => Promise<{ statusCode: number; body: string }>;
+      };
+      for (const [index, route] of ["deferred", "direct", "serve", "deferred"].entries()) {
+        const requestId = `request-${index}`;
+        const response = yield* Effect.promise(() =>
+          module.default(
+            {
+              version: "2.0",
+              rawPath: `/${route}`,
+              rawQueryString: "",
+              requestContext: {
+                http: { method: "GET", path: `/${route}`, sourceIp: "127.0.0.1" },
+                domainName: "example.lambda-url.us-east-1.on.aws",
+              },
+              headers: { host: "example.lambda-url.us-east-1.on.aws" },
+            },
+            { awsRequestId: requestId, getRemainingTimeInMillis: () => 30_000 },
+          ),
+        );
+        expect(response.statusCode).toBe(200);
+        const body = JSON.parse(response.body);
+        expect(body).toMatchObject({
+          config: route,
+          initialized: 1,
+          finalized: index,
+          instanceFinalized: false,
+          requestBuild: index + 1,
+          freshScope: true,
+          distinctInitScope: true,
+          requestId,
+          hasRuntimeContext: true,
+          runtimeAccountId: "123456789012",
+        });
+        if (route === "deferred") {
+          expect(body).toMatchObject({
+            initConfig: "deferred",
+            stage: "test",
+            accountId: "123456789012",
+            region: "us-east-1",
+            initHasHandlerContext: false,
+          });
+        }
+      }
+    }),
+  { timeout: 45_000, exclusive: true },
+);

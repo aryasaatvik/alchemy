@@ -394,3 +394,55 @@ for (const runtimeManagementConfig of [
     { tags: ["unit", "local", "provider:aws:lambda"] },
   );
 }
+test.provider(
+  "precreate validates its injected environment before creating cloud resources",
+  () =>
+    Effect.gen(function* () {
+      const cloud = makeCloud();
+      const exit = yield* Effect.exit(
+        precreate("OverBudgetStub", cloud, [], { maxEnvironmentBytes: 32 }),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(cloud.requests).toEqual([]);
+    }),
+  { tags: ["unit", "provider:aws", "provider:aws:lambda", "local"] },
+);
+
+test.provider(
+  "precreate keeps timeout telemetry configuration in its final environment",
+  () =>
+    Effect.gen(function* () {
+      const cloud = makeCloud();
+      yield* precreate("TimeoutStub", cloud, [], { timeoutMargin: Duration.millis(123) });
+      expect(cloud.createFunctionBodies[0]?.Environment).toMatchObject({
+        Variables: { ALCHEMY_LAMBDA_TIMEOUT_GRACE_MS: "1000", ALCHEMY_AWS_ACCOUNT_ID: ACCOUNT_ID },
+      });
+    }),
+  { tags: ["unit", "provider:aws", "provider:aws:lambda", "local"] },
+);
+
+test.provider(
+  "reconcile validates the complete UTF-8 environment before mutating cloud resources",
+  () =>
+    Effect.gen(function* () {
+      const cloud = makeCloud();
+      const provider = yield* Provider.findProvider(Lambda.Function);
+      const exit = yield* Effect.exit(
+        provider
+          .reconcile({
+            id: "OverBudget",
+            fqn: "OverBudget",
+            instanceId: "0123456789abcdef0123456789abcdef",
+            news: { main: "./handler.ts", env: { UNICODE: "नमस्ते".repeat(300) } },
+            olds: undefined,
+            output: undefined,
+            bindings: [],
+            session: { ...noopSession, note: () => Effect.void },
+          })
+          .pipe(Effect.provide(cloud.layer)),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(cloud.requests).toEqual([]);
+    }),
+  { tags: ["unit", "provider:aws", "provider:aws:lambda", "local"] },
+);

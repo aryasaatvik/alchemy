@@ -116,7 +116,13 @@ it("reproduces beta.85 execution names, native envelope and workflow Invoke byte
   const params = { text: '["already JSON"]', count: 3 };
   expect(encodeDurableEnvelope("Golden", params)).toBe(golden.native);
   expect(
-    readDurableInputPayload({ DurableExecutionArn: durableArn, InputPayload: golden.native }),
+    readDurableInputPayload({
+      DurableExecutionArn: durableArn,
+      CheckpointToken: "golden-checkpoint",
+      InitialExecutionState: {
+        Operations: [{ Type: "EXECUTION", ExecutionDetails: { InputPayload: golden.native } }],
+      },
+    }),
   ).toEqual(JSON.parse(golden.native));
 });
 
@@ -174,7 +180,8 @@ it("interrupts beta.85 WaitStarted sleepers and resumes old suspended activities
   expect(sends[0]?.body).toBe("{}");
   expect(
     golden.histories.suspension.some(
-      (event) => event.EventType === "StepStarted" && event.Name === "suspension/1",
+      (event) =>
+        event.EventType === "StepStarted" && "Name" in event && event.Name === "suspension/1",
     ),
   ).toBe(true);
   expect(await suspend.run(encodeExit(Exit.succeed("approved")))).toBe(golden.callback.success);

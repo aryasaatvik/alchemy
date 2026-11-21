@@ -10,7 +10,8 @@ import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import { driftActions, repairDrift } from "../drift.ts";
 import DurableFlowLive, { DurableFlow } from "./fixtures/durable-handler";
-import { testOptions } from "./fixtures/workflow-floci/test-options.ts";
+
+const testOptions = { providers: AWS.providers() };
 const { test, beforeAll, afterAll } = Test.make(testOptions);
 const sharedStack = Core.scratchStack(testOptions, "LambdaDurable");
 

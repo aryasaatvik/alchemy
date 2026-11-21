@@ -290,9 +290,15 @@ if (
   typeof ${m("@alchemy.run/cloudflare/CloudflareEnvironment")}.CloudflareEnvironment !== "function" ||
   typeof ${m("@alchemy.run/cloudflare/Workers/Sources/Vite")}.makeViteSource !== "function" ||
   typeof ${m("@alchemy.run/aws/Endpoint")}.of !== "function" ||
+  typeof ${m("@alchemy.run/aws/Lambda/Function")}.lambdaEnvironmentSize !== "function" ||
   typeof ${m("@alchemy.run/aws/Lambda/HttpServer")}.isFunctionURLEvent !== "function"
 ) {
   throw new Error("packed Bun runtime surfaces did not load");
+}
+const { lambdaEnvironmentSize } = ${m("@alchemy.run/aws/Lambda/Function")};
+const environment = { TEXT: "false", SECRET: Redacted.make("नमस्ते") };
+if (lambdaEnvironmentSize(environment) !== new TextEncoder().encode(JSON.stringify({ TEXT: "false", SECRET: "नमस्ते" })).byteLength) {
+  throw new Error("packed Lambda environment budget must measure the upstream serialized values");
 }
 console.log(\`Bun resolved \${consumerSubpaths.length} upstream consumer subpaths\`);
 `;

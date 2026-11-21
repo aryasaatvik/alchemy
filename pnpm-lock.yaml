@@ -11233,6 +11233,9 @@ importers:
       '@alchemy.run/turso':
         specifier: workspace:*
         version: link:../turso
+      '@aws/durable-execution-sdk-js':
+        specifier: 2.6.0
+        version: 2.6.0
       '@cloudflare/containers':
         specifier: 'catalog:'
         version: 0.3.7
