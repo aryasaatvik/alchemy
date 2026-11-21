@@ -36,6 +36,7 @@ import * as Scope from "effect/Scope";
 import {
   DurableExecutionContext,
   DurableStep,
+  DurableStepAttempt,
   type DurableCallbackOptions,
   type DurableRetryPolicy,
   type DurableStepOptions,
@@ -136,7 +137,14 @@ interface NativeRetryDecision {
 
 interface NativeStepConfig {
   retryStrategy?: (error: Error, attemptCount: number) => NativeRetryDecision;
-  semantics?: string;
+  semantics?: "AT_MOST_ONCE_PER_RETRY" | "AT_LEAST_ONCE_PER_RETRY";
+}
+
+interface NativeDeserializer {
+  deserialize(
+    data: string | undefined,
+    context: { entityId: string; durableExecutionArn: string },
+  ): Promise<unknown>;
 }
 
 interface NativeDurableContext {
@@ -144,9 +152,10 @@ interface NativeDurableContext {
   executionContext: { readonly durableExecutionArn: string };
   step<T>(
     name: string,
-    fn: (stepContext: unknown) => Promise<T>,
+    fn: (stepContext: { attempt: number }) => Promise<T>,
     config?: NativeStepConfig,
   ): Promise<T>;
+  invoke<T>(name: string, functionName: string, input: unknown): Promise<T>;
   wait(name: string, duration: { seconds: number }): Promise<void>;
   waitForCallback<T>(
     name: string,
@@ -154,11 +163,13 @@ interface NativeDurableContext {
     config?: {
       timeout?: { seconds: number };
       heartbeatTimeout?: { seconds: number };
+      serdes?: NativeDeserializer;
     },
   ): Promise<T>;
 }
 
 interface NativeDurableSdk {
+  defaultSerdes: NativeDeserializer;
   withDurableExecution: (
     handler: (event: any, context: NativeDurableContext) => Promise<any>,
   ) => (event: any, context: lambda.Context) => Promise<any>;
@@ -214,7 +225,14 @@ const toNativeRetryStrategy = (
 const toNativeStepConfig = (options: DurableStepOptions<any>): NativeStepConfig | undefined => {
   if (!options.retry && !options.semantics) return undefined;
   return {
-    ...(options.retry ? { retryStrategy: toNativeRetryStrategy(options.retry) } : {}),
+    ...(options.retry
+      ? {
+          retryStrategy: (error: Error, attempt: number) =>
+            options.retryWhen && !options.retryWhen(error)
+              ? { shouldRetry: false }
+              : toNativeRetryStrategy(options.retry!)(error, attempt),
+        }
+      : {}),
     ...(options.semantics
       ? {
           semantics:
@@ -226,12 +244,24 @@ const toNativeStepConfig = (options: DurableStepOptions<any>): NativeStepConfig 
   };
 };
 
-const wrapDurableContext = (dctx: NativeDurableContext): DurableStep["Service"] => ({
+/** @internal Adapt the SDK's context to Effect operations. */
+export const wrapDurableContext = (
+  dctx: NativeDurableContext,
+  json: NativeDeserializer,
+): DurableStep["Service"] => ({
+  invoke: <T>(name: string, functionName: string, input: unknown) =>
+    Effect.tryPromise(() => dctx.invoke<T>(name, functionName, input)).pipe(Effect.orDie),
   step: <T>(options: DurableStepOptions<T>) =>
     Effect.tryPromise(() =>
       dctx.step<T>(
         options.name,
-        () => Effect.runPromise(options.effect),
+        async (stepContext) => {
+          const exit = await Effect.runPromiseExit(
+            options.effect.pipe(Effect.provideService(DurableStepAttempt, stepContext.attempt)),
+          );
+          if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
+          return exit.value;
+        },
         toNativeStepConfig(options),
       ),
     ).pipe(Effect.orDie),
@@ -245,6 +275,13 @@ const wrapDurableContext = (dctx: NativeDurableContext): DurableStep["Service"] 
         options.name,
         (callbackId) => Effect.runPromise(options.submitter(callbackId)),
         {
+          // sendCallbackSuccess writes JSON, while the SDK's callback default
+          // is raw text. Let the SDK decode once, including child-context
+          // replay, and keep an absent/empty wire result as undefined.
+          serdes: {
+            deserialize: (data, context) =>
+              json.deserialize(data === "" ? undefined : data, context),
+          },
           ...(options.timeout !== undefined
             ? { timeout: { seconds: toSeconds(options.timeout)! } }
             : {}),
@@ -279,7 +316,7 @@ type WrappedDurableHandler = (event: any, context: lambda.Context) => Promise<an
 export const makeDurableListener = (options: {
   name: string;
   run: (input: unknown) => Effect.Effect<unknown>;
-}): Effect.Effect<FunctionListener> =>
+}): Effect.Effect<FunctionListener<any, HandlerContext>> =>
   // `Effect.sync`, NOT `Effect.gen` yielding `loadDurableSdk`: the listener is
   // CONSTRUCTED when the host resolves `runtimeContext.exports`, which happens
   // at PLAN/DEPLOY time (`Platform.ts` does `yield* runtimeContext.exports`).
@@ -308,7 +345,7 @@ export const makeDurableListener = (options: {
                   options.run(params).pipe(
                     Effect.provide(
                       Layer.mergeAll(
-                        Layer.succeed(DurableStep, wrapDurableContext(dctx)),
+                        Layer.succeed(DurableStep, wrapDurableContext(dctx, sdk.defaultSerdes)),
                         Layer.succeed(DurableExecutionContext, {
                           executionArn: dctx.executionContext.durableExecutionArn,
                         }),
@@ -337,12 +374,7 @@ export const makeDurableListener = (options: {
           ),
     );
 
-    // `HandlerContext` is a runtime-only requirement satisfied unconditionally
-    // by the Lambda dispatcher, which provides it (and `Scope`) to every
-    // listener's returned effect. Cast the listener down to the `Req = never`
-    // `FunctionListener` so the requirement never leaks into the host's init
-    // effect — the exact contract `serve`/`makeFunctionHttpHandler` rely on.
-    return ((event: any) => {
+    return (event: any) => {
       if (!isDurableExecutionEvent(event)) return;
       const payload = readDurableInputPayload(event);
       const envelope = asDurableEnvelope(payload);
@@ -364,6 +396,6 @@ export const makeDurableListener = (options: {
         // Lambda interprets. A rejection here is a protocol-level failure —
         // let it surface as an invocation error.
         return yield* Effect.promise(() => run(event, context));
-      }).pipe(withInvocationDeadline({ interrupt: false }));
-    }) as unknown as FunctionListener;
+      }).pipe(withInvocationDeadline({ interrupt: false }), Effect.orDie);
+    };
   });
