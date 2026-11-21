@@ -186,6 +186,7 @@ export interface Delete<R extends ResourceLike = ResourceLike> extends BaseNode<
 export interface NoopUpdate<R extends ResourceLike = ResourceLike> extends ApplyNodeBase<R> {
   action: "noop";
   props: R["Props"];
+  /** Recheck the identity if a fresh upstream output promotes this noop. */
   deferredAdoption?: { adopt: boolean };
   state: CreatedResourceState | UpdatedResourceState;
 }
@@ -1848,8 +1849,8 @@ const makePlan = <A>(
           deferredAdoption:
             (provider.read || provider.observe) &&
             !reusesMigratedFqn &&
-            // A replacement targets a new physical identity, which may belong
-            // to someone else — admit it like a fresh create.
+            // Replacements and promoted noops can resolve to a new physical
+            // identity, which must pass the same admission as a fresh create.
             (node.action === "replace" ||
               node.action === "noop" ||
               (node.action === "create" &&

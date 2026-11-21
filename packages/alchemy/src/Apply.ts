@@ -319,6 +319,7 @@ export const apply = <P extends Plan>(
   | Output.MissingSourceError
   | StateStoreError
   | DestroyError
+  | OwnedBySomeoneElse
   | CredentialsRequired
   | AuthError
   | NeedsReauth
