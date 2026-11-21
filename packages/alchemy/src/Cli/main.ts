@@ -197,9 +197,11 @@ const cli = Command.run(root, {
 // Logging is built before command parsing, so select its directory alongside
 // the other early CLI capabilities. The command parser still validates the flag.
 const flagArgs = argv.slice(0, argv.indexOf("--") === -1 ? undefined : argv.indexOf("--"));
-const dataDirFlag = flagArgs.findIndex(
-  (arg) => arg === "--data-dir" || arg.startsWith("--data-dir="),
-);
+const stackCommandsWithDataDir = new Set<CommandName>(["deploy", "destroy", "plan", "dev"]);
+const dataDirFlag =
+  requestedCommand !== undefined && stackCommandsWithDataDir.has(requestedCommand)
+    ? flagArgs.findIndex((arg) => arg === "--data-dir" || arg.startsWith("--data-dir="))
+    : -1;
 const initialDataDir =
   dataDirFlag === -1
     ? undefined

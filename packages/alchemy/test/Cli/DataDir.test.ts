@@ -102,4 +102,16 @@ describe("CLI --data-dir", { tags: ["unit", "local"] }, () => {
       }).pipe(Effect.scoped, Effect.provide(PlatformServices)),
     { timeout: 120_000 },
   );
+  it.live("rejecting --data-dir on another command leaves its path untouched", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "alchemy-data-dir-home-" });
+      const project = yield* fs.makeTempDirectoryScoped({ prefix: "alchemy-data-dir-project-" });
+      const dataDir = path.join(project, "rejected");
+      const result = yield* run(project, home, ["profile", "list", "--data-dir", dataDir]);
+      expect(result.exitCode).not.toBe(0);
+      expect(yield* fs.exists(dataDir)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(PlatformServices)),
+  );
 });

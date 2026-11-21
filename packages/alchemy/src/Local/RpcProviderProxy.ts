@@ -11,6 +11,7 @@ import { AlchemyContext } from "../AlchemyContext.ts";
 import type { ProviderService } from "../Provider.ts";
 import type { ResourceLike } from "../Resource.ts";
 import { Stack } from "../Stack.ts";
+import { sha256 } from "../Util/sha256.ts";
 import { ProviderSessionConfig } from "./ProviderSessionConfig.ts";
 import { unwrapRpcHandlers } from "./RpcSerialization.ts";
 import type { RpcProxyApi, SessionProviderCounts } from "./RpcServer.ts";
@@ -105,6 +106,10 @@ interface SessionEntry {
   connection?: Connection;
   closed: boolean;
 }
+
+/** Keep the local lookup key free of the provider environment's secret values. */
+export const sessionCacheKey = (kind: "dev" | "test", environment: string) =>
+  sha256(environment).pipe(Effect.map((digest) => `${kind}:${digest}`));
 
 const make = Effect.fn(function* (spawnerUrl: string) {
   const client = yield* HttpClient.HttpClient;
@@ -226,7 +231,8 @@ const make = Effect.fn(function* (spawnerUrl: string) {
           : {}),
       });
       if (owner?.closed) return yield* Effect.die("Test sidecar handle is closed");
-      const key = `${owner === undefined ? "dev" : "test"}:${environment}`;
+      const key = yield* sessionCacheKey(owner === undefined ? "dev" : "test", environment);
+      if (owner?.closed) return yield* Effect.die("Test sidecar handle is closed");
       let entry = sessions.get(key);
       if (entry === undefined) {
         entry = {

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { AlchemyContext } from "@/AlchemyContext.ts";
 import * as ProviderSessionConfig from "@/Local/ProviderSessionConfig.ts";
+import { sessionCacheKey } from "@/Local/RpcProviderProxy.ts";
 import {
   fromEnv,
   encodeSessionEnvironment,
@@ -94,6 +95,21 @@ describe("Local.RpcServerEnvironment", { tags: ["unit", "local"] }, () => {
       );
       expect(observed).toEqual(aws);
       expect(encodeSessionEnvironment(sessionEnv)).not.toBe(encoded);
+    }),
+  );
+
+  it.effect("uses a secret-free key while retaining provider session identity", () =>
+    Effect.gen(function* () {
+      const encode = (value: string) =>
+        encodeSessionEnvironment({
+          ...sessionEnv,
+          providers: { AWS: { local: { lambda: { environment: { TOKEN: value } } } } },
+        });
+      const key = yield* sessionCacheKey("dev", encode("first-secret"));
+      expect(key).toMatch(/^dev:[a-f0-9]{64}$/);
+      expect(key).toBe(yield* sessionCacheKey("dev", encode("first-secret")));
+      expect(key).not.toBe(yield* sessionCacheKey("dev", encode("second-secret")));
+      expect(key).not.toBe(yield* sessionCacheKey("test", encode("first-secret")));
     }),
   );
 
