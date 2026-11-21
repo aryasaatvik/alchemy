@@ -1763,7 +1763,8 @@ export const Function: Platform<
   FunctionShape,
   FunctionContext<FunctionInitServices, FunctionInvocationServices>,
   {},
-  FunctionZipProps
+  FunctionZipProps,
+  unknown
 > &
   LookupMethod<Function> = Platform(FunctionTypeId, {
   // The custom-domain front door integrates the Function's own ARN, so it

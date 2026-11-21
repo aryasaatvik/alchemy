@@ -148,6 +148,8 @@ export interface Platform<
   RuntimeContext extends BaseRuntimeContext,
   BaseShape = {},
   InlineProps extends Resource["Props"] = Resource["Props"],
+  // Tagged hosts can opt into init dependencies their caller must supply.
+  AdditionalInitServices = never,
 > extends Effect.Effect<Resource & RuntimeContext, never, Resource> {
   Type: Resource["Type"];
   Provider: Provider<Resource>;
@@ -155,7 +157,11 @@ export interface Platform<
   ref(id: string, options?: { stage?: string; stack?: string }): Effect.Effect<Resource>;
 
   <Self, Shape, Deps = never>(): {
-    <const Id extends string, PropsReq = never, InitReq = never>(
+    <
+      const Id extends string,
+      PropsReq = never,
+      InitReq extends Services | PlatformServices | Resource | AdditionalInitServices = never,
+    >(
       id: Id,
       props:
         | InputProps<InlineProps>
@@ -194,7 +200,12 @@ export interface Platform<
       };
   };
   <Self>(): {
-    <const Id extends string, Shape extends MainShape, PropsReq = never, InitReq = never>(
+    <
+      const Id extends string,
+      Shape extends MainShape,
+      PropsReq = never,
+      InitReq extends Services | PlatformServices | Resource | AdditionalInitServices = never,
+    >(
       id: Id,
       props:
         | InputProps<InlineProps>
@@ -217,7 +228,10 @@ export interface Platform<
     ): Effect.Effect<Resource & Rpc<Self>, never, Resource["Providers"]> &
       Named<Id> &
       PlatformIdentity<Id> & {
-        make<PropsReq = never, InitReq = never>(
+        make<
+          PropsReq = never,
+          InitReq extends Services | PlatformServices | Resource | AdditionalInitServices = never,
+        >(
           props:
             | InputProps<InlineProps>
             | Effect.Effect<InputProps<InlineProps>, ConfigError.ConfigError, PropsReq>,

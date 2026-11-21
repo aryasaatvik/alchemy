@@ -32,23 +32,28 @@ class HostService extends Context.Service<HostService, string>()("Test.ConfigHos
 const boundKeys: string[] = [];
 const reconciledEnv: Array<Record<string, unknown> | undefined> = [];
 
-const ConfigHost: Platform<ConfigHost, HostService, {}, BaseRuntimeContext> = Platform<ConfigHost>(
-  "Test.ConfigHost",
-  {
-    createRuntimeContext: (id) => ({
-      Type: "Test.ConfigHost",
-      id,
-      env: {},
-      hostServices: Layer.succeed(HostService, id),
-      set: (key) =>
-        Effect.sync(() => {
-          boundKeys.push(key);
-          return key;
-        }),
-      get: () => Effect.succeed(undefined),
-    }),
-  },
-);
+const ConfigHost: Platform<
+  ConfigHost,
+  HostService,
+  {},
+  BaseRuntimeContext,
+  {},
+  ConfigHostProps,
+  EmbeddedConfig
+> = Platform<ConfigHost>("Test.ConfigHost", {
+  createRuntimeContext: (id) => ({
+    Type: "Test.ConfigHost",
+    id,
+    env: {},
+    hostServices: Layer.succeed(HostService, id),
+    set: (key) =>
+      Effect.sync(() => {
+        boundKeys.push(key);
+        return key;
+      }),
+    get: () => Effect.succeed(undefined),
+  }),
+});
 
 const providers = Provider.succeed(ConfigHost, {
   list: () => Effect.succeed([]),
