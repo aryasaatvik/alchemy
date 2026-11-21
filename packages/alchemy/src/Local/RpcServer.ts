@@ -187,7 +187,11 @@ const sessionProviders = (resolve: ProviderGroupLoader) =>
           sessionEnv !== undefined
             ? RpcServerEnvironment.decodeSessionEnvironment(sessionEnv)
             : base.stack !== undefined && base.alchemyContext !== undefined
-              ? { stack: base.stack, alchemyContext: base.alchemyContext }
+              ? {
+                  stack: base.stack,
+                  alchemyContext: base.alchemyContext,
+                  providers: base.providers,
+                }
               : undefined;
         if (resolved === undefined) {
           return Promise.reject(
