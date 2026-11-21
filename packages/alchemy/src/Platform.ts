@@ -155,11 +155,7 @@ export interface Platform<
   ref(id: string, options?: { stage?: string; stack?: string }): Effect.Effect<Resource>;
 
   <Self, Shape, Deps = never>(): {
-    <
-      const Id extends string,
-      PropsReq = never,
-      InitReq extends Services | PlatformServices | Resource = never,
-    >(
+    <const Id extends string, PropsReq = never, InitReq = never>(
       id: Id,
       props:
         | InputProps<InlineProps>
@@ -198,12 +194,7 @@ export interface Platform<
       };
   };
   <Self>(): {
-    <
-      const Id extends string,
-      Shape extends MainShape,
-      PropsReq = never,
-      InitReq extends Services | PlatformServices | Resource = never,
-    >(
+    <const Id extends string, Shape extends MainShape, PropsReq = never, InitReq = never>(
       id: Id,
       props:
         | InputProps<InlineProps>
@@ -226,7 +217,7 @@ export interface Platform<
     ): Effect.Effect<Resource & Rpc<Self>, never, Resource["Providers"]> &
       Named<Id> &
       PlatformIdentity<Id> & {
-        make<PropsReq = never, InitReq extends Services | PlatformServices | Resource = never>(
+        make<PropsReq = never, InitReq = never>(
           props:
             | InputProps<InlineProps>
             | Effect.Effect<InputProps<InlineProps>, ConfigError.ConfigError, PropsReq>,

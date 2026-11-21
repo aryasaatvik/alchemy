@@ -404,3 +404,26 @@ test.provider("host services remain available to each host's init", (stack) =>
     expect(observed).toEqual(["First", "Second"]);
   }),
 );
+
+class EmbeddedConfig extends Context.Service<EmbeddedConfig, string>()("Test.EmbeddedConfig") {}
+
+test.provider("a tagged host can receive app configuration from its caller", (stack) =>
+  Effect.gen(function* () {
+    let observed: string | undefined;
+    class TaggedHost extends ConfigHost<TaggedHost>()(
+      "TaggedConfigHost",
+      {},
+      Effect.gen(function* () {
+        observed = yield* EmbeddedConfig;
+        return {};
+      }),
+    ) {}
+
+    type RequiresEmbeddedConfig =
+      EmbeddedConfig extends Effect.Services<typeof TaggedHost> ? true : false;
+    const requiresEmbeddedConfig: RequiresEmbeddedConfig = true;
+    expect(requiresEmbeddedConfig).toBe(true);
+    yield* stack.deploy(TaggedHost.pipe(Effect.provideService(EmbeddedConfig, "embedded")));
+    expect(observed).toBe("embedded");
+  }),
+);
