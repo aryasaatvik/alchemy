@@ -3356,7 +3356,7 @@ describe("engine-level adoption", { tags: ["unit", "local"] }, () => {
   }
 
   test(
-    "updates and noops never defer admission",
+    "only a promoted noop carries the deferred ownership policy",
     Effect.gen(function* () {
       yield* seed({
         Updated: replaceable("Updated", { props: { string: "a" } }),
@@ -3372,7 +3372,7 @@ describe("engine-level adoption", { tags: ["unit", "local"] }, () => {
       expect(plan.resources.Updated!.action).toBe("update");
       expect(plan.resources.Unchanged!.action).toBe("noop");
       expect((plan.resources.Updated as any).deferredAdoption).toBeUndefined();
-      expect((plan.resources.Unchanged as any).deferredAdoption).toBeUndefined();
+      expect(plan.resources.Unchanged!.deferredAdoption).toEqual({ adopt: false });
     }),
   );
 

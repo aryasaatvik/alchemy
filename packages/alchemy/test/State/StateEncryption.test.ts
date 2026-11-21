@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
+import { AlchemyContext } from "@/AlchemyContext";
 import { apply } from "@/Apply";
 import { provideFreshArtifactStore } from "@/Artifacts";
 import * as Plan from "@/Plan";
@@ -565,16 +566,14 @@ describe("local state with StateEncryption", { tags: ["unit", "local"] }, () => 
       const path = yield* Path.Path;
       const { keyring } = memoryKeyring();
       const local = { stack: "local-state-encryption-test", stage: "test" };
-      const file = path.join(
-        initialCwd,
-        ".alchemy",
-        "state",
-        local.stack,
-        local.stage,
-        "Database.json",
-      );
+      const dotAlchemy = yield* fs.makeTempDirectoryScoped({ prefix: "alchemy-state-encryption-" });
+      const stateDir = path.join(dotAlchemy, "state");
+      const file = path.join(stateDir, local.stack, local.stage, "Database.json");
       const withEncryption = (service: StateEncryptionService) =>
-        makeLocalState().pipe(Effect.provide(Layer.succeed(StateEncryption, service)));
+        makeLocalState().pipe(
+          Effect.provideService(AlchemyContext, { dotAlchemy, dev: false, adopt: false }),
+          Effect.provideService(StateEncryption, service),
+        );
 
       const sealing = yield* withEncryption(keyring);
       yield* sealing.set({ ...local, fqn: "Database", value: record as never });
@@ -582,12 +581,10 @@ describe("local state with StateEncryption", { tags: ["unit", "local"] }, () => 
       // The format record sits beside the state directory, which holds only
       // stacks: earlier versions list every entry of it as one.
       expect(
-        JSON.parse(
-          yield* fs.readFileString(path.join(initialCwd, ".alchemy", LOCAL_STORE_FORMAT_FILE)),
-        ),
+        JSON.parse(yield* fs.readFileString(path.join(dotAlchemy, LOCAL_STORE_FORMAT_FILE))),
       ).toEqual({ format: STATE_STORE_FORMAT });
-      for (const entry of yield* fs.readDirectory(path.join(initialCwd, ".alchemy", "state"))) {
-        const info = yield* fs.stat(path.join(initialCwd, ".alchemy", "state", entry));
+      for (const entry of yield* fs.readDirectory(stateDir)) {
+        const info = yield* fs.stat(path.join(stateDir, entry));
         expect(`${entry}: ${info.type}`).toBe(`${entry}: Directory`);
       }
 
@@ -600,7 +597,7 @@ describe("local state with StateEncryption", { tags: ["unit", "local"] }, () => 
       yield* off.set({ ...local, fqn: "Database", value: read as never });
       expect(yield* fs.readFileString(file)).toBe(JSON.stringify(encodeState(record), null, 2));
       yield* off.deleteStack({ stack: local.stack });
-    }).pipe(Effect.provide(PlatformServices)),
+    }).pipe(Effect.scoped, Effect.provide(PlatformServices)),
   );
 
   // LocalState.ts readState: a stale file is written back after the read it
