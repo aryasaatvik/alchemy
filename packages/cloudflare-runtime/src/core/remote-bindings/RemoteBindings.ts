@@ -63,7 +63,14 @@ export const RemoteBindingsLive = Layer.effect(
         if (prefetched) {
           prefetches.delete(hash);
         }
-        const deploy = prefetched ? Fiber.join(prefetched) : remoteWorker.deploy(json);
+        const deploy = prefetched
+          ? Fiber.join(prefetched).pipe(
+              Effect.catchIf(
+                (error) => error._tag === "ApiError" && error.timeoutMs !== undefined,
+                () => remoteWorker.deploy(json),
+              ),
+            )
+          : remoteWorker.deploy(json);
         return yield* deploy.pipe(
           Effect.flatMap((result) => HttpServerResponse.json({ ok: true, result })),
           Effect.tapCause((cause) => cause.pipe(Cause.pretty, Effect.logError)),

@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import { Service } from "../../bindings/index.ts";
 import * as RemoteBindings from "../../remote-bindings/RemoteBindings.ts";
 import * as RemoteWorker from "../../remote-bindings/RemoteWorker.ts";
+import { ApiError } from "../../RuntimeError.shared.ts";
 import { localRuntimeLayer, startTestWorker } from "../helpers/runtime.ts";
 
 /**
@@ -33,6 +34,7 @@ import { localRuntimeLayer, startTestWorker } from "../helpers/runtime.ts";
  */
 
 interface EdgeState {
+  prefetchError?: ApiError;
   /** number of times RemoteWorker.deploy was invoked (i.e. preview sessions created) */
   deployCount: number;
   /** base URL of the fake edge server; set by each test before starting a worker */
@@ -52,6 +54,7 @@ const state: EdgeState = {
 const resetState = (staleResponse: EdgeState["staleResponse"]) =>
   Effect.sync(() => {
     state.deployCount = 0;
+    state.prefetchError = undefined;
     state.edgeUrl = "";
     state.staleResponse = staleResponse;
     state.edgeResponse = undefined;
@@ -67,8 +70,9 @@ const StubRemoteWorker = Layer.succeed(
   RemoteWorker.RemoteWorker,
   RemoteWorker.RemoteWorker.of({
     deploy: () =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         state.deployCount++;
+        if (state.deployCount === 1 && state.prefetchError) return yield* state.prefetchError;
         return {
           url: state.edgeUrl,
           headers: { "x-preview-generation": String(state.deployCount) },
@@ -145,6 +149,40 @@ const testLayer = RemoteBindings.RemoteBindingsLive.pipe(
 );
 
 layer(testLayer, { excludeTestServices: true })("RemoteBindings stale session", (it) => {
+  it.effect(
+    "surfaces a denied background upload without redeploying",
+    () =>
+      Effect.gen(function* () {
+        yield* resetState({ status: 400, body: "error code: 1031" });
+        state.prefetchError = ApiError.make({ subtag: "PreviewUpload", message: "Unauthorized" });
+        yield* startFakeEdge;
+        const worker = yield* startWorkerWithRemoteBinding("prefetch-upload-denied");
+        const result = yield* fetchBody(worker);
+        expect(result.status).toBe(500);
+        expect(result.body).toBe("Internal Server Error");
+        expect(state.deployCount).toBe(1);
+      }).pipe(Effect.scoped),
+    { timeout: 30_000 },
+  );
+  it.effect(
+    "retries a timed-out background upload when the binding is first requested",
+    () =>
+      Effect.gen(function* () {
+        yield* resetState({ status: 400, body: "error code: 1031" });
+        state.prefetchError = ApiError.make({
+          subtag: "PreviewUpload",
+          message: "Preview upload timed out",
+          timeoutMs: 30_000,
+        });
+        yield* startFakeEdge;
+        const worker = yield* startWorkerWithRemoteBinding("prefetch-upload-timeout");
+        const result = yield* fetchBody(worker);
+        expect(result.status).toBe(200);
+        expect(result.body).toBe("ok:2");
+        expect(state.deployCount).toBe(2);
+      }).pipe(Effect.scoped),
+    { timeout: 30_000 },
+  );
   it.effect(
     "recovers when the edge returns 400 'Invalid Workers Preview configuration'",
     () =>

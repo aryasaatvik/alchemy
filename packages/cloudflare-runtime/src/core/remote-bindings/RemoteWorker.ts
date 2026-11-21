@@ -203,6 +203,7 @@ const sandboxApi = <A, E, R>(
             subtag,
             message,
             hint: "The request timed out after 30 seconds.",
+            timeoutMs: 30_000,
           }),
         ),
     }),

@@ -45,6 +45,7 @@ export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
   subtag: Schema.String,
   message: Schema.String,
   hint: Schema.optional(Schema.String),
+  timeoutMs: Schema.optional(Schema.Number),
   // `Defect` keeps any value and encodes it as JSON, so an error inside
   // a serialized event (see `WorkerdEvent`) never fails to encode.
   detail: Schema.optional(Schema.Defect()),

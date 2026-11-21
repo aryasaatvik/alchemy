@@ -5,9 +5,24 @@ import {
   makeErrorEnvelope,
   makeErrorResponse,
 } from "../../internal/response.shared.ts";
-import { ConfigError, SystemError } from "../../RuntimeError.shared.ts";
+import { ApiError, ConfigError, SystemError } from "../../RuntimeError.shared.ts";
 
 describe("response.shared", () => {
+  it.effect("preserves a preview timeout across the runtime response", () =>
+    Effect.gen(function* () {
+      const response = makeErrorResponse(
+        new ApiError({
+          subtag: "PreviewUpload",
+          message: "Preview upload timed out after 30 seconds.",
+          timeoutMs: 30_000,
+        }),
+      );
+      const error = yield* Effect.tryPromise(() => decodeResponse(response)).pipe(Effect.flip);
+      expect(error).toMatchObject({
+        cause: { _tag: "ApiError", subtag: "PreviewUpload", timeoutMs: 30_000 },
+      });
+    }),
+  );
   it("makeErrorEnvelope encodes a ConfigError", () => {
     const error = new ConfigError({ subtag: "Bad", message: "nope" });
     const envelope = makeErrorEnvelope(error);
