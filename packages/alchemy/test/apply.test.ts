@@ -12376,3 +12376,79 @@ describe("planned noops re-evaluate after upstream updates", { tags: ["unit", "l
     }),
   );
 });
+
+describe("provisional noop admission", { tags: ["unit", "local"] }, () => {
+  interface Sink extends Resource<
+    "Test.ProvisionalNoopSink",
+    { version: string },
+    { version: string }
+  > {}
+  const Sink = Resource<Sink>("Test.ProvisionalNoopSink");
+  const writes: string[] = [];
+  const { test } = Test.make({
+    providers: Layer.mergeAll(
+      TestLayers(),
+      Provider.succeed(Sink, {
+        diff: () => Effect.succeed({ action: "noop" as const }),
+        observe: ({ news }) =>
+          Effect.succeed(
+            isResolved(news) && news.version !== "1"
+              ? Unowned({ version: news.version })
+              : undefined,
+          ),
+        reconcile: ({ news }) =>
+          Effect.sync(() => {
+            writes.push(news.version);
+            return { version: news.version };
+          }),
+        delete: () => Effect.void,
+      }),
+    ),
+  });
+  const program = (code: string, allowAdoption = false) =>
+    Effect.gen(function* () {
+      const source = yield* VersionedTarget("Source", { code });
+      const sink = yield* Sink("Sink", { version: source.version }).pipe(adopt(allowAdoption));
+      return { sink };
+    });
+
+  test.provider("a missing dependency leaves a provisional noop unchanged", (stack) =>
+    Effect.gen(function* () {
+      yield* stack.deploy(program("first"));
+      const plan = yield* stack.plan(program("second"));
+      const sink = plan.resources.Sink;
+      if (sink.action !== "noop") throw new Error("expected provisional noop");
+      const missing = Output.of({
+        Type: VersionedTarget.Type,
+        FQN: "Missing",
+        LogicalId: "Missing",
+        Namespace: undefined,
+      } as VersionedTarget);
+      plan.resources.Sink = { ...sink, props: { ...sink.props, missing } };
+      const result = yield* apply(plan);
+      expect(result.sink.version).toBe("1");
+      yield* stack.destroy();
+    }),
+  );
+
+  test.provider("a promoted noop must admit the resolved identity before reconcile", (stack) =>
+    Effect.gen(function* () {
+      yield* stack.deploy(program("first"));
+      const unowned = yield* stack.plan(program("second"));
+      expect(unowned.resources.Sink.action).toBe("noop");
+      const denied = yield* apply(unowned).pipe(
+        Effect.as(false),
+        Effect.catchTag("OwnedBySomeoneElse", () => Effect.succeed(true)),
+      );
+      expect(denied).toBe(true);
+      expect((yield* getState("Sink")).attr).toEqual({ version: "1" });
+      expect(writes).not.toContain("2");
+
+      const adopted = yield* stack.plan(program("third", true));
+      expect(adopted.resources.Sink.action).toBe("noop");
+      expect((yield* apply(adopted)).sink.version).toBe("3");
+      expect(writes).toContain("3");
+      yield* stack.destroy();
+    }),
+  );
+});

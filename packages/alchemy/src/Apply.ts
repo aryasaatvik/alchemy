@@ -264,6 +264,53 @@ const observeResolved = Effect.fn(function* (
   return observed;
 });
 
+/** Admit an identity discovered only after an upstream reconciles. */
+const admitResolvedIdentity = Effect.fn(function* (
+  node: AdmissionNode,
+  news: Record<string, any>,
+  fqn: string,
+  logicalId: string,
+  instanceId: string,
+  previous?: any,
+) {
+  if (node.deferredAdoption === undefined) return;
+  const observed = yield* observeResolved(node, news, fqn, logicalId, instanceId, previous);
+  if (observed !== undefined && Unowned.is(observed) && !node.deferredAdoption.adopt) {
+    return yield* new OwnedBySomeoneElse({
+      message:
+        `Cannot converge resource '${fqn}' (${node.resource.Type}): ` +
+        "its final identity exists in the cloud but is not owned by this " +
+        "stack/stage/logical-id. Re-run with `--adopt` (or " +
+        "wrap the effect in `adopt(true)`) to take it over.",
+      resourceType: node.resource.Type,
+      logicalId,
+    });
+  }
+});
+
+const resolveResourceInputs = (node: Apply, outputs: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const props = yield* Output.evaluate(node.props, outputs);
+    const bindings = excludeDeletedBindings(yield* Output.evaluate(node.bindings, outputs));
+    return { props, bindings };
+  });
+
+const resolveNoopInputs = (node: Apply, outputs: Record<string, unknown>) =>
+  resolveResourceInputs(node, outputs).pipe(
+    Effect.catchTag("MissingSourceError", () => Effect.undefined),
+  );
+
+const hasMovedDependency = (
+  upstreams: ReadonlyArray<string>,
+  prior: Record<string, unknown>,
+  current: Record<string, unknown>,
+) =>
+  upstreams.some(
+    (fqn) =>
+      Object.hasOwn(current, fqn) &&
+      havePropsChanged({ value: prior[fqn] }, { value: current[fqn] }),
+  );
+
 export const apply = <P extends Plan>(
   plan: P,
 ): Effect.Effect<
@@ -799,19 +846,20 @@ const executeNode = (
       if (!inCycle && !upstreamsSettled(upstreams)) {
         yield* waitForDeps(upstreams);
         const priorOutputs = getPriorOutputs();
-        const news = yield* Output.evaluate(node.props, outputs);
-        const bindingOutputs = excludeDeletedBindings(
-          yield* Output.evaluate(node.bindings, outputs),
-        );
-        const priorNews = yield* Output.evaluate(node.props, priorOutputs);
-        const priorBindings = excludeDeletedBindings(
-          yield* Output.evaluate(node.bindings, priorOutputs),
-        );
+        const moved = hasMovedDependency(upstreams, priorOutputs, outputs);
+        const current = moved ? yield* resolveNoopInputs(node, outputs) : undefined;
+        const prior = current && (yield* resolveNoopInputs(node, priorOutputs));
         if (
-          havePropsChanged(priorNews, news) ||
-          diffBindings(priorBindings, bindingOutputs).some((binding) => binding.action !== "noop")
+          current &&
+          prior &&
+          (havePropsChanged(prior.props, current.props) ||
+            diffBindings(prior.bindings, current.bindings).some(
+              (binding) => binding.action !== "noop",
+            ))
         ) {
+          const { props: news, bindings: bindingOutputs } = current;
           const instanceId = node.state.instanceId;
+          yield* admitResolvedIdentity(node, news, fqn, logicalId, instanceId, node.state.attr);
           yield* report("updating");
           const attr = yield* node.provider
             .reconcile({
@@ -1886,21 +1934,24 @@ const converge = Effect.fn(function* (
     for (const [fqn, node] of Object.entries(plan.resources)) {
       if (!tracker[fqn]) continue;
 
-      const newProps = (yield* Output.evaluate(node.props, outputs)) as Record<string, any>;
-
-      const newBindings = excludeDeletedBindings(yield* Output.evaluate(node.bindings, outputs));
-
-      // A provider's deliberate noop may ignore static prop changes. Only
-      // upstream output changes can invalidate it. Once it reconciles, the
-      // tracker records the inputs actually applied, including intermediate
-      // cycle outputs that a later convergence pass must revisit.
       const provisionalNoop = node.action === "noop" && !terminalStatuses.has(fqn);
-      const baselineProps = provisionalNoop
-        ? yield* Output.evaluate(node.props, priorOutputs)
-        : tracker[fqn].props;
-      const baselineBindings = provisionalNoop
-        ? excludeDeletedBindings(yield* Output.evaluate(node.bindings, priorOutputs))
-        : tracker[fqn].bindings;
+      if (
+        provisionalNoop &&
+        !hasMovedDependency(resourceUpstreamFqns(node), priorOutputs, outputs)
+      ) {
+        continue;
+      }
+      const inputs =
+        node.action === "noop"
+          ? yield* resolveNoopInputs(node, outputs)
+          : yield* resolveResourceInputs(node, outputs);
+      if (!inputs) continue;
+      const baseline = provisionalNoop
+        ? yield* resolveNoopInputs(node, priorOutputs)
+        : tracker[fqn];
+      if (!baseline) continue;
+      const { props: newProps, bindings: newBindings } = inputs;
+      const { props: baselineProps, bindings: baselineBindings } = baseline;
 
       const propsChanged = havePropsChanged(baselineProps, newProps);
       const bindingsChanged = JSON.stringify(baselineBindings) !== JSON.stringify(newBindings);
@@ -1917,12 +1968,10 @@ const converge = Effect.fn(function* (
 
       const scopedSession = resourceSession(reportEvent, fqn, logicalId);
 
-      // A cycle peer resolves against its peers' first outputs, so an
-      // identity checked then may resolve differently now. Check the identity
-      // these props resolve to before reconcile claims it.
-      const deferredAdoption = "deferredAdoption" in node ? node.deferredAdoption : undefined;
-      if (propsChanged && deferredAdoption !== undefined) {
-        const observed = yield* observeResolved(
+      // A cycle or provisional noop can resolve to an identity that was not
+      // visible to planning. Admit it before reconcile can claim it.
+      if (propsChanged || node.action === "noop") {
+        yield* admitResolvedIdentity(
           node,
           newProps,
           fqn,
@@ -1930,17 +1979,6 @@ const converge = Effect.fn(function* (
           instanceId,
           tracker[fqn].output,
         );
-        if (observed !== undefined && Unowned.is(observed) && !deferredAdoption.adopt) {
-          return yield* new OwnedBySomeoneElse({
-            message:
-              `Cannot converge resource '${fqn}' (${node.resource.Type}): ` +
-              "its final identity exists in the cloud but is not owned by this " +
-              "stack/stage/logical-id. Re-run with `--adopt` (or " +
-              "wrap the effect in `adopt(true)`) to take it over.",
-            resourceType: node.resource.Type,
-            logicalId,
-          });
-        }
       }
 
       const attr = yield* node.provider

@@ -186,6 +186,7 @@ export interface Delete<R extends ResourceLike = ResourceLike> extends BaseNode<
 export interface NoopUpdate<R extends ResourceLike = ResourceLike> extends ApplyNodeBase<R> {
   action: "noop";
   props: R["Props"];
+  deferredAdoption?: { adopt: boolean };
   state: CreatedResourceState | UpdatedResourceState;
 }
 
@@ -1850,6 +1851,7 @@ const makePlan = <A>(
             // A replacement targets a new physical identity, which may belong
             // to someone else — admit it like a fresh create.
             (node.action === "replace" ||
+              node.action === "noop" ||
               (node.action === "create" &&
                 // Plan reads resolved props itself; without `read`, Apply
                 // admits them through `observe`.
