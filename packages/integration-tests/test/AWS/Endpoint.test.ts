@@ -21,6 +21,7 @@ import { layerWebCrypto } from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
 const stackServices = (dev: boolean, config: Record<string, string> = {}) =>
@@ -111,23 +112,39 @@ describe("AWS service endpoints", { tags: ["unit", "provider:aws"] }, () => {
     }),
   );
 
-  it.effect("builds the emulator ambient for dev and for a supervisor destroy", () =>
+  it.effect("only the local provider mode activates the emulator", () =>
     Effect.gen(function* () {
-      for (const [index, dev] of [true, false].entries()) {
-        const local = {
-          accountId: `10000000004${index}`,
-          region: "eu-west-1",
-          endpoint: "http://localhost:4566",
-        };
-        const ses = `http://127.0.0.1:880${index}/ses`;
+      const local = {
+        accountId: "100000000042",
+        region: "eu-west-1",
+        endpoint: "http://localhost:4566",
+      };
+      const ses = "http://127.0.0.1:8800/ses";
+      yield* Effect.gen(function* () {
+        expect(yield* AWSEnvironment.current).toMatchObject({ ...local, emulator: true });
+        expect(yield* Endpoint.resolve("SESv2")).toBe(ses);
+        expect(yield* Endpoint.resolve("S3")).toBe(local.endpoint);
+      }).pipe(
+        Effect.provide(AWS.providers({ local, serviceEndpoints: { sesv2: ses } })),
+        Effect.provide(stackServices(true)),
+      );
+
+      for (const options of [undefined, { local: {}, serviceEndpoints: {} }, { local }]) {
         yield* Effect.gen(function* () {
-          const ambient = yield* AWSEnvironment.current;
-          expect(ambient).toMatchObject({ ...local, emulator: true });
-          expect(yield* Endpoint.resolve("SESv2")).toBe(ses);
-          expect(yield* Endpoint.resolve("S3")).toBe(local.endpoint);
+          expect((yield* AWSEnvironment.current).accountId).toBe("123456789012");
+          expect(yield* Effect.serviceOption(Endpoint.ServiceEndpoint)).toEqual(Option.none());
+          expect(yield* Endpoint.resolve("SESv2")).toBeUndefined();
         }).pipe(
-          Effect.provide(AWS.providers({ local, serviceEndpoints: { sesv2: ses } })),
-          Effect.provide(stackServices(dev, { ALCHEMY_DEV: "true" })),
+          Effect.provide(AWS.providers(options)),
+          Effect.provideService(
+            AWSEnvironment,
+            Effect.succeed({
+              accountId: "123456789012",
+              region: "us-east-1",
+              credentials: Effect.die("production endpoint fixture must remain offline"),
+            }),
+          ),
+          Effect.provide(stackServices(false, { ALCHEMY_DEV: "1" })),
         );
       }
     }),

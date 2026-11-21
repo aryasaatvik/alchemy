@@ -14,7 +14,6 @@ import {
   Server as WebsiteServer,
   ServerProvider as WebsiteServerProvider,
 } from "alchemy/Website/Server";
-import * as EffectConfig from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
@@ -1942,9 +1941,9 @@ export const providers = (options: ProvidersOptions = {}) =>
     Layer.provideMerge(Layer.fresh(Credentials.fromEnvironment)),
     Layer.provideMerge(Layer.fresh(Endpoint.fromEnvironment)),
     Layer.provideMerge(
-      options.serviceEndpoints === undefined
-        ? Layer.empty
-        : Endpoint.services(options.serviceEndpoints),
+      options.serviceEndpoints && Object.keys(options.serviceEndpoints).length > 0
+        ? Endpoint.services(options.serviceEndpoints)
+        : Layer.empty,
     ),
     Layer.provideMerge(providedOrDefault()),
     Layer.provideMerge(AwsAuth),
@@ -1969,21 +1968,15 @@ export const providers = (options: ProvidersOptions = {}) =>
     // resources stay live through the per-resource binding routing.
     (base) =>
       Layer.unwrap(
-        Effect.gen(function* () {
-          const mode = yield* defaultProviderMode;
-          // The supervisor uses plain destroy with ALCHEMY_DEV=true to
-          // evaluate a dev stack. Lifecycle routing still follows row mode.
-          const dev =
-            mode === "local" ||
-            (options.local !== undefined &&
-              (yield* EffectConfig.Boolean("ALCHEMY_DEV").pipe(EffectConfig.withDefault(false))));
-          return dev ? Layer.merge(base, flociServices()) : base;
-        }),
+        defaultProviderMode.pipe(
+          Effect.map((mode) => (mode === "local" ? Layer.merge(base, flociServices()) : base)),
+        ),
       ),
-    (base) =>
+    Layer.provideMerge(
       options.local === undefined && options.serviceEndpoints === undefined
-        ? base
-        : Layer.fresh(base.pipe(Layer.provideMerge(awsSessionConfig(options)))),
+        ? Layer.empty
+        : awsSessionConfig(options),
+    ),
     Layer.orDie,
   );
 
