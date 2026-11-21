@@ -1,5 +1,11 @@
-import type { Credentials } from "@distilled.cloud/aws/Credentials";
+import { Credentials } from "@distilled.cloud/aws/Credentials";
+import { Endpoint, ServiceEndpoint } from "@distilled.cloud/aws/Endpoint";
 import * as Lambda from "@distilled.cloud/aws/lambda";
+import { Region } from "@distilled.cloud/aws/Region";
+import { Retry } from "@distilled.cloud/aws/Retry";
+import { SigningKeyCache } from "@distilled.cloud/aws/SigV4";
+import { ResponseValidation, StrictDecoder } from "@distilled.cloud/core/response-validation";
+import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
 import type { InputProps } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import {
@@ -20,12 +26,14 @@ import {
 } from "alchemy/Workflows";
 import * as Cause from "effect/Cause";
 import type { ConfigError } from "effect/Config";
+import { ConfigProvider } from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Effectable from "effect/Effectable";
 import * as Exit from "effect/Exit";
-import type * as HttpClient from "effect/http/HttpClient";
+import { Fetch, RequestInit } from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -369,7 +377,7 @@ export const DurableFunctionEngine = <const Hosts extends ReadonlyArray<EngineHo
       WorkflowEngine.WorkflowEngine,
       Effect.gen(function* () {
         const bind = yield* AWSBindings.Bind;
-        const context = yield* Effect.context<LambdaServices>();
+        const context = yield* awsOperationContext;
         const routes = new Map<string, Calls>();
         for (const entry of hosts) {
           const host = "host" in entry ? entry.host : entry;
@@ -460,6 +468,27 @@ interface WorkflowInvocation {
 /** The services the engines call Lambda with. */
 type LambdaServices = Credentials | HttpClient.HttpClient;
 
+/** Retain the host's AWS transport while leaving caller scope and telemetry live. */
+const awsOperationContext = Effect.context<LambdaServices>().pipe(
+  Effect.map(
+    Context.pick(
+      Credentials,
+      Region,
+      HttpClient.HttpClient,
+      Endpoint,
+      ServiceEndpoint,
+      Retry,
+      SigningKeyCache,
+      ResponseValidation,
+      StrictDecoder,
+      ServerRetryHintCapMs,
+      ConfigProvider,
+      Fetch,
+      RequestInit,
+    ),
+  ),
+);
+
 /**
  * The durable function body that runs the given workflows: each invocation is
  * one run of one workflow. Child workflows start in the same function.
@@ -472,7 +501,7 @@ export const makeWorkflowRunner = <ROut, E, RIn>(
   Exclude<RIn, WorkflowEngine.WorkflowEngine> | LambdaServices
 > =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<LambdaServices>();
+    const context = yield* awsOperationContext;
     // Facts about the executing process, read raw: a Config read here would be
     // bound into the function's env at plan time (reserved Lambda keys).
     // oxlint-disable-next-line effecttsgo/process-env-in-effect -- reads the executing Lambda's identity
@@ -808,7 +837,7 @@ const makeCalls = (
  */
 export const makeWorkflowEngine = (functionName: string, qualifier: string) =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<LambdaServices>();
+    const context = yield* awsOperationContext;
     const calls = makeCalls(
       (effect) => Effect.provide(effect, context),
       Effect.succeed(functionName),

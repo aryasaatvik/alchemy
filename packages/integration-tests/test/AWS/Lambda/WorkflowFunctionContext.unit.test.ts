@@ -1,4 +1,3 @@
-import { expect, test } from "bun:test";
 import {
   DurableExecutionContext,
   DurableStep,
@@ -16,6 +15,7 @@ import {
   makeWorkflowEngine,
   makeWorkflowRunner,
 } from "@alchemy.run/aws/Lambda/WorkflowFunction";
+import { expect, it } from "@alchemy.run/test";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
@@ -98,7 +98,7 @@ const withTelemetry =
     );
 
 for (const mode of ["engine", "runner"] as const) {
-  test(`retains caller telemetry and boot AWS authority in ${mode} SDK calls`, async () => {
+  it(`retains caller telemetry and boot AWS authority in ${mode} SDK calls`, async () => {
     const boot = telemetry();
     const caller = telemetry();
     const requests: Array<{
@@ -437,7 +437,7 @@ for (const mode of ["engine", "runner"] as const) {
   });
 }
 
-test("memory engine preserves the same inline Activity services and instance contract", async () => {
+it("memory engine preserves the same inline Activity services and instance contract", async () => {
   const memory = Workflow.make("MemoryContext", {
     payload: { id: Schema.String },
     success: ActivityContextResult,
