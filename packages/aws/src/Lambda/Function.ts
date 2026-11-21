@@ -1101,6 +1101,24 @@ const mergeEventInvokeConfig = (
     } satisfies EventInvokeConfig;
   });
 
+/** Read each known ARN independently of other unresolved invocation settings. */
+const eventInvokeDestinations = (config: unknown): string[] => {
+  if (typeof config !== "object" || config === null || !("destinationConfig" in config)) return [];
+  const destinations = config.destinationConfig;
+  if (typeof destinations !== "object" || destinations === null) return [];
+  return [
+    "OnSuccess" in destinations ? destinations.OnSuccess : undefined,
+    "OnFailure" in destinations ? destinations.OnFailure : undefined,
+  ].flatMap((target) =>
+    typeof target === "object" &&
+    target !== null &&
+    "Destination" in target &&
+    typeof target.Destination === "string"
+      ? [target.Destination]
+      : [],
+  );
+};
+
 /** An event source was used inside a Lambda Web Function. */
 export class EventSourceRequiresFunction extends Data.TaggedError("EventSourceRequiresFunction")<{
   eventSource: string;
@@ -3375,6 +3393,10 @@ export const FunctionProvider = () =>
         stables: ["functionArn", "functionName", "roleName", "qualifiedArn", "aliasName"],
         validate: Effect.fn(function* ({ fqn, news, bindings, output }) {
           if (!Array.isArray(bindings)) return;
+          const destinations =
+            typeof news === "object" && news !== null && "eventInvokeConfig" in news
+              ? eventInvokeDestinations(news.eventInvokeConfig)
+              : [];
           // Environment and mount values can be unresolved independently of IAM grants.
           const grants: Input<ResourceBinding<Function["Binding"]>[]> = bindings.map((binding) => {
             if (Output.isOutput(binding) || Effect.isEffect(binding) || Config.isConfig(binding))
@@ -3382,6 +3404,13 @@ export const FunctionProvider = () =>
             const data = binding.data;
             if (Output.isOutput(data) || Effect.isEffect(data) || Config.isConfig(data))
               return binding;
+            if (
+              (!("action" in binding) || binding.action !== "delete") &&
+              data &&
+              "eventInvokeConfig" in data
+            ) {
+              destinations.push(...eventInvokeDestinations(data.eventInvokeConfig));
+            }
             return { ...binding, data: { policyStatements: data?.policyStatements } };
           });
           if (!isResolved<ResourceBinding<Function["Binding"]>[]>(grants)) return;
@@ -3395,7 +3424,7 @@ export const FunctionProvider = () =>
               : (output?.functionName ?? "x".repeat(64));
           yield* renderFunctionPolicy(
             output?.roleName ?? `${fqn} execution role (physical name pending)`,
-            functionPolicyStatements(grants, []),
+            functionPolicyStatements(grants, destinations),
             functionLogGroupGuard(region, accountId, functionName),
           );
         }),
@@ -3835,10 +3864,7 @@ export const FunctionProvider = () =>
                   : [],
             ),
           );
-          const destinations = [
-            invokeConfig?.destinationConfig?.OnSuccess?.Destination,
-            invokeConfig?.destinationConfig?.OnFailure?.Destination,
-          ].filter((arn): arn is string => typeof arn === "string");
+          const destinations = eventInvokeDestinations(invokeConfig);
 
           // The binding policy and the log-group guard share the execution
           // role's inline-policy budget, so reject an oversized grant set

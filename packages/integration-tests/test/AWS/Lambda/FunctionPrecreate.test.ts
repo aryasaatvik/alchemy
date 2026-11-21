@@ -9,6 +9,11 @@
  */
 import { AWSEnvironment } from "@alchemy.run/aws/Environment";
 import * as Lambda from "@alchemy.run/aws/Lambda";
+import {
+  functionLogGroupGuard,
+  LambdaRolePolicyMaxBytes,
+  renderFunctionPolicy,
+} from "@alchemy.run/aws/Lambda/FunctionPolicy";
 import { Docker } from "@alchemy.run/docker/Docker";
 import { expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
@@ -333,6 +338,60 @@ test.provider(
       expect(cloud.requests.some((request) => request.startsWith("POST iam."))).toBe(false);
     }),
 );
+
+for (const source of ["prop", "binding"] as const) {
+  test.provider(
+    `counts resolved ${source} destination grants in the plan-time policy budget`,
+    (stack) =>
+      Effect.gen(function* () {
+        const cloud = makeCloud();
+        const functionName = "policy-destination";
+        const guard = functionLogGroupGuard("us-east-1", ACCOUNT_ID, functionName);
+        const grant = { Effect: "Allow" as const, Action: ["s3:GetObject"], Resource: [""] };
+        const overhead = (yield* renderFunctionPolicy(functionName, [grant], guard)).sizeBytes;
+        const policyStatements = [
+          {
+            ...grant,
+            Resource: ["x".repeat(LambdaRolePolicyMaxBytes - overhead)],
+          },
+        ];
+        const withoutDestination = yield* renderFunctionPolicy(
+          functionName,
+          policyStatements,
+          guard,
+        );
+        expect(withoutDestination.sizeBytes).toBe(LambdaRolePolicyMaxBytes);
+        const eventInvokeConfig = {
+          destinationConfig: {
+            OnFailure: { Destination: `arn:aws:sqs:us-east-1:${ACCOUNT_ID}:failures` },
+          },
+        };
+        const program = PolicyPlanFunction.pipe(
+          Effect.provide(
+            PolicyPlanFunction.make(
+              {
+                main: new URL("./named-handler.ts", import.meta.url).pathname,
+                functionName,
+                eventInvokeConfig: source === "prop" ? eventInvokeConfig : undefined,
+              },
+              Effect.gen(function* () {
+                const host = yield* Lambda.Function;
+                yield* host.bind`large-policy`({ policyStatements });
+                if (source === "binding") {
+                  yield* host.bind`failure-destination`({ eventInvokeConfig });
+                }
+                return {};
+              }),
+            ),
+          ),
+        );
+        const exit = yield* Effect.exit(stack.plan(program).pipe(Effect.provide(cloud.layer)));
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("LambdaRolePolicyTooLarge");
+        expect(cloud.requests.some((request) => request.startsWith("POST iam."))).toBe(false);
+      }),
+  );
+}
 
 test.provider(
   "validates known policy grants even when binding environment values are unresolved",
