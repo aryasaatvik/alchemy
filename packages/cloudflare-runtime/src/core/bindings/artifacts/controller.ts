@@ -2,7 +2,7 @@
 // Adapted from cloudflare/workers-sdk d8899ac4c85ff839d73daa9055a76a36248cd2e3 (MIT).
 // This file includes third-party code; see /THIRD_PARTY_LICENSES.md.
 import { createServer } from "node:net";
-import { startGitSidecar, type GitSidecar } from "./git-sidecar.ts";
+import type { GitSidecar } from "./git-sidecar.ts";
 
 export interface LocalArtifactsBackend {
   sidecar: GitSidecar;
@@ -19,7 +19,7 @@ export class ArtifactsController {
     }
     let backend = this.backends.get(root);
     if (!backend) {
-      backend = startGitSidecar(root);
+      backend = import("./git-sidecar.ts").then(({ startGitSidecar }) => startGitSidecar(root));
       this.backends.set(root, backend);
       void backend.catch(() => {
         if (this.backends.get(root) === backend) this.backends.delete(root);
