@@ -152,9 +152,12 @@ export async function startGitSidecar(root: string): Promise<GitSidecar> {
     secret,
     close() {
       shutdown.abort();
-      server.closeAllConnections();
       return new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
+        server.close((error: NodeJS.ErrnoException | undefined) => {
+          if (error && error.code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+          else resolve();
+        });
+        server.closeAllConnections();
       });
     },
   };
