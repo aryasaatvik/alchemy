@@ -313,9 +313,11 @@ export interface ProviderService<
    */
   stables?: Extract<keyof Res["Attributes"], string>[];
   /**
-   * Read-only validation on creates, updates and noops. Validate the inputs
-   * known during planning and validate again before provider writes at apply.
-   * Fresh resources have no physical instance or ResourceContext yet.
+   * Read-only plan-time validation on creates, updates and noops. Fresh
+   * resources have no physical instance or ResourceContext yet. Providers
+   * that need to check fully resolved inputs do so in their lifecycle
+   * methods. The Lambda provider calls `renderFunctionPolicy` during
+   * reconcile before its first IAM write.
    */
   validate?(input: {
     id: string;
