@@ -1,11 +1,12 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "@alchemy.run/test";
 import * as Cause from "effect/Cause";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Alchemist from "@/Alchemist/index.ts";
-import { devKeepAlive } from "../../src/Cli/exec";
+import { devKeepAlive, devWatch } from "../../src/Cli/exec";
 import { PlatformServices } from "../../src/Util/PlatformServices";
 
 // The dev loop interrupts a parked run when a stack dependency changes (Node
@@ -73,4 +74,25 @@ describe("devKeepAlive", { tags: ["unit", "local"] }, () => {
         ),
       ),
     ).resolves.toBe(true));
+});
+
+describe("devWatch", { tags: ["unit", "local"] }, () => {
+  for (const [environment, expected] of [
+    [{}, true],
+    [{ ALCHEMY_DEV_WATCH: "false" }, false],
+    [{ ALCHEMY_DEV_WATCH: "true" }, true],
+    [{ ALCHEMY_DEV_ONCE: "1" }, true],
+  ] as const) {
+    test(`decodes ${JSON.stringify(environment)} independently of single-pass mode`, () =>
+      expect(
+        Effect.runPromise(
+          devWatch.pipe(
+            Effect.provideService(
+              ConfigProvider.ConfigProvider,
+              ConfigProvider.fromUnknown(environment),
+            ),
+          ),
+        ),
+      ).resolves.toBe(expected));
+  }
 });
