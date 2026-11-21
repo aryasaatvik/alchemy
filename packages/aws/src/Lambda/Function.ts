@@ -1929,7 +1929,9 @@ export const Function: Platform<
   },
 });
 
-export const FunctionProvider = () =>
+export const FunctionProvider = (options?: {
+  readonly transformEnvironment?: (environment: Record<string, string>) => Record<string, string>;
+}) =>
   Provider.effect(
     Function,
     Effect.gen(function* () {
@@ -2353,13 +2355,14 @@ export const FunctionProvider = () =>
             timeoutMargin: news.timeoutMargin,
             interrupt: interruptsAtTimeout(news),
           });
-          const variables = {
+          const hostEnvironment = {
             ...runtimeEnv,
             ...alchemyEnv,
             ALCHEMY_AWS_ACCOUNT_ID: accountId,
             ...timeoutGraceEnv(timeout.graceMs),
             ...responseStreamEnv(news.functionUrl),
           };
+          const variables = options?.transformEnvironment?.(hostEnvironment) ?? hostEnvironment;
           yield* validateLambdaEnvironment(variables, news.maxEnvironmentBytes);
           return { variables, timeoutSeconds: timeout.timeoutSeconds };
         });

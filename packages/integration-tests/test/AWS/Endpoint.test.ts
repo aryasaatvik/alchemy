@@ -111,6 +111,28 @@ describe("AWS service endpoints", { tags: ["unit", "provider:aws"] }, () => {
     }),
   );
 
+  it.effect("builds the emulator ambient for dev and for a supervisor destroy", () =>
+    Effect.gen(function* () {
+      for (const [index, dev] of [true, false].entries()) {
+        const local = {
+          accountId: `10000000004${index}`,
+          region: "eu-west-1",
+          endpoint: "http://localhost:4566",
+        };
+        const ses = `http://127.0.0.1:880${index}/ses`;
+        yield* Effect.gen(function* () {
+          const ambient = yield* AWSEnvironment.current;
+          expect(ambient).toMatchObject({ ...local, emulator: true });
+          expect(yield* Endpoint.resolve("SESv2")).toBe(ses);
+          expect(yield* Endpoint.resolve("S3")).toBe(local.endpoint);
+        }).pipe(
+          Effect.provide(AWS.providers({ local, serviceEndpoints: { sesv2: ses } })),
+          Effect.provide(stackServices(dev, { ALCHEMY_DEV: "true" })),
+        );
+      }
+    }),
+  );
+
   it.effect("an explicit operation endpoint wins over the service map", () =>
     Effect.gen(function* () {
       expect(yield* Endpoint.resolve("SES")).toBe("http://explicit.local");

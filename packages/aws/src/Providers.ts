@@ -14,6 +14,7 @@ import {
   Server as WebsiteServer,
   ServerProvider as WebsiteServerProvider,
 } from "alchemy/Website/Server";
+import * as EffectConfig from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
@@ -139,7 +140,12 @@ import * as LakeFormation from "./LakeFormation/index.ts";
 import * as Lambda from "./Lambda/index.ts";
 import * as LexV2 from "./LexV2/index.ts";
 import * as LicenseManager from "./LicenseManager/index.ts";
-import { flociDual, flociServices } from "./Local/FlociServices.ts";
+import {
+  awsSessionConfig,
+  flociDual,
+  flociServices,
+  type LocalProfile,
+} from "./Local/FlociServices.ts";
 import { captureAwsEnvironment, pinCollectionEnvironment } from "./Local/ProviderContext.ts";
 import * as Location from "./Location/index.ts";
 import * as Logs from "./Logs/index.ts";
@@ -243,6 +249,8 @@ export interface ProvidersOptions {
    * ```
    */
   readonly serviceEndpoints?: Endpoint.ServiceEndpoints;
+  /** Caller-selected emulator identity, endpoint, and Lambda placement. */
+  readonly local?: LocalProfile;
 }
 
 /**
@@ -1963,9 +1971,19 @@ export const providers = (options: ProvidersOptions = {}) =>
       Layer.unwrap(
         Effect.gen(function* () {
           const mode = yield* defaultProviderMode;
-          return mode === "local" ? Layer.merge(base, flociServices()) : base;
+          // The supervisor uses plain destroy with ALCHEMY_DEV=true to
+          // evaluate a dev stack. Lifecycle routing still follows row mode.
+          const dev =
+            mode === "local" ||
+            (options.local !== undefined &&
+              (yield* EffectConfig.Boolean("ALCHEMY_DEV").pipe(EffectConfig.withDefault(false))));
+          return dev ? Layer.merge(base, flociServices()) : base;
         }),
       ),
+    (base) =>
+      options.local === undefined && options.serviceEndpoints === undefined
+        ? base
+        : Layer.fresh(base.pipe(Layer.provideMerge(awsSessionConfig(options)))),
     Layer.orDie,
   );
 
