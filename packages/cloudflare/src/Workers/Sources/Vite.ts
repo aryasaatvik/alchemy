@@ -203,7 +203,7 @@ export const viteBuildInProcess = (
   Effect.gen(function* () {
     const outputPlugin = yield* viteBuildOutputPlugin({
       entryEnvironment: pluginOptions.viteEnvironments?.entry ?? "ssr",
-      excludeEnvironments: pluginOptions.prerenderWorker ? [PRERENDER_ENVIRONMENT] : [],
+      excludeEnvironments: [PRERENDER_ENVIRONMENT],
     });
     const context = yield* Effect.context<never>();
     yield* Effect.promise(async () => {
