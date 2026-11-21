@@ -11,6 +11,7 @@ import type * as Bundle from "alchemy/Bundle/Bundle";
 import type { PackageInstall } from "alchemy/Bundle/InstalledPackages";
 import { deepEqual, havePropsChanged, isResolved, stripEffects } from "alchemy/Diff";
 import { isScopeEjected, type HttpEffect } from "alchemy/Http";
+import type { Input } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import { createPhysicalName } from "alchemy/PhysicalName";
 import { Platform, type Main, type PlatformProps } from "alchemy/Platform";
@@ -27,6 +28,7 @@ import { zipCode } from "alchemy/Util/zip";
 import type * as lambda from "aws-lambda";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -41,7 +43,6 @@ import * as Stream from "effect/Stream";
 import type * as rolldown from "rolldown";
 import { Assets } from "../Assets.ts";
 import { AWSEnvironment } from "../Environment.ts";
-import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import { syncLogGroupRetention, type LogRetentionConfig } from "../Logs/LogRetention.ts";
 import { managedPolicyArn, partitionOf } from "../Partition.ts";
@@ -67,6 +68,11 @@ import {
   RESPONSE_STREAM_ENV,
   streamifyHandler,
 } from "./HttpServer.ts";
+import {
+  functionPolicyStatements,
+  functionLogGroupGuard,
+  renderFunctionPolicy,
+} from "./internal/FunctionPolicy.ts";
 import {
   HandlerContext,
   InvocationDeadlineState,
@@ -1058,6 +1064,11 @@ export const normalizeFunctionUrl = (
  * execution role and applies bindings; image mode additionally owns the
  * private ECR repository and Lambda pull policy.
  *
+ * Resolved binding grants are compacted without widening any action/resource
+ * pair, and the binding policy plus the log-group guard share a conservative
+ * 10,240-byte inline-policy budget checked before the role's policies are
+ * written.
+ *
  * Zip-packaged functions can be defined in two ways:
  *
  * - **Async** — plain handler export, no Effect runtime in the bundle.
@@ -1747,32 +1758,6 @@ export const Function: Platform<
   },
 });
 
-/**
- * What the function's role needs to deliver async invocation records to a
- * destination: Lambda sends them as the role, so without these a configured
- * `OnFailure` queue silently receives nothing.
- */
-const destinationStatements = (arn: string): IAM.PolicyStatement[] => {
-  const service = arn.split(":")[2];
-  switch (service) {
-    case "sqs":
-      return [{ Effect: "Allow", Action: ["sqs:SendMessage"], Resource: [arn] }];
-    case "sns":
-      return [{ Effect: "Allow", Action: ["sns:Publish"], Resource: [arn] }];
-    case "lambda":
-      return [{ Effect: "Allow", Action: ["lambda:InvokeFunction"], Resource: [arn] }];
-    case "events":
-      return [{ Effect: "Allow", Action: ["events:PutEvents"], Resource: [arn] }];
-    case "s3":
-      return [
-        { Effect: "Allow", Action: ["s3:ListBucket"], Resource: [arn] },
-        { Effect: "Allow", Action: ["s3:PutObject"], Resource: [`${arn}/*`] },
-      ];
-    default:
-      return [];
-  }
-};
-
 export const FunctionProvider = () =>
   Provider.effect(
     Function,
@@ -1819,7 +1804,7 @@ export const FunctionProvider = () =>
         roleName,
         policyName,
         // functionArn,
-        // functionName,
+        functionName,
         bindings,
         destinations,
       }: {
@@ -1838,17 +1823,11 @@ export const FunctionProvider = () =>
         const env = activeBindings
           .map((binding) => binding?.data?.env)
           .reduce((acc, env) => ({ ...acc, ...env }), {});
-        const policyStatements = activeBindings.flatMap(
-          (binding) =>
-            binding?.data?.policyStatements?.map((stmt: IAM.PolicyStatement) => ({
-              ...stmt,
-              Sid: stmt.Sid?.replace(/[^A-Za-z0-9]+/gi, ""),
-            })) ?? [],
-        );
-        policyStatements.push(
-          ...destinations
-            .flatMap(destinationStatements)
-            .map((stmt) => ({ ...stmt, Sid: undefined })),
+        const { accountId, region } = yield* AWSEnvironment.current;
+        const { document } = yield* renderFunctionPolicy(
+          roleName,
+          functionPolicyStatements(bindings, destinations),
+          functionLogGroupGuard(region, accountId, functionName),
         );
         // VPC attachments requested through the binding channel (DECISION
         // #5) — set-union across bindings; merged with the `vpc` prop in
@@ -1874,14 +1853,11 @@ export const FunctionProvider = () =>
           ).values(),
         ];
 
-        if (policyStatements.length > 0) {
+        if (document !== undefined) {
           yield* iam.putRolePolicy({
             RoleName: roleName,
             PolicyName: policyName,
-            PolicyDocument: JSON.stringify({
-              Version: "2012-10-17",
-              Statement: policyStatements,
-            } satisfies IAM.PolicyDocument),
+            PolicyDocument: document,
           });
         } else {
           yield* iam
@@ -2018,16 +1994,7 @@ export const FunctionProvider = () =>
         functionName: string;
       }) {
         const { accountId, region } = yield* AWSEnvironment.current;
-        const document = JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Deny",
-              Action: "logs:CreateLogGroup",
-              Resource: `arn:${partitionOf(region)}:logs:${region}:${accountId}:log-group:/aws/lambda/${functionName}:*`,
-            },
-          ],
-        });
+        const document = functionLogGroupGuard(region, accountId, functionName);
         const observed = yield* iam
           .getRolePolicy({ RoleName: roleName, PolicyName: logGroupGuardPolicyName })
           .pipe(
@@ -3129,6 +3096,32 @@ export const FunctionProvider = () =>
 
       return {
         stables: ["functionArn", "functionName", "roleName", "qualifiedArn", "aliasName"],
+        validate: Effect.fn(function* ({ fqn, news, bindings, output }) {
+          if (!Array.isArray(bindings)) return;
+          // Environment and mount values can be unresolved independently of IAM grants.
+          const grants: Input<ResourceBinding<Function["Binding"]>[]> = bindings.map((binding) => {
+            if (Output.isOutput(binding) || Effect.isEffect(binding) || Config.isConfig(binding))
+              return binding;
+            const data = binding.data;
+            if (Output.isOutput(data) || Effect.isEffect(data) || Config.isConfig(data))
+              return binding;
+            return { ...binding, data: { policyStatements: data?.policyStatements } };
+          });
+          if (!isResolved<ResourceBinding<Function["Binding"]>[]>(grants)) return;
+          const { accountId, region } = yield* AWSEnvironment.current;
+          const functionName =
+            typeof news === "object" &&
+            news !== null &&
+            "functionName" in news &&
+            typeof news.functionName === "string"
+              ? news.functionName
+              : (output?.functionName ?? "x".repeat(64));
+          yield* renderFunctionPolicy(
+            output?.roleName ?? `${fqn} execution role (physical name pending)`,
+            functionPolicyStatements(grants, []),
+            functionLogGroupGuard(region, accountId, functionName),
+          );
+        }),
         diff: Effect.fn(function* ({ id, olds, news: desired, output, oldBindings, newBindings }) {
           // Effect-native runtime exports remain unevaluated during planning.
           // Their identity is represented by the bundle hash, so they must not
@@ -3511,6 +3504,31 @@ export const FunctionProvider = () =>
           const functionArn = output?.functionArn ?? generated.functionArn;
           const policyName = generated.policyName;
 
+          // The prop and every binding's request converge on one config.
+          const invokeConfig = yield* mergeEventInvokeConfig(
+            news.eventInvokeConfig,
+            bindings.flatMap(
+              (binding: ResourceBinding<Function["Binding"]> & { action?: string }) =>
+                binding.action !== "delete" && binding.data?.eventInvokeConfig
+                  ? [binding.data.eventInvokeConfig]
+                  : [],
+            ),
+          );
+          const destinations = [
+            invokeConfig?.destinationConfig?.OnSuccess?.Destination,
+            invokeConfig?.destinationConfig?.OnFailure?.Destination,
+          ].filter((arn): arn is string => typeof arn === "string");
+
+          // The binding policy and the log-group guard share the execution
+          // role's inline-policy budget, so reject an oversized grant set
+          // before the first IAM write instead of failing part-way through.
+          const { accountId, region } = yield* AWSEnvironment.current;
+          yield* renderFunctionPolicy(
+            roleName,
+            functionPolicyStatements(bindings, destinations),
+            functionLogGroupGuard(region, accountId, functionName),
+          );
+
           // State is only a cache: the execution role may have been removed
           // out-of-band (or by a previously interrupted cleanup) while the
           // function output remains persisted. Always observe/ensure the
@@ -3526,16 +3544,6 @@ export const FunctionProvider = () =>
           yield* syncLogGroupGuard({ roleName, functionName });
           yield* ensureLogGroup({ id, functionName, retention: news.logging?.retention });
 
-          // The prop and every binding's request converge on one config.
-          const invokeConfig = yield* mergeEventInvokeConfig(
-            news.eventInvokeConfig,
-            bindings.flatMap(
-              (binding: ResourceBinding<Function["Binding"]> & { action?: string }) =>
-                binding.action !== "delete" && binding.data?.eventInvokeConfig
-                  ? [binding.data.eventInvokeConfig]
-                  : [],
-            ),
-          );
           const {
             env,
             vpc: bindingVpc,
@@ -3546,10 +3554,7 @@ export const FunctionProvider = () =>
             functionArn,
             functionName,
             bindings,
-            destinations: [
-              invokeConfig?.destinationConfig?.OnSuccess?.Destination,
-              invokeConfig?.destinationConfig?.OnFailure?.Destination,
-            ].filter((arn): arn is string => typeof arn === "string"),
+            destinations,
           });
 
           // Both VPC paths (the `vpc` prop and binding-channel requests)
