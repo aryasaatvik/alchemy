@@ -364,3 +364,33 @@ test.provider(
       expect(cloud.requests).toHaveLength(0);
     }),
 );
+for (const runtimeManagementConfig of [
+  { updateRuntimeOn: "Manual", runtimeVersionArn: "new-pin" },
+  { updateRuntimeOn: "Auto" },
+] as const) {
+  test.provider(
+    `precreate pins the serving numbered version before alias creation: ${runtimeManagementConfig.updateRuntimeOn}`,
+    () =>
+      Effect.gen(function* () {
+        const cloud = makeCloud({
+          aliasVersion: runtimeManagementConfig.updateRuntimeOn === "Auto" ? "6" : undefined,
+        });
+        yield* precreate("PinnedAlias", cloud, [], { alias: "live", runtimeManagementConfig });
+        const publish = cloud.requests.findIndex(
+          (r) => r.startsWith("POST ") && r.endsWith("/versions"),
+        );
+        const pin = cloud.requests.findIndex(
+          (r) => r.startsWith("PUT ") && r.endsWith("/runtime-management-config?Qualifier=7"),
+        );
+        const alias = cloud.requests.findIndex(
+          (r) =>
+            (r.startsWith("POST ") && r.endsWith("/aliases")) ||
+            (r.startsWith("PUT ") && r.endsWith("/aliases/live")),
+        );
+        expect(publish).toBeGreaterThan(-1);
+        expect(pin).toBeGreaterThan(publish);
+        expect(alias).toBeGreaterThan(pin);
+      }),
+    { tags: ["unit", "local", "provider:aws:lambda"] },
+  );
+}

@@ -13,6 +13,13 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import type { Providers } from "../Providers.ts";
 import type { Function } from "./Function.ts";
+import {
+  DefaultRuntimeManagementConfig,
+  isSameRuntimeManagementConfig,
+  observeRuntimeManagementConfig,
+  managesRuntime,
+  syncRuntimeManagementConfig,
+} from "./RuntimeManagementConfig.ts";
 
 export interface VersionProps {
   /**
@@ -395,6 +402,15 @@ export const VersionProvider = () =>
           ) {
             return { action: "update" } as const;
           }
+          const desired = resolvedNews.function.runtimeManagementConfig;
+          if (managesRuntime(desired, resolvedOlds.function.runtimeManagementConfig)) {
+            const observed = yield* observeRuntimeManagementConfig(
+              output.functionName,
+              output.version,
+            );
+            if (!isSameRuntimeManagementConfig(observed, desired ?? DefaultRuntimeManagementConfig))
+              return { action: "update" } as const;
+          }
           return { action: "noop" } as const;
         }),
         read: Effect.fn(function* ({ id, fqn, instanceId, olds, output }) {
@@ -451,7 +467,7 @@ export const VersionProvider = () =>
             );
             return versions.flat();
           }),
-        reconcile: Effect.fn(function* ({ id, fqn, instanceId, news, session }) {
+        reconcile: Effect.fn(function* ({ id, fqn, instanceId, news, olds, session }) {
           const resolvedNews = resolvedProps(news);
           const ensure = Effect.gen(function* () {
             const latest = yield* waitForLatest(resolvedNews.function.functionName);
@@ -500,6 +516,17 @@ export const VersionProvider = () =>
           );
 
           const attrs = yield* ensure;
+          // Alias depends on this resource and may only move after its version is pinned.
+          const desired = resolvedNews.function.runtimeManagementConfig;
+          if (
+            managesRuntime(desired, olds && resolvedProps(olds).function.runtimeManagementConfig)
+          ) {
+            yield* syncRuntimeManagementConfig({
+              functionName: attrs.functionName,
+              qualifier: attrs.version,
+              desired,
+            });
+          }
           yield* session.note(`Version ${attrs.functionName}:${attrs.version}`);
           return attrs;
         }),

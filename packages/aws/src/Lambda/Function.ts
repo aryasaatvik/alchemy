@@ -81,6 +81,14 @@ import {
   toDurationMillis,
   withInvocationDeadline,
 } from "./InvocationDeadline.ts";
+import {
+  DefaultRuntimeManagementConfig,
+  isSameRuntimeManagementConfig,
+  managesRuntime,
+  observeRuntimeManagementConfig,
+  syncRuntimeManagementConfig,
+  type RuntimeManagementConfig,
+} from "./RuntimeManagementConfig.ts";
 
 export class LambdaFunctionInvalidProps extends Data.TaggedError("LambdaFunctionInvalidProps")<{
   readonly message: string;
@@ -505,6 +513,11 @@ export interface FunctionZipProps extends FunctionCommonProps {
   // TODO(sam): use a Layer instead so we can manage Effect platform?
   runtime?: "nodejs22.x" | "nodejs24.x";
   /**
+   * Configure how Lambda updates the managed runtime. Manual pins an exact
+   * runtime ARN. Removing an explicit setting restores AWS's Auto mode.
+   */
+  runtimeManagementConfig?: RuntimeManagementConfig;
+  /**
    * Lambda layers to attach — pass an `AWS.Lambda.LayerVersion` resource
    * directly, or a raw layer version ARN (e.g. an AWS-managed layer). Layers
    * are extracted into `/opt` in the order given. Omit or pass `[]` to detach
@@ -556,6 +569,7 @@ export interface FunctionImageProps extends FunctionCommonProps {
   acceleratorMemorySize?: AcceleratorMemorySize;
   handler?: never;
   runtime?: never;
+  runtimeManagementConfig?: never;
   layers?: never;
   build?: never;
   uploadSourceMap?: never;
@@ -581,6 +595,7 @@ interface FunctionPackageValidationProps {
   main?: unknown;
   handler?: unknown;
   runtime?: unknown;
+  runtimeManagementConfig?: unknown;
   layers?: unknown;
   build?: unknown;
   uploadSourceMap?: unknown;
@@ -607,6 +622,7 @@ export const validateFunctionPackageProps = Effect.fn("AWS.Lambda.validateFuncti
       ["main", props.main],
       ["handler", props.handler],
       ["runtime", props.runtime],
+      ["runtimeManagementConfig", props.runtimeManagementConfig],
       ["layers", props.layers],
       ["build", props.build],
       ["uploadSourceMap", props.uploadSourceMap],
@@ -738,6 +754,8 @@ export interface Function extends Resource<
       image?: Omit<FunctionImageAttributes, "hash">;
     };
     reservedConcurrentExecutions?: number;
+    /** Managed runtime setting, when explicitly declared. */
+    runtimeManagementConfig?: RuntimeManagementConfig;
     /**
      * Memory allocated to the function, in MB, as observed on the deployed
      * function. Lets `alchemy drift` detect out-of-band changes.
@@ -3063,10 +3081,12 @@ export const FunctionProvider = () =>
         functionName,
         functionArn,
         alias,
+        runtimeManagementConfig,
       }: {
         functionName: string;
         functionArn: string;
         alias: string;
+        runtimeManagementConfig?: RuntimeManagementConfig;
       }) {
         const deleteHint = `Delete versions no alias serves (\`aws lambda list-versions-by-function --function-name ${functionName}\`, then \`aws lambda delete-function --function-name ${functionName} --qualifier <version>\`)`;
         const published = yield* Lambda.publishVersion({ FunctionName: functionName }).pipe(
@@ -3093,6 +3113,14 @@ export const FunctionProvider = () =>
           }),
         );
         const version = published.Version!;
+        // Lambda versions have their own runtime configuration.
+        if (runtimeManagementConfig !== undefined) {
+          yield* syncRuntimeManagementConfig({
+            functionName,
+            qualifier: version,
+            desired: runtimeManagementConfig,
+          });
+        }
         const desired = {
           FunctionName: functionName,
           Name: alias,
@@ -3339,6 +3367,16 @@ export const FunctionProvider = () =>
           if (olds.reservedConcurrentExecutions !== news.reservedConcurrentExecutions) {
             return { action: "update" };
           }
+          if (managesRuntime(news.runtimeManagementConfig, olds.runtimeManagementConfig)) {
+            const desired = news.runtimeManagementConfig ?? DefaultRuntimeManagementConfig;
+            const observed = yield* observeRuntimeManagementConfig(
+              output.functionName,
+              news.alias ? output.version : undefined,
+            );
+            if (!isSameRuntimeManagementConfig(observed, desired)) {
+              return { action: "update" };
+            }
+          }
           // `layers` accepts a LayerVersion resource or a raw ARN, and the
           // two forms are structurally different props even when they name
           // the same layer. Compare them normalized so switching between the
@@ -3347,6 +3385,7 @@ export const FunctionProvider = () =>
           const normalizeLayers = (props: FunctionProps) => ({
             ...props,
             layers: (props.layers ?? []).map(layerVersionArnOf),
+            runtimeManagementConfig: undefined,
           });
           if (!havePropsChanged(normalizeLayers(olds), normalizeLayers(news))) {
             // Bindings (env / policies from `bind`) are not props. An explicit
@@ -3397,6 +3436,12 @@ export const FunctionProvider = () =>
           const reservedConcurrentExecutions = yield* getReservedConcurrentExecutions(
             fn.FunctionName,
           );
+          const runtimeManagementConfig = managesRuntime(
+            olds?.runtimeManagementConfig,
+            output?.runtimeManagementConfig,
+          )
+            ? yield* observeRuntimeManagementConfig(fn.FunctionName, alias?.FunctionVersion)
+            : undefined;
           // Reuse the persisted output where we have it (e.g. code hash) so
           // diff doesn't see drift it can't reconstruct from the API.
           const attrs = {
@@ -3416,6 +3461,7 @@ export const FunctionProvider = () =>
               observed: result?.Code,
             }),
             reservedConcurrentExecutions,
+            runtimeManagementConfig,
           } satisfies Function["Attributes"];
           return (yield* hasAlchemyTags(id, tagsResult)) ? attrs : Unowned(attrs);
         }),
@@ -3575,9 +3621,18 @@ export const FunctionProvider = () =>
           // Consumers in a cycle with this Function wire the alias before
           // reconcile runs, so the alias must already exist (serving the
           // stub until reconcile advances it).
+          const runtimeManagementConfig =
+            !isFunctionImageProps(news) && isResolved(news.runtimeManagementConfig)
+              ? news.runtimeManagementConfig
+              : undefined;
           const alias =
             typeof news.alias === "string"
-              ? yield* syncAlias({ functionName, functionArn, alias: news.alias })
+              ? yield* syncAlias({
+                  functionName,
+                  functionArn,
+                  alias: news.alias,
+                  runtimeManagementConfig,
+                })
               : undefined;
 
           return {
@@ -3825,11 +3880,27 @@ export const FunctionProvider = () =>
             reservedConcurrentExecutions: news.reservedConcurrentExecutions,
           });
 
+          const runtimeManagementConfig =
+            !isFunctionImageProps(news) &&
+            managesRuntime(
+              news.runtimeManagementConfig,
+              olds?.runtimeManagementConfig ?? output?.runtimeManagementConfig,
+            )
+              ? yield* syncRuntimeManagementConfig({
+                  functionName,
+                  desired: news.runtimeManagementConfig,
+                })
+              : undefined;
           // With an alias, every consumer invokes the alias: publish the
           // settled code as a version and advance the alias before the URL
           // and async-invoke config are attached to it.
           const alias = news.alias
-            ? yield* syncAlias({ functionName, functionArn, alias: news.alias })
+            ? yield* syncAlias({
+                functionName,
+                functionArn,
+                alias: news.alias,
+                runtimeManagementConfig,
+              })
             : undefined;
           const previousAlias = output?.aliasName;
 
@@ -3906,6 +3977,8 @@ export const FunctionProvider = () =>
             roleArn,
             code: prepared.attributes,
             reservedConcurrentExecutions,
+            runtimeManagementConfig:
+              news.runtimeManagementConfig === undefined ? undefined : runtimeManagementConfig,
             ...observed,
           };
         }),
