@@ -16,24 +16,26 @@ const exits: Promise<void>[] = [];
 let peak = 0;
 let spawned: (() => void) | undefined;
 const fork = childProcess.fork;
-childProcess.fork = (...args: Parameters<typeof fork>) => {
-  const child = fork(...args);
-  assert(child.pid !== undefined);
-  const pid = child.pid;
-  pids.push(pid);
-  active.add(pid);
-  peak = Math.max(peak, active.size);
-  exits.push(
-    new Promise((resolve) =>
-      child.once("close", () => {
-        active.delete(pid);
-        resolve();
-      }),
-    ),
-  );
-  spawned?.();
-  return child;
-};
+childProcess.fork = new Proxy(fork, {
+  apply(target, receiver, args) {
+    const child: childProcess.ChildProcess = Reflect.apply(target, receiver, args);
+    assert(child.pid !== undefined);
+    const pid = child.pid;
+    pids.push(pid);
+    active.add(pid);
+    peak = Math.max(peak, active.size);
+    exits.push(
+      new Promise((resolve) =>
+        child.once("close", () => {
+          active.delete(pid);
+          resolve();
+        }),
+      ),
+    );
+    spawned?.();
+    return child;
+  },
+});
 syncBuiltinESMExports();
 
 let nativeLoads = 0;
@@ -43,7 +45,7 @@ process.dlopen = (...args: Parameters<typeof dlopen>) => {
   return dlopen(...args);
 };
 
-const Bundle = await import("../../../src/Bundle/Bundle.ts");
+const Bundle = await import("alchemy/Bundle/Bundle");
 const root = await mkdtemp(join(tmpdir(), "alchemy-isolated-bundle-"));
 const entry = join(root, "entry.ts");
 try {

@@ -49,6 +49,9 @@ const putItem = Schema.decodeUnknownEffect(
     }),
   }),
 );
+const createKey = Schema.decodeUnknownEffect(
+  Schema.Struct({ KeyUsage: Schema.String, KeySpec: Schema.String }),
+);
 const deleteItem = Schema.decodeUnknownEffect(Schema.Struct({ Key: Schema.Struct(keyFields) }));
 
 const record = (fqn: string, visible = fqn): ResourceState => ({
@@ -98,8 +101,7 @@ test.live.skipIf(endpoint === undefined)(
           calls.push(op);
           let row: string | undefined;
           if (op === "CreateKey") {
-            const { KeyUsage, KeySpec } = await request.clone().json();
-            keySpecs.push({ KeyUsage, KeySpec });
+            keySpecs.push(await Effect.runPromise(createKey(await request.clone().json())));
           } else if (op === "PutItem") {
             const {
               Item: { PK, SK, fqn },

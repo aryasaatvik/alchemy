@@ -64,7 +64,11 @@ const operationContext = Context.pick(
 // Distilled operations capture their construction context. Keep only cloud
 // services so invocation scope, cancellation, and telemetry stay with each call.
 const resolveOperation = <A, E>(operation: Effect.Effect<A, E>) =>
-  operation.pipe(Effect.updateContext(operationContext));
+  operation.pipe(
+    Effect.updateContext((context: Context.Context<never>) => operationContext(context)),
+  );
+
+const bindingRuntimeEndpoints = fromRuntimeEnv.pipe(Layer.orDie);
 
 const requestHttpClient = Layer.succeed(
   HttpClient.HttpClient,
@@ -582,7 +586,7 @@ const withWebIdentity = Effect.fn(function* <Op>(
     Effect.provide([
       credentials,
       Layer.succeed(Region, callRegion as Effect.Effect<RegionName>),
-      fromRuntimeEnv,
+      bindingRuntimeEndpoints,
       requestHttpClient,
     ]),
     // The web-token provider loads on first use and fails with `SdkError`
@@ -658,7 +662,7 @@ export const withCredentials: <Op>(
       roleArn: Effect.succeed(roleArn),
       base,
       region: stsRegion,
-    }).pipe(Effect.provide(fromRuntimeEnv)),
+    }).pipe(Effect.provide(bindingRuntimeEndpoints)),
   );
   const callRegion =
     region !== undefined
@@ -668,7 +672,7 @@ export const withCredentials: <Op>(
     Effect.provide([
       Layer.succeed(Credentials, credentials),
       Layer.succeed(Region, callRegion as Effect.Effect<RegionName>),
-      fromRuntimeEnv,
+      bindingRuntimeEndpoints,
       requestHttpClient,
     ]),
     orDieCredentialsUnavailable("AWS"),

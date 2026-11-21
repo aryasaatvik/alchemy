@@ -54,10 +54,12 @@ layer(NodeServices.layer)("immutable Lambda compilation", (it) => {
         let compilers = 0;
         let watches = 0;
         const originalFork = childProcess.fork;
-        childProcess.fork = (...args: Parameters<typeof originalFork>) => {
-          compilers++;
-          return originalFork(...args);
-        };
+        childProcess.fork = new Proxy(originalFork, {
+          apply(target, receiver, args) {
+            compilers++;
+            return Reflect.apply(target, receiver, args);
+          },
+        });
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             childProcess.fork = originalFork;

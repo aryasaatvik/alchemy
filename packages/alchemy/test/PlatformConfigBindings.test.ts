@@ -23,7 +23,8 @@ interface ConfigHost extends Resource<
   "Test.ConfigHost",
   ConfigHostProps,
   { ready: true },
-  { env?: Record<string, unknown> }
+  { env?: Record<string, unknown> },
+  never
 > {}
 
 class HostService extends Context.Service<HostService, string>()("Test.ConfigHostService") {}
