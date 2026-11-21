@@ -88,9 +88,9 @@ const parseArgs = (): {
   };
 };
 
-const uploadCheckpoint = async (dryRun: boolean): Promise<void> => {
-  const dirty = await run(["git", "status", "--porcelain"], {
-    cwd: repositoryRoot,
+export const assertCleanCheckout = async (cwd: string): Promise<void> => {
+  const dirty = await run(["git", "status", "--porcelain", "--ignore-submodules=none"], {
+    cwd,
     quiet: true,
   });
   if (dirty !== "") {
@@ -98,6 +98,10 @@ const uploadCheckpoint = async (dryRun: boolean): Promise<void> => {
       "Integration checkpoint requires a clean Git worktree; commit or restore tracked changes first",
     );
   }
+};
+
+const uploadCheckpoint = async (dryRun: boolean): Promise<void> => {
+  await assertCleanCheckout(repositoryRoot);
   if (Bun.which("scratchpad") === null) {
     throw new Error(
       "scratchpad is not installed; install it before publishing an integration checkpoint",

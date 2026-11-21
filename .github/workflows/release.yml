@@ -29,6 +29,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'alchemy-run/alchemy'
     name: Build and pack
     runs-on: blacksmith-8vcpu-ubuntu-2404
     outputs:
@@ -92,6 +93,7 @@ jobs:
           retention-days: 7
 
   publish:
+    if: github.repository == 'alchemy-run/alchemy'
     name: Publish
     needs: build
     runs-on: ubuntu-latest

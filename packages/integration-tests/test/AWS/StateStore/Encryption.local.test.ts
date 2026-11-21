@@ -36,11 +36,20 @@ const recordKey = (fqn: string) => ({
   SK: s(`RECORD#${createHash("sha256").update(fqn).digest("hex")}`),
 });
 const formatKey = { PK: s("STORE"), SK: s("FORMAT") };
+const leaseKey = { PK: s(`STAGE#${stage.stack}#${stage.stage}`), SK: s("LEASE") };
+const keyFields = {
+  PK: Schema.Struct({ S: Schema.String }),
+  SK: Schema.Struct({ S: Schema.String }),
+};
 const putItem = Schema.decodeUnknownEffect(
   Schema.Struct({
-    Item: Schema.Struct({ fqn: Schema.optional(Schema.Struct({ S: Schema.String })) }),
+    Item: Schema.Struct({
+      ...keyFields,
+      fqn: Schema.optional(Schema.Struct({ S: Schema.String })),
+    }),
   }),
 );
+const deleteItem = Schema.decodeUnknownEffect(Schema.Struct({ Key: Schema.Struct(keyFields) }));
 
 const record = (fqn: string, visible = fqn): ResourceState => ({
   resourceType: "test:resource",
@@ -74,6 +83,8 @@ test.live.skipIf(endpoint === undefined)(
       }
 
       const calls: string[] = [];
+      const keySpecs: Array<{ KeyUsage: unknown; KeySpec: unknown }> = [];
+      const leaseWrites: Array<{ operation: string; key: typeof leaseKey }> = [];
       let cutReseal = false;
       const firstCommitted = Promise.withResolvers<void>();
       const transport: typeof globalThis.fetch = Object.assign(
@@ -85,16 +96,41 @@ test.live.skipIf(endpoint === undefined)(
             request.headers.get("x-amz-target")?.split(".").at(-1) ??
             `${request.method} ${target.searchParams.has("encryption") ? "encryption" : "s3"}`;
           calls.push(op);
-          const row =
-            cutReseal && op === "PutItem"
-              ? (await Effect.runPromise(putItem(await request.clone().json()))).Item.fqn?.S
-              : undefined;
+          let row: string | undefined;
+          if (op === "CreateKey") {
+            const { KeyUsage, KeySpec } = await request.clone().json();
+            keySpecs.push({ KeyUsage, KeySpec });
+          } else if (op === "PutItem") {
+            const {
+              Item: { PK, SK, fqn },
+            } = await Effect.runPromise(putItem(await request.clone().json()));
+            if (SK.S === "LEASE") leaseWrites.push({ operation: op, key: { PK, SK } });
+            if (cutReseal) row = fqn?.S;
+          } else if (op === "DeleteItem") {
+            const { Key } = await Effect.runPromise(deleteItem(await request.clone().json()));
+            if (Key.SK.S === "LEASE") leaseWrites.push({ operation: op, key: Key });
+          }
           if (row === "Second") {
-            await firstCommitted.promise;
-            return Response.json(
-              { __type: "ValidationException", message: "fixture interrupted reseal" },
-              { status: 400 },
-            );
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            try {
+              const committed = await Promise.race([
+                firstCommitted.promise.then(() => true),
+                new Promise<false>((resolve) => {
+                  timeout = setTimeout(() => resolve(false), 5_000);
+                }),
+              ]);
+              return Response.json(
+                {
+                  __type: "ValidationException",
+                  message: committed
+                    ? "fixture interrupted reseal"
+                    : "fixture expected First to commit while Second was held",
+                },
+                { status: 400 },
+              );
+            } finally {
+              clearTimeout(timeout);
+            }
           }
           const response = await fetch(request, { redirect: "error" });
           if (row === "First" && response.ok) firstCommitted.resolve();
@@ -160,6 +196,8 @@ test.live.skipIf(endpoint === undefined)(
           }
           expect(yield* getItem(formatKey)).toBeUndefined();
           calls.length = 0;
+          keySpecs.length = 0;
+          leaseWrites.length = 0;
 
           const readStage = Effect.scoped(
             Effect.gen(function* () {
@@ -195,6 +233,13 @@ test.live.skipIf(endpoint === undefined)(
             expect(firstAccess).toContain(op);
           }
           expect(firstAccess.includes("GenerateDataKey")).toBe(!disable);
+          expect(firstAccess).not.toContain("Decrypt");
+          expect(keySpecs).toEqual([{ KeyUsage: "ENCRYPT_DECRYPT", KeySpec: "SYMMETRIC_DEFAULT" }]);
+          expect(leaseWrites).toEqual([
+            { operation: "PutItem", key: leaseKey },
+            { operation: "DeleteItem", key: leaseKey },
+          ]);
+          expect(yield* getItem(leaseKey)).toBeUndefined();
           expect((yield* getItem(formatKey))?.format?.N).toBe("1");
 
           const key = (yield* kms.describeKey({ KeyId: alias })).KeyMetadata?.Arn;
@@ -216,7 +261,12 @@ test.live.skipIf(endpoint === undefined)(
 
           calls.length = 0;
           yield* readStage;
-          if (!disable) expect(calls).toContain("Decrypt");
+          if (disable) {
+            expect(calls).not.toContain("Decrypt");
+            expect(calls).not.toContain("GenerateDataKey");
+          } else {
+            expect(calls).toContain("Decrypt");
+          }
           for (const value of [first, second]) {
             const text = (yield* getItem(recordKey(value.fqn)))?.data?.S ?? "";
             expect(isSealed(text)).toBe(!disable);

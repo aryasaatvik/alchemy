@@ -3,7 +3,12 @@ import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withCleanBuildOutputs, packageBuildOutputs } from "./build.ts";
-import { findExistingUpload, parsePackResult, parseUploadResult } from "./checkpoint.ts";
+import {
+  assertCleanCheckout,
+  findExistingUpload,
+  parsePackResult,
+  parseUploadResult,
+} from "./checkpoint.ts";
 import {
   assertBuildInputsUnchanged,
   packageFingerprint,
@@ -149,6 +154,7 @@ describe("integration package graph", () => {
   test("returns the complete current closure in dependency order", async () => {
     const closure = await integrationClosure(repositoryRoot);
     const names = closure.map((workspace) => workspace.name);
+    expect(names).toHaveLength(24);
 
     for (const required of [
       "alchemy",
@@ -933,6 +939,49 @@ describe("integration consumer surface", () => {
 });
 
 describe("integration checkpoint", () => {
+  test("rejects a dirty submodule when the user's Git config hides it", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "integration-checkpoint-"));
+    const child = join(parent, "submodules", "distilled");
+    const commit = (cwd: string) =>
+      run(
+        [
+          "git",
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.test",
+          "-c",
+          "commit.gpgsign=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-qm",
+          "fixture",
+        ],
+        { cwd },
+      );
+    try {
+      await mkdir(child, { recursive: true });
+      await writeFile(join(child, "sdk.ts"), "original");
+      await trackAll(child);
+      await commit(child);
+      await writeFile(
+        join(parent, ".gitmodules"),
+        '[submodule "distilled"]\n  path = submodules/distilled\n  url = ./distilled\n',
+      );
+      await run(["git", "init", "--quiet"], { cwd: parent });
+      await run(["git", "add", "--", ".gitmodules", "submodules/distilled"], { cwd: parent });
+      await commit(parent);
+      await run(["git", "config", "diff.ignoreSubmodules", "all"], { cwd: parent });
+      await assertCleanCheckout(parent);
+      await writeFile(join(child, "sdk.ts"), "edited");
+      expect(await run(["git", "status", "--porcelain"], { cwd: parent, quiet: true })).toBe("");
+      await expect(assertCleanCheckout(parent)).rejects.toThrow("requires a clean Git worktree");
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   const result = {
     artifact: "/tmp/alchemy-2.0.0-samva.abc123.fingerprint.tgz",
     sha256: "a".repeat(64),

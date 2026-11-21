@@ -310,14 +310,18 @@ console.log(\`Bun resolved \${consumerSubpaths.length} upstream consumer subpath
  */
 const bootstrapConsumer = (): string => `import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { Endpoint } from "@distilled.cloud/aws/Endpoint";
+import { resolve as resolveEndpoint } from "@distilled.cloud/aws/Endpoint";
+import { AWS_SERVICE_ENDPOINTS, AWSEnvironment } from "@alchemy.run/aws";
 import { Region } from "@distilled.cloud/aws/Region";
 import * as LambdaBootstrap from "@alchemy.run/aws/Bootstrap/Lambda";
 import * as ProcessBootstrap from "alchemy/Runtime/Bootstrap";
 import { Stack } from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 
+const serviceEndpoints = { SESv2: "http://host.docker.internal:8800/ses" };
 Object.assign(process.env, {
+  ALCHEMY_AWS_ACCOUNT_ID: "654654387918",
+  ALCHEMY_AWS_SERVICE_ENDPOINTS: JSON.stringify(serviceEndpoints),
   ALCHEMY_STACK_NAME: "samva",
   ALCHEMY_STAGE: "production",
   AWS_ACCESS_KEY_ID: "checkpoint-test",
@@ -326,31 +330,45 @@ Object.assign(process.env, {
   AWS_REGION: "us-east-1",
   AWS_ENDPOINT_URL: "http://127.0.0.1:4566",
 });
-const entrypoint = Layer.succeed(ProcessBootstrap.entrypointTag, {
-  RuntimeContext: {
+const runtimeContext = {
+    id: "SamvaApi",
     exports: Effect.succeed({
       handler: Effect.gen(function* () {
         const stack = yield* Stack;
         const stage = yield* Stage;
         const region = yield* yield* Region;
-        const endpoint = yield* yield* Endpoint;
-        return async () => ({ stack: stack.name, stage, region, endpoint });
+        const endpoint = yield* resolveEndpoint("S3");
+        const sesEndpoint = yield* resolveEndpoint("SESv2");
+        const { accountId } = yield* AWSEnvironment.current;
+        const endpoints = yield* AWS_SERVICE_ENDPOINTS;
+        const { RuntimeContext } = yield* ProcessBootstrap.entrypointTag;
+        return async () => ({
+          stack: stack.name, stage, region, endpoint, sesEndpoint, accountId,
+          serviceEndpoints: endpoints, runtimeContextId: RuntimeContext.id,
+        });
       }),
     }),
-  },
-});
+};
+const entrypoint = Layer.succeed(ProcessBootstrap.entrypointTag, { RuntimeContext: runtimeContext });
 const handler = (await LambdaBootstrap.bootstrap(entrypoint)) as () => Promise<{
   stack: string;
   stage: string;
   region: string;
   endpoint: string;
+  sesEndpoint: string;
+  accountId: string;
+  serviceEndpoints: Record<string, string> | undefined;
+  runtimeContextId: string;
 }>;
 const identity = await handler();
 if (identity.stack !== "samva" || identity.stage !== "production" ||
-    identity.region !== "us-east-1" || identity.endpoint !== "http://127.0.0.1:4566") {
+    identity.region !== "us-east-1" || identity.endpoint !== "http://127.0.0.1:4566" ||
+    identity.accountId !== "654654387918" || identity.runtimeContextId !== "SamvaApi" ||
+    identity.sesEndpoint !== serviceEndpoints.SESv2 ||
+    JSON.stringify(identity.serviceEndpoints) !== JSON.stringify(serviceEndpoints)) {
   throw new Error(\`packaged Lambda runtime resolved \${JSON.stringify(identity)}\`);
 }
-console.log("packaged Lambda bootstrap resolved its stack, stage, region, and endpoint");
+console.log("packaged Lambda bootstrap resolved stack, runtime identity, and service endpoints");
 process.exit(0);
 `;
 
@@ -474,8 +492,8 @@ const verifyRootBundle = async (
         "build",
         "--target",
         "node",
-        // Preserve optional imports in the bundle. The Node load below
-        // still fails if the root import actually needs an absent peer.
+        // Preserve optional imports in the bundle. Node fails on an absent
+        // peer if loading the root requires a static import of it.
         ...[...hostSuppliedPeers, ...optionalFrameworkPeers].flatMap((peer) => [
           "--external",
           peer,
