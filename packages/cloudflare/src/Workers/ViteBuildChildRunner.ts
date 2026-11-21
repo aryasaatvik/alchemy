@@ -38,6 +38,7 @@ const program = Effect.gen(function* () {
     config.env,
     {
       main: config.main,
+      prerenderWorker: config.prerenderWorker,
       compatibilityDate: config.compatibilityDate,
       compatibilityFlags: config.compatibilityFlags,
       viteEnvironments: config.viteEnvironments,

@@ -1,3 +1,4 @@
+import type { CloudflareVitePluginOptions } from "@alchemy.run/cloudflare-runtime/vite";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import { type MemoOptions } from "alchemy/Command/Memo";
 import type { Dependencies } from "alchemy/Dependencies";
@@ -1240,6 +1241,12 @@ export interface WorkspaceMemoOptions extends MemoOptions {
 }
 
 export interface ViteOptions {
+  /**
+   * Build-time preview Worker. Uses this Worker's compatibility settings and
+   * is selected during preview when `TSS_PRERENDERING` is `"true"`.
+   */
+  prerenderWorker?: CloudflareVitePluginOptions["prerenderWorker"];
+
   /**
    * Overrides the module that becomes the deployed Worker entry, forwarded
    * to the Cloudflare Vite plugin's `main` option. Relative paths resolve

@@ -2,7 +2,10 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { pathToFileURL } from "node:url";
 import { viteSupportsPortZero } from "@alchemy.run/cloudflare-runtime/core/internal/Port";
-import cloudflare, { type CloudflareVitePluginOptions } from "@alchemy.run/cloudflare-runtime/vite";
+import cloudflare, {
+  PRERENDER_ENVIRONMENT,
+  type CloudflareVitePluginOptions,
+} from "@alchemy.run/cloudflare-runtime/vite";
 import { viteBuildOutputPlugin, type ViteBuildOutput } from "alchemy/Bundle/Vite";
 import { hashDirectory, type MemoOptions } from "alchemy/Command/Memo";
 import { findAvailablePort, initialCwd } from "alchemy/Util/Node";
@@ -171,6 +174,7 @@ export const viteBuild = (
         // `getDefine`); the rest may hold non-serializable values.
         env: Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith("VITE_"))),
         main: pluginOptions.main,
+        prerenderWorker: pluginOptions.prerenderWorker,
         compatibilityDate: pluginOptions.compatibilityDate,
         compatibilityFlags: pluginOptions.compatibilityFlags,
         viteEnvironments: pluginOptions.viteEnvironments,
@@ -199,6 +203,7 @@ export const viteBuildInProcess = (
   Effect.gen(function* () {
     const outputPlugin = yield* viteBuildOutputPlugin({
       entryEnvironment: pluginOptions.viteEnvironments?.entry ?? "ssr",
+      excludeEnvironments: pluginOptions.prerenderWorker ? [PRERENDER_ENVIRONMENT] : [],
     });
     const context = yield* Effect.context<never>();
     yield* Effect.promise(async () => {
@@ -343,6 +348,7 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
   build: Effect.fn(function* (ctx) {
     const path = yield* Path.Path;
     const env = yield* resolveBuildEnv(ctx.env, ctx.selfUrl);
+    const root = path.resolve(initialCwd, vite.rootDir ?? ".");
     const { clientDirectory, base, serverBundle, externalWorkspaces } = yield* viteBuild(
       vite.rootDir,
       env,
@@ -354,8 +360,12 @@ export const makeViteSource = (vite: ViteOptions): SourceProvider => ({
         // package) — absolutize before handing it over (#796).
         // A package export or virtual module (`vike:server`) goes to Vite
         // as is.
-        main: vite.main
-          ? yield* resolveViteMain(path.resolve(initialCwd, vite.rootDir ?? "."), vite.main)
+        main: vite.main ? yield* resolveViteMain(root, vite.main) : undefined,
+        prerenderWorker: vite.prerenderWorker
+          ? {
+              ...vite.prerenderWorker,
+              main: yield* resolveViteMain(root, vite.prerenderWorker.main),
+            }
           : undefined,
         compatibilityDate: ctx.compatibility.date,
         compatibilityFlags: ctx.compatibility.flags,
