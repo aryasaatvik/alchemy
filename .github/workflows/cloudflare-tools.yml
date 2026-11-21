@@ -2,7 +2,7 @@ name: Cloudflare Tools
 
 on:
   push:
-    branches: [main]
+    branches: [main, samva/integration]
     paths:
       - "submodules/distilled"
       - "packages/cloudflare-runtime/**"
@@ -44,18 +44,21 @@ concurrency:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Test (${{ github.repository == 'aryasaatvik/alchemy' && matrix.hosted || matrix.os }})
+    runs-on: ${{ github.repository == 'aryasaatvik/alchemy' && matrix.hosted || matrix.os }}
     # A run takes 8 minutes, and 18 at most. A fixture build that stalls would
     # otherwise hold the runner for GitHub's 6-hour limit.
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - blacksmith-8vcpu-ubuntu-2404
-          - blacksmith-6vcpu-macos-latest
-          - blacksmith-8vcpu-windows-2025
+        include:
+          - os: blacksmith-8vcpu-ubuntu-2404
+            hosted: ubuntu-24.04
+          - os: blacksmith-6vcpu-macos-latest
+            hosted: macos-15
+          - os: blacksmith-8vcpu-windows-2025
+            hosted: windows-2025
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

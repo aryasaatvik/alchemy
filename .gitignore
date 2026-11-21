@@ -108,3 +108,6 @@ build:*
 # pkg pack output (CI artifact hand-off)
 .pkg
 
+
+# Local integration archives and their build cache.
+/artifacts/

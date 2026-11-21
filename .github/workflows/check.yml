@@ -4,7 +4,7 @@ name: Check
 
 on:
   push:
-    branches: [main]
+    branches: [main, samva/integration]
   pull_request:
     types: [opened, reopened, synchronize]
   workflow_dispatch:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'aryasaatvik/alchemy' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

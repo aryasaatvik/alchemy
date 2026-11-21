@@ -6,7 +6,7 @@
     "noEmit": true,
     "composite": true,
     "tsBuildInfoFile": "../.cache/tsconfig.scripts.tsbuildinfo",
-    "types": ["node"]
+    "types": ["node", "bun"]
   },
   "references": [
     { "path": "../submodules/distilled/packages/aws/tsconfig.json" },

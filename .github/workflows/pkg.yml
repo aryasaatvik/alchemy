@@ -10,7 +10,7 @@ name: Package Preview
 
 on:
   push:
-    branches: [main]
+    branches: [main, samva/integration]
     paths:
       - "submodules/distilled"
       - "packages/**"
@@ -46,10 +46,10 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish preview packages
+    name: ${{ github.repository == 'aryasaatvik/alchemy' && 'Build and pack preview packages' || 'Publish preview packages' }}
     # `labeled` is only for `force-ci`, which repacks every package.
     if: github.event.action != 'labeled' || github.event.label.name == 'force-ci'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'aryasaatvik/alchemy' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,7 +93,7 @@ jobs:
           --group '@alchemy.run[Collapsed]=./packages/{better-auth,git,drizzle,sqlite,acme,archil,boat,axiom,doppler,infisical,1password,turso,convex,e2b,daytona,modal,planetscale,neon,prisma,hetzner,digitalocean,railway,fly,github,stripe,cloudflare,gcp,aws,domain,kubernetes,docker,redis,sql,cloudflare-runtime,frontend-frameworks,node-utils,pkg}'
 
       - name: Vouch for the manifest
-        if: steps.pack.outputs.package-count != '0'
+        if: github.repository == 'alchemy-run/alchemy' && steps.pack.outputs.package-count != '0'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.pack.outputs.artifact-name }}
@@ -103,7 +103,7 @@ jobs:
           retention-days: 1
 
       - name: Publish packages
-        if: steps.pack.outputs.package-count != '0'
+        if: github.repository == 'alchemy-run/alchemy' && steps.pack.outputs.package-count != '0'
         run: pnpm exec pkg publish
 
       # Installs the tarballs just published in a new project outside the
@@ -111,5 +111,5 @@ jobs:
       # is source the test runner transforms, which hides what an installed
       # package does. It does nothing when @alchemy.run/domain was not packed.
       - name: Verify a model as a consumer of @alchemy.run/domain
-        if: steps.pack.outputs.package-count != '0'
+        if: github.repository == 'alchemy-run/alchemy' && steps.pack.outputs.package-count != '0'
         run: node scripts/test-domain-consumer.ts
