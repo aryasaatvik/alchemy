@@ -1,9 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "@alchemy.run/test";
-import * as Logs from "@distilled.cloud/aws/cloudwatch-logs";
 import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Effect, Layer, Schedule, Stream } from "effect";
 import { services } from "./fixtures/workflow-floci/services.ts";
@@ -125,25 +124,43 @@ it.skipIf(!endpoint || !legacy)(
       );
     const act = (build: Build, operation: Operation, receipt: Receipt) =>
       client(build, operation, receipt.executionId, { executionRef: receipt.executionRef });
-    const invocations = async (receipt: Receipt) => {
-      const found = await run(
+    const prefix = process.env.WORKFLOW_FLOCI_CONTAINER_PREFIX;
+    if (prefix === undefined || !/^lane1-[a-z0-9-]+$/.test(prefix)) {
+      throw new Error("Cutover requires the isolated Floci Lambda container prefix");
+    }
+    const invocations = (receipt: Receipt, count: number) =>
+      run(
         until(
-          Logs.filterLogEvents.items({ logGroupName: `/aws/lambda/${functionName}` }).pipe(
-            Stream.runCollect,
-            Effect.catchTag("ResourceNotFoundException", () => Effect.succeed([])),
-            Effect.map((events) =>
-              events.flatMap((event) => {
-                const match = event.message?.match(/CUTOVER_INVOCATION (\{[^\n]*\})/);
+          Effect.sync(() => {
+            const ids = execFileSync(
+              "docker",
+              ["ps", "-aq", "--filter", `name=${prefix}-${functionName}-`],
+              { encoding: "utf8" },
+            )
+              .trim()
+              .split(/\s+/)
+              .filter(Boolean);
+            return ids
+              .flatMap((id) => {
+                const logs = spawnSync("docker", ["logs", id], { encoding: "utf8" });
+                return (logs.stdout + logs.stderr).split("\n");
+              })
+              .sort()
+              .flatMap((line) => {
+                const match = line.match(/CUTOVER_INVOCATION (\{[^\n]*\})/);
                 if (!match) return [];
                 const invocation: Invocation = JSON.parse(match[1]!);
                 return invocation.arn === receipt.executionRef ? [invocation] : [];
-              }),
-            ),
-          ),
-          (events) => new Set(events.map((event) => event.requestId)).size >= 2,
+              });
+          }),
+          (events) => new Set(events.map((event) => event.requestId)).size >= count,
         ),
-      );
-      return found.at(-1)!;
+      ).then((events) => events.at(-1)!);
+    const record = async (event: string, details: object) => {
+      const line = JSON.stringify({ event, ...details });
+      const receipt = process.env.WORKFLOW_FLOCI_RECEIPT;
+      if (receipt) await appendFile(receipt, `${line}\n`);
+      console.log(line);
     };
     const env = (build: Build) => ({
       Variables: { AWS_ENDPOINT_URL: "http://floci:4566", CUTOVER_BUILD: build },
@@ -210,10 +227,13 @@ it.skipIf(!endpoint || !legacy)(
       const pinStatus = await act("legacy", "status", pinProbe);
       const pinsVersions = pinStatus.result === "approved:legacy:1";
       expect(pinExecution.Status).toBe("SUCCEEDED");
-      console.log(
-        "CUTOVER_PIN",
-        JSON.stringify({ pinsVersions, providerVersion: pinExecution.Version, status: pinStatus }),
-      );
+      const pinReplay = await invocations(pinProbe, 2);
+      await record("pin", {
+        pinsVersions,
+        providerVersion: pinExecution.Version,
+        status: pinStatus,
+        ...pinReplay,
+      });
       if (!pinsVersions) {
         // Keep the wire proof valid if the emulator re-routes alias-started
         // executions. Explicitly target immutable v1 for the legacy waiters.
@@ -254,9 +274,9 @@ it.skipIf(!endpoint || !legacy)(
           if (kind === "resume") {
             await act(sender, "resume", receipt);
             await pending(receipt, "hold/1/suspended-1");
-            const replay = await invocations(receipt);
+            const replay = await invocations(receipt, 2);
             expect(replay).toMatchObject({ build: waiter, version });
-            console.log("CUTOVER_COMPLETION", JSON.stringify({ waiter, sender, kind, ...replay }));
+            await record("resume", { waiter, sender, kind, ...replay });
           }
           const operation =
             kind === "failure"
@@ -278,12 +298,9 @@ it.skipIf(!endpoint || !legacy)(
                   }
                 : { _tag: "Completed", result: `approved:${waiter}:${version}` },
           );
-          const replay = await invocations(receipt);
+          const replay = await invocations(receipt, kind === "resume" ? 3 : 2);
           expect(replay).toMatchObject({ build: waiter, version });
-          console.log(
-            "CUTOVER_COMPLETION",
-            JSON.stringify({ waiter, sender, kind, operation, status, ...replay }),
-          );
+          await record("completion", { waiter, sender, kind, operation, status, ...replay });
         }
       }
     } finally {
@@ -294,5 +311,5 @@ it.skipIf(!endpoint || !legacy)(
       }
     }
   },
-  { timeout: 180_000, tags: ["local", "provider:aws:lambda"] },
+  { timeout: 120_000, retry: 0, tags: ["local", "provider:aws:lambda"] },
 );
