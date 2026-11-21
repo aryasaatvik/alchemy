@@ -294,7 +294,7 @@ if (
 ) {
   throw new Error("packed Bun runtime surfaces did not load");
 }
-console.log(\`Bun resolved \${consumerSubpaths.length} Samva subpaths\`);
+console.log(\`Bun resolved \${consumerSubpaths.length} upstream consumer subpaths\`);
 `;
 
 /**
@@ -468,7 +468,12 @@ const verifyRootBundle = async (
         "build",
         "--target",
         "node",
-        ...hostSuppliedPeers.flatMap((peer) => ["--external", peer]),
+        // Preserve optional imports in the bundle. The Node load below
+        // still fails if the root import actually needs an absent peer.
+        ...[...hostSuppliedPeers, ...optionalFrameworkPeers].flatMap((peer) => [
+          "--external",
+          peer,
+        ]),
         "--outfile",
         "consumer-root-bundle.mjs",
         "consumer-root-bundle.ts",

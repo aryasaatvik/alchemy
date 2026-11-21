@@ -905,7 +905,7 @@ describe("integration consumer surface", () => {
     );
   });
 
-  test("every Samva subpath is published from existing source", async () => {
+  test("every selected consumer subpath is published from existing source", async () => {
     const closure = await integrationClosure(repositoryRoot);
     for (const specifier of consumerSubpaths) {
       const workspace = closure.find(
