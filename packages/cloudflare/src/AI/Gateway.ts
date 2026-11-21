@@ -265,6 +265,13 @@ export type GatewayProps = {
    */
   zdr?: boolean;
   /**
+   * Require provider credentials: a third-party provider request must carry
+   * its own credentials or use a key stored on the gateway, and never falls
+   * back to Unified Billing. Workers AI requests are unaffected.
+   * @default false
+   */
+  byokOnly?: boolean;
+  /**
    * How Workers AI inference routed through this gateway is billed.
    * `"postpaid"` (Standard billing) bills the account directly through
    * Workers AI; `"unified"` deducts Unified Billing credits through AI
@@ -301,6 +308,7 @@ export type Gateway = Resource<
     stripe: GatewayStripe | undefined;
     spendLimits: GatewaySpendLimits | undefined;
     zdr: boolean;
+    byokOnly: boolean;
     workersAiBillingMode: GatewayWorkersAiBillingMode | undefined;
   },
   never,
@@ -669,6 +677,7 @@ const desired = (id: string, props: GatewayProps | undefined) =>
       stripe: props?.stripe ?? undefined,
       spendLimits: resolveSpendLimits(props?.spendLimits),
       zdr: props?.zdr ?? false,
+      byokOnly: props?.byokOnly ?? false,
       // Unmanaged when omitted: an existing gateway keeps its current mode.
       workersAiBillingMode: props?.workersAiBillingMode,
     };
@@ -729,6 +738,7 @@ const mapGateway = (
   stripe: gateway.stripe ?? undefined,
   spendLimits: normalizeSpendLimits(gateway.spendLimits),
   zdr: gateway.zdr ?? false,
+  byokOnly: gateway.byokOnly ?? false,
   workersAiBillingMode: (gateway.workersAiBillingMode ?? undefined) as
     | GatewayWorkersAiBillingMode
     | undefined,
@@ -800,6 +810,7 @@ const mutable = (gateway: Gateway["Attributes"]) => ({
   stripe: gateway.stripe,
   spendLimits: spendLimitsForDiff(gateway.spendLimits),
   zdr: gateway.zdr,
+  byokOnly: gateway.byokOnly,
   workersAiBillingMode: gateway.workersAiBillingMode,
 });
 
@@ -845,6 +856,7 @@ const createRequest = Effect.fn(function* (id: string, props: GatewayProps | und
     logpush: next.logpush,
     logpushPublicKey: next.logpushPublicKey,
     zdr: next.zdr,
+    byokOnly: next.byokOnly,
     workersAiBillingMode: next.workersAiBillingMode,
   } satisfies aiGateway.CreateAiGatewayRequest;
 });
@@ -877,6 +889,7 @@ const updateRequest = Effect.fn(function* (
     stripe: next.stripe,
     spendLimits: next.spendLimits,
     zdr: next.zdr,
+    byokOnly: next.byokOnly,
     workersAiBillingMode: next.workersAiBillingMode,
   } satisfies aiGateway.UpdateAiGatewayRequest;
 });
