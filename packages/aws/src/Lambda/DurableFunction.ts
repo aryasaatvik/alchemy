@@ -3,7 +3,7 @@ import type { PackageInstall } from "alchemy/Bundle/InstalledPackages";
 import type { InputProps } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import type { PlatformServices } from "alchemy/Platform";
-import { RuntimeContext } from "alchemy/RuntimeContext";
+import { CurrentRuntimeContext, RuntimeContext } from "alchemy/RuntimeContext";
 import { toSeconds, toWireDays } from "alchemy/Util/Duration";
 import { effectClass, taggedFunction, isEffectOf } from "alchemy/Util/effect";
 import type { DistributiveOmit } from "alchemy/Util/types";
@@ -14,7 +14,7 @@ import * as Data from "effect/Data";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Effectable from "effect/Effectable";
-import type * as Layer from "effect/Layer";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import type { Scope } from "effect/Scope";
@@ -687,6 +687,13 @@ const resolveDurableHandle = (id: string) => (instance: unknown) => {
   );
 };
 
+// Only the owning entrypoint runs the durable initializer. Inside a caller's
+// runtime, resolve the target using the identity bound when the caller was planned.
+const isNestedRuntime = Effect.map(
+  CurrentRuntimeContext,
+  (runtime) => globalThis.__ALCHEMY_RUNTIME__ && runtime !== undefined,
+);
+
 /**
  * Compose the user's orchestrator init effect into the owned Function's init
  * effect: resolve the durable management-plane clients, self-bind the
@@ -919,14 +926,24 @@ export const DurableFunction: DurableFunctionClass = taggedFunction(DurableFunct
     return Object.assign(
       function (props: unknown, impl: Effect.Effect<any, any, any>) {
         return Effect.flatMap(
-          fnTag(mapDurablePropsInput(props), composeDurableImpl(id, impl)),
+          Effect.flatMap(isNestedRuntime, (nested) =>
+            nested
+              ? Function.ref(id)
+              : fnTag(mapDurablePropsInput(props), composeDurableImpl(id, impl)),
+          ),
           resolveDurableHandle(id),
         );
       },
       fnTag,
       {
         make: (props: unknown, impl: Effect.Effect<any, any, any>) =>
-          fnTag.make(mapDurablePropsInput(props), composeDurableImpl(id, impl)),
+          Layer.unwrap(
+            Effect.map(isNestedRuntime, (nested) =>
+              nested
+                ? Layer.effect(fnTag.Self, Function.ref(id))
+                : fnTag.make(mapDurablePropsInput(props), composeDurableImpl(id, impl)),
+            ),
+          ),
       },
       Effectable.Prototype({
         label: `${TypeId}<${id}>`,
@@ -945,11 +962,15 @@ export const DurableFunction: DurableFunctionClass = taggedFunction(DurableFunct
   // platform with lowered props and the composed durable init.
   return effectClass(
     Effect.flatMap(
-      (Function as any)(
-        id,
-        mapDurablePropsInput(props),
-        composeDurableImpl(id, impl),
-      ) as Effect.Effect<unknown>,
+      Effect.flatMap(isNestedRuntime, (nested) =>
+        nested
+          ? Function.ref(id)
+          : ((Function as any)(
+              id,
+              mapDurablePropsInput(props),
+              composeDurableImpl(id, impl),
+            ) as Effect.Effect<Function>),
+      ),
       resolveDurableHandle(id),
     ),
   );
