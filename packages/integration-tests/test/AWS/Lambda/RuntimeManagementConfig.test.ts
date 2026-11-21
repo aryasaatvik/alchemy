@@ -228,3 +228,99 @@ test.provider(
     }),
   { tags },
 );
+
+const versionArn = `arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${FUNCTION_NAME}`;
+const versionedConfig = {
+  FunctionName: FUNCTION_NAME,
+  FunctionArn: versionArn,
+  CodeSha256: "published-code",
+  Runtime: "nodejs24.x",
+  State: "Active",
+  LastUpdateStatus: "Successful",
+};
+
+const { test: releaseTest } = Test.make({
+  providers: Layer.mergeAll(
+    Lambda.VersionProvider(),
+    Lambda.AliasProvider(),
+    Provider.succeed(Lambda.Function, {
+      reconcile: () =>
+        Effect.succeed({
+          functionName: FUNCTION_NAME,
+          functionArn: versionArn,
+          qualifiedArn: versionArn,
+          roleName: "role",
+          roleArn: `arn:aws:iam::${ACCOUNT_ID}:role/role`,
+          functionUrl: undefined,
+          code: { hash: "published-code" },
+          runtimeManagementConfig: {
+            updateRuntimeOn: "Manual" as const,
+            runtimeVersionArn: PINNED,
+          },
+        }),
+      delete: () => Effect.void,
+    }),
+  ).pipe(Layer.provide(makeCloud({}).layer)),
+});
+
+releaseTest.provider(
+  "the separate Version resource pins its numbered version before Alias promotion",
+  (stack) =>
+    Effect.gen(function* () {
+      const writes: string[] = [];
+      const http = HttpClient.make((request, url) =>
+        Effect.sync(() => {
+          const path = url.pathname;
+          const qualifier = url.searchParams.get("Qualifier");
+          const body =
+            request.body._tag === "Uint8Array"
+              ? JSON.parse(new TextDecoder().decode(request.body.body))
+              : {};
+          const json = (value: object, status = 200) =>
+            HttpClientResponse.fromWeb(
+              request,
+              Response.json(value, {
+                status,
+                ...(status === 404
+                  ? { headers: { "x-amzn-errortype": "ResourceNotFoundException" } }
+                  : {}),
+              }),
+            );
+          if (request.method === "GET" && path.endsWith("/configuration"))
+            return json(versionedConfig);
+          if (path.endsWith("/versions")) {
+            if (request.method === "GET") return json({ Versions: [] });
+            writes.push("publish:7");
+            return json({ ...versionedConfig, Version: "7", Description: body.Description }, 201);
+          }
+          if (path.endsWith("/runtime-management-config")) {
+            if (request.method === "GET")
+              return json({ UpdateRuntimeOn: "Auto", FunctionArn: versionArn });
+            expect(body.RuntimeVersionArn).toBe(PINNED);
+            writes.push(`pin:${qualifier}`);
+            return json({ ...body, FunctionArn: versionArn });
+          }
+          if (path.endsWith("/aliases")) {
+            writes.push(`promote:${body.FunctionVersion}`);
+            return json({ ...body, AliasArn: `${versionArn}:live` }, 201);
+          }
+          if (path.includes("/event-invoke-config") || path.endsWith("/aliases/live"))
+            return json({}, request.method === "DELETE" ? 200 : 404);
+          throw new Error(`unexpected Lambda request ${request.method} ${path}`);
+        }),
+      );
+      const alias = yield* stack
+        .deploy(
+          Effect.gen(function* () {
+            const fn = yield* Lambda.Function("PublishHost", { main: timeoutHandlerPath });
+            const version = yield* Lambda.Version("Published", { function: fn });
+            return yield* Lambda.Alias("Serving", { version, aliasName: "live" });
+          }),
+        )
+        .pipe(Effect.provideService(HttpClient.HttpClient, http));
+      expect(alias.functionVersion).toBe("7");
+      expect(writes).toEqual(["publish:7", "pin:7", "promote:7"]);
+      yield* stack.destroy().pipe(Effect.provideService(HttpClient.HttpClient, http));
+    }),
+  { tags: ["unit", "local", "provider:aws:lambda"] },
+);
