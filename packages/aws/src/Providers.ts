@@ -226,6 +226,25 @@ import * as XRay from "./XRay/index.ts";
 
 export class Providers extends Provider.ProviderCollection<Providers>()("AWS") {}
 
+/** Options for {@link providers}. */
+export interface ProvidersOptions {
+  /**
+   * Route individual AWS services to their own endpoints, keyed by SDK
+   * service ID (`"SESv2"`, `"Service Quotas"`; matched case- and
+   * punctuation-insensitively). Applies to every provider, the stack
+   * program, and — in a dev run — the local emulator context, where
+   * services without an entry keep the emulator endpoint.
+   *
+   * @example
+   * ```ts
+   * AWS.providers({
+   *   serviceEndpoints: { SES: "http://127.0.0.1:8800/ses" },
+   * });
+   * ```
+   */
+  readonly serviceEndpoints?: Endpoint.ServiceEndpoints;
+}
+
 /**
  * Every AWS provider, pinned to one AWS environment (account, region and
  * credentials).
@@ -259,7 +278,7 @@ export class Providers extends Provider.ProviderCollection<Providers>()("AWS") {
  * );
  * ```
  */
-export const providers = () =>
+export const providers = (options: ProvidersOptions = {}) =>
   Layer.effect(
     Providers,
     // Providers are PINNED to the environment they are registered with (the
@@ -1914,6 +1933,11 @@ export const providers = () =>
     Layer.provideMerge(Layer.fresh(Region.fromEnvironment)),
     Layer.provideMerge(Layer.fresh(Credentials.fromEnvironment)),
     Layer.provideMerge(Layer.fresh(Endpoint.fromEnvironment)),
+    Layer.provideMerge(
+      options.serviceEndpoints === undefined
+        ? Layer.empty
+        : Endpoint.services(options.serviceEndpoints),
+    ),
     Layer.provideMerge(providedOrDefault()),
     Layer.provideMerge(AwsAuth),
     Layer.provideMerge(CredentialsStoreLive),

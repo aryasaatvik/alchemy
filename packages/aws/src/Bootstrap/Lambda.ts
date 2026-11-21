@@ -23,7 +23,8 @@ import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import { MinimumLogLevel } from "effect/References";
 import * as Scope from "effect/Scope";
-import { AWSEnvironment } from "../Environment.ts";
+import { fromRuntimeEnv } from "../Endpoint.ts";
+import { AWS_ENDPOINT_URL, AWSEnvironment } from "../Environment.ts";
 import { registerLambdaExtension } from "../Lambda/RuntimeExtension.ts";
 
 /**
@@ -69,12 +70,13 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
       );
       const region = yield* Region.Region;
       const endpoint = yield* Endpoint.Endpoint;
+      const serviceEndpoint = yield* Endpoint.ServiceEndpoint;
       const httpClient = yield* HttpClient.HttpClient;
       const configProvider = yield* ConfigProvider.ConfigProvider;
       return yield* Effect.cached(
         Effect.gen(function* () {
           const resolvedRegion = yield* region;
-          const resolvedEndpoint = yield* endpoint;
+          const resolvedEndpoint = yield* AWS_ENDPOINT_URL;
           const configured = yield* Config.option(Config.String("ALCHEMY_AWS_ACCOUNT_ID"));
           let accountId: string;
           if (Option.isSome(configured)) {
@@ -98,6 +100,7 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
               Layer.succeed(Credentials.Credentials, credentials),
               Layer.succeed(Region.Region, region),
               Layer.succeed(Endpoint.Endpoint, endpoint),
+              Layer.succeed(Endpoint.ServiceEndpoint, serviceEndpoint),
               Layer.succeed(HttpClient.HttpClient, httpClient),
               Layer.succeed(ConfigProvider.ConfigProvider, configProvider),
             ),
@@ -113,11 +116,7 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
     Layer.provideMerge(awsEnvironment),
     Layer.provideMerge(Credentials.fromEnv()),
     Layer.provideMerge(Region.fromEnv()),
-    // AWS_ENDPOINT_URL is the LocalStack-standard override injected by local
-    // emulators (floci) into the Lambda container — without it, runtime
-    // bindings in `alchemy dev` would call REAL AWS with dummy credentials.
-    // Resolves undefined when unset, so live deploys are unaffected.
-    Layer.provideMerge(Endpoint.fromEnv()),
+    Layer.provideMerge(fromRuntimeEnv),
     Layer.provideMerge(platform),
     Layer.provideMerge(RuntimeConfigProviderLive),
     Layer.provideMerge(Layer.succeed(MinimumLogLevel, process.env.DEBUG ? "Debug" : "Info")),

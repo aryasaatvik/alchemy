@@ -1,9 +1,47 @@
 import { Endpoint } from "@distilled.cloud/aws";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { AWSEnvironment } from "./Environment.ts";
+import { AWS_ENDPOINT_URL, AWS_SERVICE_ENDPOINTS, AWSEnvironment } from "./Environment.ts";
 
 export const of = (endpoint: string) => Layer.succeed(Endpoint.Endpoint, Effect.succeed(endpoint));
+
+/**
+ * Endpoints for individual AWS services, keyed by SDK service ID (`"S3"`,
+ * `"SESv2"`, `"Service Quotas"`). Keys match case- and
+ * punctuation-insensitively, so `"sesv2"` and `"service_quotas"` select the
+ * same services as their SDK IDs.
+ */
+export type ServiceEndpoints = Readonly<Record<string, string>>;
+
+const normalizeServiceId = (service: string) => service.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/**
+ * A distilled {@link Endpoint.ServiceEndpointResolver} over a
+ * {@link ServiceEndpoints} map. Services without an entry resolve to
+ * `fallback` (`undefined` keeps the SDK's default endpoint rules).
+ */
+export const serviceEndpointResolver = (
+  serviceEndpoints: ServiceEndpoints | undefined,
+  fallback?: string,
+): Endpoint.ServiceEndpointResolver => {
+  const byService = new Map(
+    Object.entries(serviceEndpoints ?? {}).map(([service, endpoint]) => [
+      normalizeServiceId(service),
+      endpoint,
+    ]),
+  );
+  return {
+    resolve: (service) => byService.get(normalizeServiceId(service)) ?? fallback,
+  };
+};
+
+/**
+ * Route individual AWS services to their own endpoints. Distilled consults
+ * this only when no explicit {@link Endpoint.Endpoint} is set for the call,
+ * so an operation-scoped `Endpoint.of(...)` still wins.
+ */
+export const services = (serviceEndpoints: ServiceEndpoints) =>
+  Layer.succeed(Endpoint.ServiceEndpoint, serviceEndpointResolver(serviceEndpoints));
 
 /**
  * Derive a custom endpoint (if any) from the surrounding
@@ -28,3 +66,13 @@ export const fromEnvironment: Layer.Layer<never, never, AWSEnvironment> = Layer.
  * deadlocks the fiber with no I/O and no timer pending.
  */
 export const none = Layer.succeed(Endpoint.Endpoint, Effect.undefined);
+
+/** Runtime routing uses the global emulator URL as the fallback for unlisted services. */
+export const fromRuntimeEnv = Layer.effect(
+  Endpoint.ServiceEndpoint,
+  Effect.gen(function* () {
+    const endpoints = yield* AWS_SERVICE_ENDPOINTS;
+    const fallback = yield* AWS_ENDPOINT_URL;
+    return serviceEndpointResolver(endpoints, fallback);
+  }),
+).pipe(Layer.provideMerge(none));
