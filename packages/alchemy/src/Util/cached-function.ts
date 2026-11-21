@@ -72,7 +72,7 @@ export const makeCachedFunction = <A extends Array<any>, B, E, R>(
           const deferred = yield* Deferred.make<B, E>();
           cache.set(cacheKey, deferred);
 
-          const exit = yield* Effect.exit(restore(fn(...args)));
+          const exit = yield* Effect.exit(restore(Effect.suspend(() => fn(...args))));
           yield* Deferred.done(deferred, exit);
 
           if (exit._tag === "Failure") {

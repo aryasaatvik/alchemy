@@ -424,8 +424,11 @@ export const Platform = <
             Effect.map(CurrentNamespace, (namespace) => !(toFqn(namespace, id) in stack.resources)),
         }),
       );
-      const evaluate = () =>
-        Effect.flatMap(isFirstRegistration, (firstRegistration) =>
+      const evaluate = Effect.fnUntraced(function* () {
+        if (globalThis.__ALCHEMY_RUNTIME__ && (yield* CurrentRuntimeContext)) {
+          return yield* resource.ref(id);
+        }
+        return yield* Effect.flatMap(isFirstRegistration, (firstRegistration) =>
           register().pipe(
             Effect.tap((resource) =>
               // Run the hook only for the `yield*` that registered the
@@ -447,6 +450,7 @@ export const Platform = <
             ),
           ),
         );
+      });
       return Object.assign(
         function (props: Props, impl: Impl) {
           return cls.Self.pipe(provideClassLayer(cls.make(props, impl)));
@@ -585,7 +589,13 @@ export const Platform = <
                           // handing it to the RuntimeContext.
                           const key = sanitizeKey(path.join("_"));
                           const node = yield* configProvider.load(path);
-                          if (node) {
+                          // Synthetic record/array nodes have no scalar to bind.
+                          // A declared env entry already owns the runtime value.
+                          if (
+                            key.length > 0 &&
+                            node?.value !== undefined &&
+                            props?.env?.[key] === undefined
+                          ) {
                             const output = Output.literal(Redacted.make(node.value));
                             yield* ctx?.set(key, output) ?? Effect.void;
                           }
@@ -659,6 +669,14 @@ export const Platform = <
               return Object.assign(instance, {
                 RuntimeContext: runtimeContext,
               }) as R;
+            }),
+          ).pipe((initialize) =>
+            Effect.gen(function* () {
+              if (globalThis.__ALCHEMY_RUNTIME__ && (yield* CurrentRuntimeContext)) {
+                // The child host initializes in its own entrypoint.
+                return yield* resource.ref(id);
+              }
+              return yield* initialize;
             }),
           ),
         );
