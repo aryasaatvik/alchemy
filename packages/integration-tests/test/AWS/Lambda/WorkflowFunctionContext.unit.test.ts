@@ -19,6 +19,12 @@ import { expect, it } from "@alchemy.run/test";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import { Endpoint } from "@distilled.cloud/aws/Endpoint";
 import { Region } from "@distilled.cloud/aws/Region";
+import {
+  ResponseValidation,
+  StrictDecoder,
+  strict,
+} from "@distilled.cloud/core/response-validation";
+import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { decodeResult, encodeExit, CurrentActivity } from "alchemy/WorkflowEncoding";
 import * as Workflows from "alchemy/Workflows";
@@ -106,6 +112,9 @@ for (const mode of ["engine", "runner"] as const) {
       qualifier: string | null;
       host: string;
       authorization: string | undefined;
+      validation: string;
+      hasStrictDecoder: boolean;
+      retryCap: number | undefined;
     }> = [];
     const services = Layer.mergeAll(
       Layer.succeed(
@@ -119,6 +128,8 @@ for (const mode of ["engine", "runner"] as const) {
       ),
       Layer.succeed(Region, Effect.succeed("us-west-2")),
       Layer.succeed(Endpoint, Effect.succeed("https://boot-transport.test")),
+      strict,
+      Layer.succeed(ServerRetryHintCapMs, 120_000),
       Layer.succeed(
         HttpClient.HttpClient,
         HttpClient.make((request, url) =>
@@ -128,6 +139,9 @@ for (const mode of ["engine", "runner"] as const) {
               qualifier: url.searchParams.get("Qualifier"),
               host: url.host,
               authorization: request.headers.authorization,
+              validation: yield* ResponseValidation,
+              hasStrictDecoder: (yield* StrictDecoder) !== undefined,
+              retryCap: Option.getOrUndefined(yield* Effect.serviceOption(ServerRetryHintCapMs)),
             });
             yield* Effect.logInfo("transport accepted invoke");
             return HttpClientResponse.fromWeb(
@@ -158,6 +172,9 @@ for (const mode of ["engine", "runner"] as const) {
         pathname: "/2015-03-31/functions/context-probe/invocations",
         qualifier: "7",
         host: "boot-transport.test",
+        validation: "strict",
+        hasStrictDecoder: true,
+        retryCap: 120_000,
       });
       expect(requests[0]!.authorization).toContain("Credential=boot-key/");
       expect(requests[0]!.authorization).toContain("/us-west-2/lambda/aws4_request");

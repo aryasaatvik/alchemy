@@ -9372,6 +9372,9 @@ importers:
       '@distilled.cloud/aws':
         specifier: workspace:*
         version: link:../../submodules/distilled/packages/aws
+      '@distilled.cloud/core':
+        specifier: workspace:*
+        version: link:../../submodules/distilled/packages/core
       '@distilled.cloud/s3':
         specifier: workspace:*
         version: link:../../submodules/distilled/packages/s3
