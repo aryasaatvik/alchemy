@@ -1305,7 +1305,6 @@
         "default": "./lib/XRay/index.js"
       },
       "./EKS/internal/*": null,
-      "./Lambda/internal/*": null,
       "./internal/*": null,
       "./*/internal": null,
       "./*": {

@@ -68,16 +68,16 @@ import {
   makeFunctionImage,
 } from "./FunctionImage.ts";
 import {
+  functionPolicyStatements,
+  functionLogGroupGuard,
+  renderFunctionPolicy,
+} from "./FunctionPolicy.ts";
+import {
   isResponseStreaming,
   makeFunctionHttpHandler,
   RESPONSE_STREAM_ENV,
   streamifyHandler,
 } from "./HttpServer.ts";
-import {
-  functionPolicyStatements,
-  functionLogGroupGuard,
-  renderFunctionPolicy,
-} from "./internal/FunctionPolicy.ts";
 import {
   HandlerContext,
   InvocationDeadlineState,

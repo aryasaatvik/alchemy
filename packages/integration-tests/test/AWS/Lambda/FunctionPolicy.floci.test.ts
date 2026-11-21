@@ -1,5 +1,6 @@
 import { AWSEnvironment } from "@alchemy.run/aws/Environment";
 import * as Lambda from "@alchemy.run/aws/Lambda";
+import { compactFunctionPolicy } from "@alchemy.run/aws/Lambda/FunctionPolicy";
 import { Docker } from "@alchemy.run/docker/Docker";
 import { expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
@@ -8,7 +9,6 @@ import * as iam from "@distilled.cloud/aws/iam";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { compactFunctionPolicy } from "../../../../aws/src/Lambda/internal/FunctionPolicy.ts";
 import { apiPolicyStatements } from "./fixtures/function-policy.ts";
 import { services } from "./fixtures/workflow-floci/services.ts";
 

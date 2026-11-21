@@ -1,14 +1,14 @@
 import type { PolicyStatement } from "@alchemy.run/aws/IAM/Policy";
-import { describe, expect, it } from "@alchemy.run/test";
-import * as Effect from "effect/Effect";
-import * as Result from "effect/Result";
 import {
   compactFunctionPolicy,
   functionLogGroupGuard,
   functionPolicyStatements,
   LambdaRolePolicyMaxBytes,
   renderFunctionPolicy,
-} from "../../../../aws/src/Lambda/internal/FunctionPolicy.ts";
+} from "@alchemy.run/aws/Lambda/FunctionPolicy";
+import { describe, expect, it } from "@alchemy.run/test";
+import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 
 const guard = functionLogGroupGuard("us-east-1", "100000002303", "policy-unit-test");
 
