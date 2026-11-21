@@ -543,7 +543,17 @@ export const GatewayResourceProvider = () =>
         return { action: "replace" } as const;
       }
 
-      const oldMutable = mutable(output ?? ((yield* desired(id, olds)) as Gateway["Attributes"]));
+      let previous = output ?? ((yield* desired(id, olds)) as Gateway["Attributes"]);
+      if (output && output.byokOnly === undefined) {
+        // Legacy state did not record BYOK. Read the current value before
+        // deciding to skip an update, so a live true still converges to false.
+        const live = yield* aiGateway
+          .getAiGateway({ accountId, id: oldGatewayId })
+          .pipe(Effect.catchTag("GatewayNotFound", () => Effect.undefined));
+        if (typeof live?.byokOnly !== "boolean") return { action: "update" } as const;
+        previous = { ...output, byokOnly: live.byokOnly };
+      }
+      const oldMutable = mutable(previous);
       const nextMutable = mutable({
         ...next,
         authentication: next.authentication ?? oldMutable.authentication,

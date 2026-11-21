@@ -7,6 +7,7 @@ import { describe, expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
 import { apiTokenCredentials, Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as Drift from "alchemy/Drift";
+import { State } from "alchemy/State";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -149,6 +150,28 @@ describe.sequential(
           expect(writes.at(-1)).toEqual({ method: "PUT", byokOnly: false });
           yield* stack.destroy();
         }),
+    );
+    test.provider("reads BYOK for legacy state and detects a live true value", (stack) =>
+      Effect.gen(function* () {
+        live = undefined;
+        const program = Gateway("Gateway", { id: gatewayId, byokOnly: false });
+        yield* stack.deploy(program);
+        const state = yield* Effect.flatten(State).pipe(Effect.provide(stack.state));
+        const key = { stack: stack.name, stage: stack.stage, fqn: "Gateway" };
+        const stored = yield* state.get(key);
+        if (!stored || stored.status !== "created") throw new Error("Expected persisted gateway");
+        const { byokOnly: _byokOnly, ...legacy } = stored.attr as Gateway["Attributes"];
+        yield* state.set({ ...key, value: { ...stored, attr: legacy } });
+        writes.length = 0;
+
+        const unchanged = yield* stack.plan(program);
+        expect(unchanged.resources.Gateway).toMatchObject({ action: "noop" });
+        live = true;
+        const changed = yield* stack.plan(program);
+        expect(changed.resources.Gateway).toMatchObject({ action: "update" });
+        expect(writes).toEqual([]);
+        yield* stack.destroy();
+      }),
     );
   },
 );
