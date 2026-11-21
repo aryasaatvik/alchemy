@@ -273,7 +273,7 @@ const makeRelay = (pendingTimeout: Duration.Duration): Relay => {
       // vanished mid-response cuts the client off.
       upstream.on("error", () => socket.destroy());
       upstream.on("close", (hadError) => {
-        if (hadError || !socket.writableEnded) socket.destroy();
+        if (hadError || !upstream.readableEnded) socket.destroy();
       });
     }
     // From here the socket does the talking; the client closing ends the
