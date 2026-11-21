@@ -3370,9 +3370,11 @@ describe("engine-level adoption", { tags: ["unit", "local"] }, () => {
         {},
       );
       expect(plan.resources.Updated!.action).toBe("update");
-      expect(plan.resources.Unchanged!.action).toBe("noop");
       expect((plan.resources.Updated as any).deferredAdoption).toBeUndefined();
-      expect(plan.resources.Unchanged!.deferredAdoption).toEqual({ adopt: false });
+      expect(plan.resources.Unchanged).toMatchObject({
+        action: "noop",
+        deferredAdoption: { adopt: false },
+      });
     }),
   );
 
