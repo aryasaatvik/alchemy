@@ -70,7 +70,10 @@ const harness = (
                 { ...execution, DurableExecutionArn: options.secondArn ?? durableArn },
               ],
             }
-          : { DurableExecutions: [], NextMarker: "second-page" },
+          : {
+              DurableExecutions: options.secondArn === undefined ? [] : [execution],
+              NextMarker: "second-page",
+            },
       );
     } else if (path.includes("/durable-execution-callbacks/")) {
       response = Response.json({});
@@ -185,4 +188,24 @@ it("interrupts beta.85 WaitStarted sleepers and resumes old suspended activities
     ),
   ).toBe(true);
   expect(await suspend.run(encodeExit(Exit.succeed("approved")))).toBe(golden.callback.success);
+});
+
+it("rejects duplicate execution names across version pages", async () => {
+  const secondArn = durableArn.replace("golden:1", "golden:2");
+  const { run, engine, requests } = harness({ secondArn });
+  const saved = Workflows.makeRun(await engine, Probe, golden.id);
+  const failure = await run(Effect.exit(saved.status));
+  expect(Exit.isFailure(failure)).toBe(true);
+  if (Exit.isFailure(failure)) {
+    expect(failure.cause.reasons).toMatchObject([
+      {
+        _tag: "Die",
+        defect: {
+          _tag: "AmbiguousDurableExecutionIdentity",
+          executionArns: [durableArn, secondArn],
+        },
+      },
+    ]);
+  }
+  expect(requests.map(({ query }) => query.get("Marker"))).toEqual([null, "second-page"]);
 });
