@@ -4,8 +4,6 @@ import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Region } from "@distilled.cloud/aws/Region";
 import { Retry } from "@distilled.cloud/aws/Retry";
 import { SigningKeyCache } from "@distilled.cloud/aws/SigV4";
-import { ResponseValidation, StrictDecoder } from "@distilled.cloud/core/response-validation";
-import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
 import type { InputProps } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import {
@@ -479,9 +477,6 @@ const awsOperationContext = Effect.context<LambdaServices>().pipe(
       ServiceEndpoint,
       Retry,
       SigningKeyCache,
-      ResponseValidation,
-      StrictDecoder,
-      ServerRetryHintCapMs,
       ConfigProvider,
       Fetch,
       RequestInit,
