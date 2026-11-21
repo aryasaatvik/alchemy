@@ -1,11 +1,12 @@
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import type * as Schema from "effect/Schema";
-import { type DurableDeferred, type Workflow, WorkflowEngine } from "effect/workflow";
+import { DurableDeferred, type Workflow, WorkflowEngine } from "effect/workflow";
 import type { RuntimeContext } from "./RuntimeContext.ts";
 
 declare const ImplementedTypeId: unique symbol;
@@ -277,10 +278,63 @@ export class OnResult extends Context.Service<
   (stored: StoredResult) => Effect.Effect<void, never, RuntimeContext>
 >()("alchemy/Workflows/OnResult") {}
 
+/** Provider reference captured per start call, without changing WorkflowEngine. @internal */
+export class StartReceipt extends Context.Service<
+  StartReceipt,
+  {
+    readonly record: (reference: string) => void;
+  }
+>()("alchemy/Workflows/StartReceipt") {}
+
+/** Provider reference for reading a saved run without rediscovering it by name. @internal */
+export const ExecutionReference = Context.Reference<string | undefined>(
+  "alchemy/Workflows/ExecutionReference",
+  {
+    defaultValue: () => undefined,
+  },
+);
+
+/** The requested deferred has no open callback yet, or its wait has already ended. */
+export class NotYetWaiting extends Data.TaggedError("NotYetWaiting")<{
+  readonly workflowName: string;
+  readonly executionId: string;
+  readonly deferredName: string;
+}> {
+  override get message() {
+    return `Workflow ${this.workflowName} execution ${this.executionId} is not waiting on deferred ${this.deferredName}`;
+  }
+}
+
+/**
+ * Complete a deferred by token, returning NotYetWaiting on engines which require
+ * an open wait. No retry or buffering is performed. Pass a saved executionRef to
+ * avoid rediscovering the provider execution. Effect's own done contract remains
+ * unchanged: it raises NotYetWaiting as a defect on those engines.
+ */
+export const completeDeferred = <
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint,
+>(
+  deferred: DurableDeferred.DurableDeferred<Success, Error>,
+  options: {
+    readonly token: DurableDeferred.Token;
+    readonly exit: Exit.Exit<Success["Type"], Error["Type"]>;
+    readonly executionRef?: string;
+  },
+) =>
+  DurableDeferred.done(deferred, options).pipe(
+    Effect.provideService(ExecutionReference, options.executionRef),
+    Effect.catchDefect((defect) =>
+      defect instanceof NotYetWaiting ? Effect.fail(defect) : Effect.die(defect),
+    ),
+  );
+
 /** One run of a workflow. */
 export interface Run<A, E> {
   /** The run's id. Store it to read the run again later, with `get`. */
   readonly executionId: string;
+  /** Provider's execution reference (a durable execution ARN on Lambda), when supplied. */
+  readonly executionRef?: string;
   /** Where the run is now. */
   readonly status: Effect.Effect<Status<A, E>>;
   /**
@@ -288,7 +342,12 @@ export interface Run<A, E> {
    * days, so wait in tests and scripts, not in a request.
    */
   readonly result: Effect.Effect<A, E>;
-  /** Complete a `DurableDeferred` the run waits on. */
+  /** Complete a deferred with a success or failure Exit. Requires an open wait on Lambda. */
+  readonly complete: <Success extends Schema.Constraint, Error extends Schema.Constraint>(
+    deferred: DurableDeferred.DurableDeferred<Success, Error>,
+    exit: Exit.Exit<Success["Type"], Error["Type"]>,
+  ) => Effect.Effect<void, NotYetWaiting, Success["EncodingServices"] | Error["EncodingServices"]>;
+  /** Complete a waiting deferred. Use complete for typed NotYetWaiting; this legacy API raises it as a defect. */
   readonly signal: <Success extends Schema.Constraint>(
     deferred: DurableDeferred.DurableDeferred<Success, any>,
     value: Success["Type"],
@@ -302,7 +361,10 @@ export interface WorkflowClient<W> {
   /** Start a run, or return the run already started with the same key. Returns at once. */
   readonly start: (payload: PayloadOf<W>) => Effect.Effect<Run<SuccessOf<W>, ErrorOf<W>>>;
   /** A run started earlier, by its id. */
-  readonly get: (executionId: string) => Run<SuccessOf<W>, ErrorOf<W>>;
+  readonly get: (
+    executionId: string,
+    options?: { readonly executionRef?: string },
+  ) => Run<SuccessOf<W>, ErrorOf<W>>;
 }
 
 /** How often to check a run while waiting for it. */
@@ -336,7 +398,7 @@ const POLL = Schedule.min([Schedule.exponential("100 millis"), Schedule.spaced("
  *
  * **Example:** Read a run later
  * ```typescript
- * const run = greet.get(executionId);
+ * const run = greet.get(executionId, { executionRef: savedProviderReference });
  * const status = yield* run.status;
  * yield* run.signal(Approval, "agent-7");
  * ```
@@ -353,16 +415,22 @@ export const RunWorkflow = <W extends Workflow.Any>(
   Effect.gen(function* () {
     const engine = yield* WorkflowEngine.WorkflowEngine;
     const typed = workflow as unknown as ErasedWorkflow;
-    const run = (executionId: string) =>
-      makeRun<SuccessOf<W>, ErrorOf<W>>(engine, typed, executionId);
+    const run = (executionId: string, options?: { readonly executionRef?: string }) =>
+      makeRun<SuccessOf<W>, ErrorOf<W>>(engine, typed, executionId, options?.executionRef);
     return {
       start: (payload) =>
-        typed
-          .execute(payload, { discard: true })
-          .pipe(
+        Effect.gen(function* () {
+          let executionRef: string | undefined;
+          const executionId = yield* typed.execute(payload, { discard: true }).pipe(
             Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
-            Effect.map(run),
-          ) as Effect.Effect<Run<SuccessOf<W>, ErrorOf<W>>>,
+            Effect.provideService(StartReceipt, {
+              record: (ref) => {
+                executionRef = ref;
+              },
+            }),
+          );
+          return run(executionId, { executionRef });
+        }),
       get: run,
     } satisfies WorkflowClient<W>;
   });
@@ -376,11 +444,15 @@ export const makeRun = <A = unknown, E = unknown>(
   engine: WorkflowEngine.WorkflowEngine["Service"],
   workflow: Workflow.Workflow<string, any, any, any>,
   executionId: string,
+  executionRef?: string,
 ): Run<A, E> => {
   const erased = workflow as unknown as ErasedWorkflow<A, E>;
-  const poll = engine.poll(erased, executionId);
+  const poll = engine
+    .poll(erased, executionId)
+    .pipe(Effect.provideService(ExecutionReference, executionRef));
   return {
     executionId,
+    executionRef,
     status: Effect.map(poll, (result): Status<A, E> => {
       if (Option.isNone(result)) return { _tag: "NotStarted" };
       if (result.value._tag === "Suspended") return { _tag: "Running" };
@@ -396,16 +468,26 @@ export const makeRun = <A = unknown, E = unknown>(
       Effect.orDie,
       Effect.flatten,
     ),
+    complete: (deferred, exit) =>
+      completeDeferred(deferred, {
+        token: DurableDeferred.tokenFromExecutionId(deferred, { workflow, executionId }),
+        executionRef,
+        exit,
+      }).pipe(Effect.provideService(WorkflowEngine.WorkflowEngine, engine)),
     signal: (deferred, value) =>
-      engine.deferredDone(
-        deferred as unknown as DurableDeferred.DurableDeferred<ErasedCodec, ErasedCodec>,
-        {
-          workflowName: workflow._tag,
-          executionId,
-          deferredName: deferred.name,
-          exit: Exit.succeed(value),
-        },
-      ),
-    interrupt: engine.interrupt(workflow, executionId),
+      engine
+        .deferredDone(
+          deferred as unknown as DurableDeferred.DurableDeferred<ErasedCodec, ErasedCodec>,
+          {
+            workflowName: workflow._tag,
+            executionId,
+            deferredName: deferred.name,
+            exit: Exit.succeed(value),
+          },
+        )
+        .pipe(Effect.provideService(ExecutionReference, executionRef)),
+    interrupt: engine
+      .interrupt(workflow, executionId)
+      .pipe(Effect.provideService(ExecutionReference, executionRef)),
   };
 };
