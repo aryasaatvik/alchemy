@@ -1,4 +1,9 @@
 // Captured from Samva fork 994a83ff04fa1a9b004403775f7e622d4d2e1843.
+// Build with pnpm pack:integration at the backup ref in a disposable checkout.
+// Put the pack in artifacts/ or set BETA85_PACK_DIR. The pinned Floci image must be local.
+// From the repository root:
+// mise x bun@1.3.13 node@24 pnpm@12.15.0 -- bun scripts/record-beta85-workflow-golden.ts --check
+// Use --write to regenerate. Checks normalize Floci-generated IDs and timestamps.
 // Start bytes were recorded at Distilled's HTTP boundary. Histories and callback
 // requests came from that fork's runner and sender against the pinned Floci image.
 // Only operation events relevant to replay are retained from each history.

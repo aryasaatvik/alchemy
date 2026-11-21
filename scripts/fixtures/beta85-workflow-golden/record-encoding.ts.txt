@@ -1,0 +1,62 @@
+import { encodeDurableEnvelope } from "@alchemy.run/aws/Lambda/DurableBridge";
+import { executionNameOf, makeWorkflowEngine } from "@alchemy.run/aws/Lambda/WorkflowFunction";
+import { encodeResult } from "alchemy/WorkflowEncoding";
+import * as Workflows from "alchemy/Workflows";
+import { Effect, Exit } from "effect";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { WorkflowEngine } from "effect/workflow";
+import { services } from "./packages/integration-tests/test/AWS/Lambda/fixtures/workflow-floci/services.ts";
+import {
+  Probe,
+  Rejected,
+} from "./packages/integration-tests/test/AWS/Lambda/fixtures/workflow-floci/workflows.ts";
+
+const start = await Effect.runPromise(
+  Effect.gen(function* () {
+    const engine = yield* makeWorkflowEngine("golden", "live");
+    const client = yield* Workflows.RunWorkflow(Probe).pipe(
+      Effect.provideService(Workflows.Implemented("Probe"), true),
+      Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
+    );
+    return yield* client.start({ id: "gold-success", mode: "success" });
+  }).pipe(
+    Effect.provideService(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) => {
+        const body =
+          request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : null;
+        console.log(
+          JSON.stringify({
+            body,
+            qualifier: url.searchParams.get("Qualifier"),
+            name: request.headers["x-amz-durable-execution-name"],
+          }),
+        );
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(null, {
+              status: 202,
+              headers: { "x-amz-durable-execution-arn": "recorded-arn" },
+            }),
+          ),
+        );
+      }),
+    ),
+    Effect.provide(services("http://127.0.0.1:0")),
+  ),
+);
+console.log(
+  JSON.stringify({
+    id: start.executionId,
+    native: encodeDurableEnvelope("Golden", { text: '["already JSON"]', count: 3 }),
+    names: [
+      ["A/B: 🕒", "id with/space"],
+      ["Workflow".repeat(10), "a".repeat(32)],
+    ].map(([workflow, id]) => ({ workflow, id, name: executionNameOf(workflow, id) })),
+    success: JSON.stringify(await Effect.runPromise(encodeResult(Probe, Exit.succeed("approved")))),
+    failure: JSON.stringify(
+      await Effect.runPromise(encodeResult(Probe, Exit.fail(new Rejected({ reason: "no" })))),
+    ),
+  }),
+);

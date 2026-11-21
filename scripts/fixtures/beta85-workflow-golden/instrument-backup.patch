@@ -1,0 +1,136 @@
+--- a/packages/integration-tests/test/AWS/Lambda/WorkflowFunction.floci.test.ts
++++ b/packages/integration-tests/test/AWS/Lambda/WorkflowFunction.floci.test.ts
+@@ -38,7 +38,7 @@
+     ),
+   );
+ const start = async (mode: string) => {
+-  const payload = { id: `${mode}-${crypto.randomUUID()}`, mode };
++  const payload = { id: `gold-${mode}`, mode };
+   const client = await run(
+     Workflows.RunWorkflow(Probe).pipe(
+       Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
+@@ -54,6 +54,7 @@
+ const counts: Record<string, Record<string, number>> = {};
+ const measure = async (mode: string, arn: string) => {
+   const history = [...(await events(arn))];
++  console.log("GOLD_HISTORY", JSON.stringify({ mode, history }));
+   const operations = new Map(
+     history
+       .filter((e) => e.Id)
+@@ -143,7 +144,10 @@
+   if (Exit.isFailure(exit)) {
+     const failure = exit.cause.reasons.find((r) => r._tag === "Fail");
+     expect(failure?._tag === "Fail" && failure.error).toBeInstanceOf(Workflows.NotYetWaiting);
+-    if (failure?._tag === "Fail") expect(failure.error.deferredName).toBe(deferredName);
++    if (failure?._tag === "Fail") {
++      expect(failure.error.deferredName).toBe(deferredName);
++      console.log("GOLD_NOT_YET_WAITING", JSON.stringify(failure.error));
++    }
+   }
+ };
+
+@@ -152,10 +156,7 @@
+     directory = await mkdtemp(path.join(tmpdir(), "alchemy-workflow-pr3-"));
+     await run(S3.createBucket({ Bucket: "pr3-workflow-attempts" }));
+     // Resolve from the workspace's pinned SDK, not from the network.
+-    const sdkEntry = path.resolve(
+-      import.meta.dirname,
+-      "../../../../../node_modules/.pnpm/@aws+durable-execution-sdk-js@2.6.0/node_modules/@aws/durable-execution-sdk-js/dist/index.mjs",
+-    );
++    const sdkEntry = Bun.resolveSync("@aws/durable-execution-sdk-js", import.meta.dir);
+     for (const [entry, outfile, external] of [
+       [
+         path.join(import.meta.dirname, "fixtures/workflow-floci/runtime.ts"),
+@@ -167,7 +168,7 @@
+       const built = await Bun.build({
+         entrypoints: [entry],
+         target: "node",
+-        external: [...external],
++        external: [...external, "@effect/platform-bun/BunHttpServer", "react-devtools-core"],
+         minify: false,
+       });
+       if (!built.success) throw new AggregateError(built.logs);
+@@ -183,7 +184,7 @@
+     await run(
+       Lambda.createFunction({
+         FunctionName: name,
+-        Runtime: "nodejs22.x",
++        Runtime: "nodejs24.x",
+         Handler: "index.handler",
+         Role: "arn:aws:iam::000000000000:role/pr3",
+         Timeout: 60,
+@@ -197,7 +198,8 @@
+         Publish: true,
+       }),
+     );
+-    engine = await run(makeWorkflowEngine(name, "1"));
++    await run(Lambda.createAlias({ FunctionName: name, Name: "live", FunctionVersion: "1" }));
++    engine = await run(makeWorkflowEngine(name, "live"));
+   }, 120_000);
+   afterAll(async () => {
+     console.log("DURABLE_OPERATION_COUNTS", JSON.stringify(counts));
+@@ -331,7 +333,24 @@
+       });
+       await awaitCallback(started.executionRef!, Approval.name);
+       const requests: RequestReceipt[] = [];
+-      const freshEngine = await measuredEngine(requests);
++      const freshEngine = await run(
++        makeWorkflowEngine(name, "1").pipe(
++          Effect.updateService(HttpClient.HttpClient, (client) =>
++            HttpClient.mapRequest(client, (request) => {
++              if (request.url.includes("/durable-execution-callbacks/")) {
++                if (request.body._tag !== "Uint8Array") throw new Error("Expected callback bytes");
++                console.log("GOLD_CALLBACK", mode, new TextDecoder().decode(request.body.body));
++              }
++              const url = new URL(request.url);
++              requests.push({
++                url: `${url.origin}${url.pathname}`,
++                params: Object.fromEntries([...url.searchParams, ...request.urlParams]),
++              });
++              return request;
++            }),
++          ),
++        ),
++      );
+       const completion = Workflows.completeDeferred(Approval, {
+         token,
+         executionRef: started.executionRef,
+@@ -433,6 +452,13 @@
+     expect(await run(started.status)).toEqual({ _tag: "Completed", result: "after wait" });
+   }, 90_000);
+
++  test("record a suspended activity", async () => {
++    const started = await start("suspension");
++    await awaitCallback(started.executionRef!, "suspension/1/suspended-0");
++    await measure("suspension", started.executionRef!);
++    await run(Lambda.stopDurableExecution({ DurableExecutionArn: started.executionRef! }));
++  }, 40_000);
++
+   test("a loop waits on distinct deferred names without re-matching the first", async () => {
+     const started = await start("loop");
+     for (const [index, deferred] of LoopApprovals.entries()) {
+--- a/packages/integration-tests/test/AWS/Lambda/fixtures/workflow-floci/workflows.ts
++++ b/packages/integration-tests/test/AWS/Lambda/fixtures/workflow-floci/workflows.ts
+@@ -9,7 +9,7 @@
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
+-import { Activity, DurableClock, DurableDeferred, Workflow } from "effect/workflow";
++import { Activity, DurableClock, DurableDeferred, Workflow, WorkflowEngine } from "effect/workflow";
+ import { readInline } from "./activity-context.ts";
+
+ export class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {
+@@ -38,6 +38,13 @@
+   Workflows.layer(Probe, ({ id, mode }) =>
+     Effect.gen(function* () {
+       if (mode === "context") return JSON.stringify(yield* readInline);
++      if (mode === "suspension") {
++        return yield* Activity.make({
++          name: "suspension",
++          success: Schema.String,
++          execute: Effect.flatMap(WorkflowEngine.WorkflowInstance, Workflow.suspend),
++        });
++      }
+       if (mode === "early")
+         yield* DurableClock.sleep({
+           name: "before-await",
