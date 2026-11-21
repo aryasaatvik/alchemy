@@ -1,5 +1,22 @@
 import * as Effect from "effect/Effect";
 import { initialCwd } from "../Util/Node.ts";
+import { FrameworkServerError } from "./FrontendCore.ts";
+
+const astroConfigModule = "@alchemy.run/frontend-frameworks/astro/config";
+const importAstroConfig = Effect.tryPromise({
+  try: () =>
+    import(astroConfigModule) as Promise<
+      typeof import("@alchemy.run/frontend-frameworks/astro/config")
+    >,
+  catch: (cause) =>
+    new FrameworkServerError({
+      framework: "astro",
+      message:
+        `Failed to import "${astroConfigModule}". ` +
+        "Install @alchemy.run/frontend-frameworks in your project to read Astro configuration.",
+      cause,
+    }),
+}).pipe(Effect.orDie);
 
 export interface AstroOutputProps {
   /** Project root, relative to the initial working directory. */
@@ -18,26 +35,24 @@ export interface AstroOutputProps {
  * to the build.
  *
  * `@alchemy.run/frontend-frameworks` is an optional peer dependency, so it
- * is imported lazily. When it is missing or the config cannot be loaded the
- * site falls back to `"server"` (the build reports the real error).
+ * is resolved at runtime. If the reader loads but the config cannot be read,
+ * the site falls back to `"server"` and the build reports the config error.
  */
 export const resolveAstroOutput = Effect.fn("Website.resolveAstroOutput")(function* (
   props: AstroOutputProps,
 ) {
   if (props.output !== undefined) return props.output;
-  const declared = yield* Effect.tryPromise(
-    () => import("@alchemy.run/frontend-frameworks/astro/config"),
-  ).pipe(
-    Effect.flatMap((astro) =>
-      astro.readConfigOutput({ cwd: initialCwd, rootDir: props.rootDir, config: props.config }),
-    ),
-    Effect.catch((error) =>
-      Effect.logWarning(
-        `Could not read \`output\` from the Astro config in "${props.rootDir ?? "."}"; deploying with "server"`,
-        error,
-      ).pipe(Effect.as(undefined)),
-    ),
-  );
+  const astro = yield* importAstroConfig;
+  const declared = yield* astro
+    .readConfigOutput({ cwd: initialCwd, rootDir: props.rootDir, config: props.config })
+    .pipe(
+      Effect.catch((error) =>
+        Effect.logWarning(
+          `Could not read \`output\` from the Astro config in "${props.rootDir ?? "."}"; deploying with "server"`,
+          error,
+        ).pipe(Effect.as(undefined)),
+      ),
+    );
   return declared ?? "server";
 });
 
@@ -61,21 +76,19 @@ export interface AstroSettings {
 export const resolveAstroSettings = Effect.fn("Website.resolveAstroSettings")(function* (
   props: AstroOutputProps,
 ) {
-  const declared = yield* Effect.tryPromise(
-    () => import("@alchemy.run/frontend-frameworks/astro/config"),
-  ).pipe(
-    Effect.flatMap((astro) =>
-      astro.readConfigSettings({ cwd: initialCwd, rootDir: props.rootDir, config: props.config }),
-    ),
-    Effect.catch((error) =>
-      Effect.logWarning(
-        `Could not read the Astro config in "${props.rootDir ?? "."}"; deploying with ${
-          props.output === undefined ? '"server"' : `"${props.output}"`
-        } and without Workers Cache`,
-        error,
-      ).pipe(Effect.as(undefined)),
-    ),
-  );
+  const astro = yield* importAstroConfig;
+  const declared = yield* astro
+    .readConfigSettings({ cwd: initialCwd, rootDir: props.rootDir, config: props.config })
+    .pipe(
+      Effect.catch((error) =>
+        Effect.logWarning(
+          `Could not read the Astro config in "${props.rootDir ?? "."}"; deploying with ${
+            props.output === undefined ? '"server"' : `"${props.output}"`
+          } and without Workers Cache`,
+          error,
+        ).pipe(Effect.as(undefined)),
+      ),
+    );
   return {
     output: props.output ?? declared?.output ?? "server",
     workerCache: declared?.workerCache ?? false,

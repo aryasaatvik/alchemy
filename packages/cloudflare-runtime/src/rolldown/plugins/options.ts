@@ -5,7 +5,7 @@ import type * as vite from "vite";
 import { PRERENDER_ENVIRONMENT } from "../../vite/prerender.ts";
 import { createPlugin } from "../factory.ts";
 import { parseViteEnvironments, type BasePluginOptions } from "../options.ts";
-import { hasNodejsCompat } from "../utils.ts";
+import { hasNodejsCompat, loadVite } from "../utils.ts";
 import { workerEntryId } from "./virtual-modules.ts";
 
 const DEFAULT_RESOLVE_CONDITION_NAMES = ["workerd", "worker", "module", "browser"];
@@ -125,7 +125,7 @@ export const optionsPlugin = createPlugin<"options", OptionsApi>("options", (plu
         }
       },
       async config(userConfig) {
-        const vite = await import("vite");
+        const vite = await loadVite();
         const isRolldown = "rolldownVersion" in this.meta;
         const environmentNames = parseViteEnvironments(pluginOptions);
         if (

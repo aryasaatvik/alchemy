@@ -1,5 +1,4 @@
 import * as NodeNet from "node:net";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
@@ -12,6 +11,9 @@ import * as Provider from "../Provider.ts";
 import { Resource } from "../Resource.ts";
 import { initialCwd, moduleExtension } from "../Util/Node.ts";
 import { sha256Object } from "../Util/sha256.ts";
+import { FrameworkServerError, importFrontendCore } from "./FrontendCore.ts";
+
+export { FrameworkServerError } from "./FrontendCore.ts";
 
 /**
  * The structural slice of a framework-integration module
@@ -46,12 +48,6 @@ interface FrameworkBuildOutputSlice {
   readonly clientDirectory: string | undefined;
   readonly serverModules: Array<{ readonly name: string }> | undefined;
 }
-
-export class FrameworkServerError extends Data.TaggedError("FrameworkServerError")<{
-  readonly framework: string;
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
 
 /** Drops `undefined`-valued entries from {@link ServerProps.env}. */
 const definedEnv = (
@@ -532,17 +528,7 @@ export const ServerProviderLocal = () =>
               : undefined;
           // Never in the sidecar: framework toolchains read the cwd and keep
           // process-wide caches.
-          const { runDevChild } = yield* Effect.tryPromise({
-            try: () => import("@alchemy.run/frontend-frameworks/core"),
-            catch: (cause) =>
-              new FrameworkServerError({
-                framework: props.framework,
-                message:
-                  'Failed to import "@alchemy.run/frontend-frameworks/core". ' +
-                  "Install @alchemy.run/frontend-frameworks in your project to run a website in dev.",
-                cause,
-              }),
-          });
+          const { runDevChild } = yield* importFrontendCore(props.framework);
           const { url } = yield* Effect.mapError(
             runDevChild({
               runtime: dev?.runtime ?? props.runtime,

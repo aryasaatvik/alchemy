@@ -39,3 +39,11 @@ export function resolvePluginApi<Api>(plugins: ReadonlyArray<unknown>, name: str
       typeof plugin === "object" && plugin !== null && "name" in plugin && plugin.name === name,
   )?.api;
 }
+
+/** Load the optional Vite peer only inside a Vite plugin hook. */
+export const loadVite = (): Promise<typeof import("vite")> => {
+  const specifier = "vite";
+  return import(specifier).catch((cause) => {
+    throw new Error("Install vite in your project to use the Cloudflare Vite plugin.", { cause });
+  });
+};

@@ -1,21 +1,27 @@
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import { FrameworkServerError } from "./Server.ts";
 
-/**
- * Loads `@alchemy.run/frontend-frameworks/core` when a website is built or
- * served. The package is an optional peer dependency, so provider entrypoints
- * that re-export their `Website` namespace (e.g. `@alchemy.run/prisma`) must not
- * import it statically — that would break every consumer that never deploys a
- * website and so never installed it.
- */
-export const loadFrontendCore = Effect.tryPromise({
-  try: () => import("@alchemy.run/frontend-frameworks/core"),
-  catch: (cause) =>
-    new FrameworkServerError({
-      framework: "@alchemy.run/frontend-frameworks/core",
-      message:
-        'Failed to import "@alchemy.run/frontend-frameworks/core". ' +
-        "Install @alchemy.run/frontend-frameworks in your project to deploy a website.",
-      cause,
-    }),
-}).pipe(Effect.orDie);
+export class FrameworkServerError extends Data.TaggedError("FrameworkServerError")<{
+  readonly framework: string;
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const frontendCoreModule = "@alchemy.run/frontend-frameworks/core";
+
+/** Keep the optional build and dev peer outside cold provider bundles. */
+export const importFrontendCore = (framework = frontendCoreModule) =>
+  Effect.tryPromise({
+    try: () =>
+      import(frontendCoreModule) as Promise<typeof import("@alchemy.run/frontend-frameworks/core")>,
+    catch: (cause) =>
+      new FrameworkServerError({
+        framework,
+        message:
+          `Failed to import "${frontendCoreModule}". ` +
+          "Install @alchemy.run/frontend-frameworks in your project to build or serve a website.",
+        cause,
+      }),
+  });
+
+export const loadFrontendCore = importFrontendCore().pipe(Effect.orDie);

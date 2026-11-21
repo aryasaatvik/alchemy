@@ -26,15 +26,6 @@ import { resolveViteMain } from "../ViteMain.ts";
 import type { ViteOptions } from "../Worker.ts";
 
 /**
- * This module statically imports `@alchemy.run/cloudflare-runtime/vite`
- * (~0.5s to load), which is only needed for vite-based workers. Importers
- * MUST load it lazily (`Effect.promise(() => import("./Sources/Vite.ts"))`
- * from the dispatch in `Source.ts`, or the legacy vite arms in the
- * Worker providers) so the module cost is only paid when a vite worker
- * is actually built, hashed, or served.
- */
-
-/**
  * Route Vite's logger into log records through the services of the Effect
  * that built it, instead of its default stdout logger: the process that
  * renders logs shows them (raw or stripped), JSON output carries them, and

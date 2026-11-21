@@ -6,7 +6,7 @@ import { defineEnv } from "unenv";
 import { createPlugin } from "../factory.ts";
 import { isSkippedEnvironment } from "../options.ts";
 import type { BasePluginOptions } from "../options.ts";
-import { hasNodejsAls, hasNodejsCompat, toPosixPath } from "../utils.ts";
+import { hasNodejsAls, hasNodejsCompat, loadVite, toPosixPath } from "../utils.ts";
 
 const ASYNC_HOOKS_REGEXP = /^(node:)?async_hooks$/;
 const NODE_BUILTIN_MODULES_REGEXP = new RegExp(`^(${nonPrefixedNodeModules.join("|")}|node:.+)$`);
@@ -113,7 +113,7 @@ export const nodejsUnenvPlugin = createPlugin<"nodejs-unenv", UnenvApi>(
         enforce: "pre",
         async configEnvironment(name) {
           if (name === "client") return;
-          const { esmExternalRequirePlugin } = await import("vite");
+          const { esmExternalRequirePlugin } = await loadVite();
           return {
             resolve: {
               builtins: [...external],

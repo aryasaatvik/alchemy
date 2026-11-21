@@ -447,40 +447,46 @@ console.log(\`Node resolved \${consumerSubpaths.length} upstream consumer subpat
 `;
 
 /**
- * A Node service that imports the AWS provider root and nothing else, the
- * shape of a deployed API bundle. Framework integrations are optional peers,
- * so the bundle must build and load without them.
+ * A minimal Lambda graph that also retains the Website loaders reachable from
+ * provider roots. Test both cold Node import and the errors on requesting an
+ * optional framework that the host did not install.
  */
-const rootBundleConsumer = (): string => `import * as AWS from "@alchemy.run/aws";
+const rootBundleConsumer = (): string => `import assert from "node:assert/strict";
+import * as AWS from "@alchemy.run/aws";
 import { bootstrap } from "@alchemy.run/aws/Bootstrap/Lambda";
-if (typeof AWS.Lambda !== "object" || typeof bootstrap !== "function") {
-  throw new Error("AWS-only Lambda imports did not load");
+import { resolveAstroOutput, resolveAstroSettings } from "alchemy/Website/AstroOutput";
+import { loadFrontendCore } from "alchemy/Website/FrontendCore";
+import { ServerProviderLocal } from "alchemy/Website/Server";
+import * as Effect from "effect/Effect";
+
+assert.equal(typeof AWS.Lambda, "object");
+assert.equal(typeof bootstrap, "function");
+assert.equal(typeof ServerProviderLocal, "function");
+export { ServerProviderLocal };
+for (const peer of ["@alchemy.run/cloudflare", "@alchemy.run/frontend-frameworks/core", "astro/config", "vite"]) {
+  assert.throws(() => import.meta.resolve(peer), { code: "ERR_MODULE_NOT_FOUND" });
 }
-try {
-  import.meta.resolve("@alchemy.run/cloudflare");
-  throw new Error("The AWS-only smoke check unexpectedly installed Cloudflare");
-} catch (cause) {
-  if (cause.code !== "ERR_MODULE_NOT_FOUND") throw cause;
+assert.equal(await Effect.runPromise(resolveAstroOutput({ output: "static" })), "static");
+for (const website of [loadFrontendCore, resolveAstroOutput({}), resolveAstroSettings({})]) {
+  await assert.rejects(Effect.runPromise(website), /Install @alchemy.run\\/frontend-frameworks/);
 }
-console.log("Node loaded AWS and the Lambda bootstrap without Cloudflare or optional framework peers");
+console.log("Bun bundled the Lambda and Website graph; Node loaded it without the optional framework peers");
 `;
 
-/** Optional framework peers the root bundle consumer does not install. */
-export const optionalFrameworkPeers: ReadonlyArray<string> = ["@alchemy.run/frontend-frameworks"];
-
-/**
- * Optional runtime peers a Node host supplies when it uses them (Samva
- * installs both). The probe leaves them to runtime resolution so it isolates
- * the framework peers above.
- */
-// Git's Cloudflare peer is mandatory. The AWS-only probe never loads Git.
+// Git has a mandatory Cloudflare peer. The AWS-only probe never loads Git.
 const omittedFromAwsOnlyProbe = [
-  ...optionalFrameworkPeers,
+  "@alchemy.run/frontend-frameworks",
   "@alchemy.run/cloudflare",
   "@alchemy.run/git",
 ];
 
-const hostSuppliedPeers = ["@effect/platform-bun", "react-devtools-core"] as const;
+// These unrelated optional host peers are supplied by applications that use
+// them. Deliberately do not externalize any framework or Vite imports.
+const hostSuppliedPeers = [
+  "@effect/platform-bun",
+  "react-devtools-core",
+  "@alchemy.run/cloudflare",
+] as const;
 
 /**
  * Bundle and load a root `@alchemy.run/aws` import with `bun build --target
@@ -497,6 +503,7 @@ const verifyRootBundle = async (
       (packed) => !omittedFromAwsOnlyProbe.includes(packed.name),
     ),
   });
+  delete consumerManifest.dependencies?.vite;
   const consumer = await mkdtemp(join(tmpdir(), "alchemy-integration-root-bundle-"));
   try {
     await writeFile(
@@ -511,12 +518,7 @@ const verifyRootBundle = async (
         "build",
         "--target",
         "node",
-        // Preserve optional imports in the bundle. Node fails on an absent
-        // peer if loading the root requires a static import of it.
-        ...[...hostSuppliedPeers, ...omittedFromAwsOnlyProbe].flatMap((peer) => [
-          "--external",
-          peer,
-        ]),
+        ...hostSuppliedPeers.flatMap((peer) => ["--external", peer]),
         "--outfile",
         "consumer-root-bundle.mjs",
         "consumer-root-bundle.ts",

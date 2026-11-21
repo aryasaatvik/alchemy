@@ -431,13 +431,19 @@ export const resolveSource = (
     return Effect.succeed(makeInlineScriptSource(props.script));
   }
   if (props.vite) {
-    // Loaded lazily: `./Sources/Vite.ts` pulls in
-    // `@alchemy.run/cloudflare-runtime/vite` (~0.5s), which is only
-    // needed for vite-based workers — not for every Worker resolution.
+    // Resolve the Vite source at runtime. Its toolchain is an optional
+    // host dependency and must stay out of bundles that only use Workers.
+    const specifier = "@alchemy.run/cloudflare/Workers/Sources/Vite";
     const vite = props.vite;
-    return Effect.promise(() => import("./Sources/Vite.ts")).pipe(
-      Effect.map((Vite) => Vite.makeViteSource(vite)),
-    );
+    return Effect.tryPromise({
+      try: () => import(specifier) as Promise<typeof import("./Sources/Vite.ts")>,
+      catch: (cause) =>
+        new SourceProviderError({
+          provider: specifier,
+          message: "Failed to load the Vite Worker source. Install vite in your project to use it.",
+          cause,
+        }),
+    }).pipe(Effect.map((module) => module.makeViteSource(vite)));
   }
   if (isPythonMain(props.main)) {
     return Effect.succeed(makePythonSource(props.main));
