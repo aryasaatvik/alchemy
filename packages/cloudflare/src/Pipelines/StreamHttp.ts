@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import type * as HttpClient from "effect/http/HttpClient";
 import { AccountApiToken } from "../ApiToken/AccountApiToken.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { bindLambdaRuntimeAccount } from "../CloudflareEnvironmentService.ts";
 import type { Credentials } from "../Credentials.ts";
 import { requireLiveResource } from "../HttpBindingDev.ts";
 import { authorizeWith } from "../HttpClientUtils.ts";
@@ -86,6 +87,7 @@ export const makeHttpStreamBinding = <Client>(options: {
       if (!globalThis.__ALCHEMY_RUNTIME__) yield* requireLiveResource(stream);
       const token = yield* Token(`${self.LogicalId}Token`);
       if (!globalThis.__ALCHEMY_RUNTIME__) {
+        yield* bindLambdaRuntimeAccount(token.accountId);
         const { accountId } = yield* CloudflareEnvironment.current;
         yield* token.bind`${stream.LogicalId}`({
           policies: [

@@ -449,8 +449,17 @@ console.log(\`Node resolved \${consumerSubpaths.length} upstream consumer subpat
  * so the bundle must build and load without them.
  */
 const rootBundleConsumer = (): string => `import * as AWS from "@alchemy.run/aws";
-if (typeof AWS.Lambda !== "object") throw new Error("@alchemy.run/aws root has no Lambda namespace");
-console.log("Node bundle of @alchemy.run/aws built and loaded without optional framework peers");
+import { bootstrap } from "@alchemy.run/aws/Bootstrap/Lambda";
+if (typeof AWS.Lambda !== "object" || typeof bootstrap !== "function") {
+  throw new Error("AWS-only Lambda imports did not load");
+}
+try {
+  import.meta.resolve("@alchemy.run/cloudflare");
+  throw new Error("The AWS-only smoke check unexpectedly installed Cloudflare");
+} catch (cause) {
+  if (cause.code !== "ERR_MODULE_NOT_FOUND") throw cause;
+}
+console.log("Node loaded AWS and the Lambda bootstrap without Cloudflare or optional framework peers");
 `;
 
 /** Optional framework peers the root bundle consumer does not install. */
@@ -461,6 +470,13 @@ export const optionalFrameworkPeers: ReadonlyArray<string> = ["@alchemy.run/fron
  * installs both). The probe leaves them to runtime resolution so it isolates
  * the framework peers above.
  */
+// Git's Cloudflare peer is mandatory. The AWS-only probe never loads Git.
+const omittedFromAwsOnlyProbe = [
+  ...optionalFrameworkPeers,
+  "@alchemy.run/cloudflare",
+  "@alchemy.run/git",
+];
+
 const hostSuppliedPeers = ["@effect/platform-bun", "react-devtools-core"] as const;
 
 /**
@@ -475,7 +491,7 @@ const verifyRootBundle = async (
   const consumerManifest = freshConsumerManifest(artifact, manifest, {
     ...dependencies,
     packages: (dependencies.packages ?? []).filter(
-      (packed) => !optionalFrameworkPeers.includes(packed.name),
+      (packed) => !omittedFromAwsOnlyProbe.includes(packed.name),
     ),
   });
   const consumer = await mkdtemp(join(tmpdir(), "alchemy-integration-root-bundle-"));
@@ -494,7 +510,7 @@ const verifyRootBundle = async (
         "node",
         // Preserve optional imports in the bundle. Node fails on an absent
         // peer if loading the root requires a static import of it.
-        ...[...hostSuppliedPeers, ...optionalFrameworkPeers].flatMap((peer) => [
+        ...[...hostSuppliedPeers, ...omittedFromAwsOnlyProbe].flatMap((peer) => [
           "--external",
           peer,
         ]),

@@ -19,6 +19,7 @@ export type PackageManifest = Record<string, unknown> & {
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   devDependencies?: Record<string, string>;
   overrides?: Record<string, string>;
   devEngines?: {

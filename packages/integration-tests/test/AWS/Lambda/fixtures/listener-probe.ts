@@ -1,5 +1,7 @@
 import * as AWS from "@alchemy.run/aws";
 import { CloudflareEnvironment } from "@alchemy.run/cloudflare/CloudflareEnvironment";
+import { bindLambdaRuntimeAccount } from "@alchemy.run/cloudflare/CloudflareEnvironmentService";
+import * as Output from "alchemy/Output";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { Stage } from "alchemy/Stage";
 import * as Context from "effect/Context";
@@ -15,11 +17,14 @@ class ApplicationConfig extends Context.Service<ApplicationConfig, string>()(
 
 class RequestValue extends Context.Service<RequestValue, number>()("ListenerProbe.RequestValue") {}
 
+export const cloudflareAccountId = "f1234567890123456789012345678901";
+
 export default class ListenerProbe extends AWS.Lambda.Function<ListenerProbe>()(
   "ListenerProbe",
   { main: import.meta.url, functionUrl: true },
   Effect.gen(function* () {
     const host = yield* AWS.Lambda.Function;
+    yield* bindLambdaRuntimeAccount(Output.literal(cloudflareAccountId));
     const state = yield* Effect.sync(() => ({
       sandbox: crypto.randomUUID(),
       initialized: 0,

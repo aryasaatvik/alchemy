@@ -1321,7 +1321,6 @@
     "build:package": "node scripts/build.ts"
   },
   "dependencies": {
-    "@alchemy.run/cloudflare": "workspace:*",
     "@alchemy.run/docker": "workspace:*",
     "@alchemy.run/kubernetes": "workspace:*",
     "@alchemy.run/sql": "workspace:*",
@@ -1332,6 +1331,7 @@
     "rolldown": "catalog:"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare": "workspace:*",
     "@alchemy.run/frontend-frameworks": "workspace:*",
     "@effect/platform-bun": "catalog:",
     "@effect/platform-node": "catalog:",
@@ -1345,6 +1345,7 @@
     "typescript": "catalog:"
   },
   "peerDependencies": {
+    "@alchemy.run/cloudflare": "workspace:*",
     "@alchemy.run/frontend-frameworks": "workspace:*",
     "@effect/platform-bun": "catalog:",
     "@effect/platform-node": "catalog:",
@@ -1354,6 +1355,9 @@
     "pg": "catalog:"
   },
   "peerDependenciesMeta": {
+    "@alchemy.run/cloudflare": {
+      "optional": true
+    },
     "@alchemy.run/frontend-frameworks": {
       "optional": true
     },

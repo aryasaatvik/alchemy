@@ -9360,9 +9360,6 @@ importers:
 
   packages/aws:
     dependencies:
-      '@alchemy.run/cloudflare':
-        specifier: workspace:*
-        version: link:../cloudflare
       '@alchemy.run/docker':
         specifier: workspace:*
         version: link:../docker
@@ -9388,6 +9385,9 @@ importers:
         specifier: 1.2.16
         version: 1.2.16
     devDependencies:
+      '@alchemy.run/cloudflare':
+        specifier: workspace:*
+        version: link:../cloudflare
       '@alchemy.run/frontend-frameworks':
         specifier: workspace:*
         version: link:../frontend-frameworks

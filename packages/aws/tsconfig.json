@@ -17,7 +17,6 @@
       "path": "../alchemy/tsconfig.json"
     },
     { "path": "../sql/tsconfig.json" },
-    { "path": "../cloudflare/tsconfig.json" },
     { "path": "../docker/tsconfig.json" },
     { "path": "../kubernetes/tsconfig.json" },
     { "path": "../../submodules/distilled/packages/core/tsconfig.json" },

@@ -1,6 +1,10 @@
+import * as Output from "alchemy/Output";
+import { CurrentRuntimeContext } from "alchemy/RuntimeContext";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type { CloudflareResolvedCredentials } from "./Auth/AuthConfig.ts";
 
 /**
@@ -23,14 +27,46 @@ export const runtimeIdentity = (accountId: string): CloudflareRuntimeIdentity =>
 
 export type CloudflareEnvironmentShape = CloudflareResolvedCredentials | CloudflareRuntimeIdentity;
 
+const identityEnvKey = "ALCHEMY_CLOUDFLARE_ACCOUNT_ID";
+
+const requireRuntimeAccount = (accountId: string | undefined): string => {
+  if (!accountId?.trim()) {
+    throw new Error(`${identityEnvKey} is required for a Lambda's Cloudflare binding`);
+  }
+  return accountId;
+};
+
+/** Carry the scoped token's account output to the Lambda that binds it. */
+export const bindLambdaRuntimeAccount = (account: Output.Output<string, never>) =>
+  Effect.gen(function* () {
+    if (globalThis.__ALCHEMY_RUNTIME__) return;
+    const host = yield* CurrentRuntimeContext;
+    if (host?.Type === "AWS.Lambda.Function" || host?.Type === "AWS.Lambda.WebFunction") {
+      yield* host.set(identityEnvKey, account.pipe(Output.map(requireRuntimeAccount)));
+    }
+  });
+
 export class CloudflareEnvironment extends Context.Service<
   CloudflareEnvironment,
   Effect.Effect<CloudflareEnvironmentShape>
 >()("Cloudflare::CloudflareEnvironment") {
-  /** The host supplies this service in both deployment and application runtimes. */
-  static current = CloudflareEnvironment.use(
-    (environment) => environment,
-  ) as unknown as Effect.Effect<CloudflareEnvironmentShape>;
+  /** Resolve the deploy environment or the account injected by a runtime binding. */
+  static current = Effect.gen(function* () {
+    const provided = yield* Effect.serviceOption(CloudflareEnvironment);
+    if (Option.isSome(provided)) return yield* provided.value;
+    if (globalThis.__ALCHEMY_RUNTIME__) {
+      const host = yield* CurrentRuntimeContext;
+      const accountId = host
+        ? yield* host.get<string>(identityEnvKey)
+        : yield* Config.String(identityEnvKey).pipe(
+            Config.option,
+            Effect.map(Option.getOrUndefined),
+            Effect.orDie,
+          );
+      return runtimeIdentity(requireRuntimeAccount(accountId));
+    }
+    return yield* yield* CloudflareEnvironment;
+  }) as Effect.Effect<CloudflareEnvironmentShape>;
   readonly kind = "Environment" as const;
 }
 

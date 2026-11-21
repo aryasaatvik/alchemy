@@ -6,6 +6,7 @@ import type * as Redacted from "effect/Redacted";
 import { AccountApiToken } from "../ApiToken/AccountApiToken.ts";
 import type { PermissionGroupRef } from "../ApiToken/Common.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { bindLambdaRuntimeAccount } from "../CloudflareEnvironmentService.ts";
 import type { Credentials } from "../Credentials.ts";
 import { requireLiveResource } from "../HttpBindingDev.ts";
 import { authorizeWith } from "../HttpClientUtils.ts";
@@ -32,6 +33,7 @@ export const makeHttpKVNamespaceBinding = <Client>(options: {
       if (!globalThis.__ALCHEMY_RUNTIME__) yield* requireLiveResource(namespace);
       const token = yield* Token(`${self.LogicalId}Token`);
       if (!globalThis.__ALCHEMY_RUNTIME__) {
+        yield* bindLambdaRuntimeAccount(token.accountId);
         const { accountId } = yield* CloudflareEnvironment.current;
         yield* token.bind`${namespace.LogicalId}`({
           policies: [

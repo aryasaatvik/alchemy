@@ -3,11 +3,13 @@ import * as AWS from "@alchemy.run/aws";
 import type { FunctionProps, FunctionZipProps } from "@alchemy.run/aws/Lambda/Function";
 import { makeFunctionBundler } from "@alchemy.run/aws/Lambda/FunctionBundle";
 import { CloudflareEnvironment } from "@alchemy.run/cloudflare/CloudflareEnvironment";
+import { bindLambdaRuntimeAccount } from "@alchemy.run/cloudflare/CloudflareEnvironmentService";
 import { expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
 import { Credentials } from "@distilled.cloud/aws";
 import * as Bundle from "alchemy/Bundle/Bundle";
 import { isResolved, stripEffects } from "alchemy/Diff";
+import * as Output from "alchemy/Output";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import { inMemoryState } from "alchemy/State";
@@ -17,7 +19,6 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Redacted from "effect/Redacted";
 import AliasCallerLive, { AliasWorkflowCaller } from "./fixtures/alias-workflow-caller.ts";
 import HostLive from "./fixtures/alias-workflow-host.ts";
 import NestedDurableParentLive, { NestedDurableParent } from "./fixtures/nested-durable-parent.ts";
@@ -566,7 +567,12 @@ test.provider(
       ).toBe(arn);
       const startRequests = requests.filter((u) => u.pathname.endsWith("/invocations"));
       expect(startRequests).toHaveLength(2);
-      expect(startRequests.every((u) => u.searchParams.get("Qualifier") === "live")).toBe(true);
+      for (const request of startRequests) {
+        expect(decodeURIComponent(request.pathname)).toContain(
+          "/functions/TestWorkflows-deployed/invocations",
+        );
+        expect(request.searchParams.get("Qualifier")).toBe("live");
+      }
       const lookups = requests.filter((u) => u.pathname.endsWith("/durable-executions"));
       expect(lookups).toHaveLength(14);
       for (const url of lookups) {
@@ -594,32 +600,24 @@ test.provider(
   "bundled Lambda listeners retain registration services and fresh invocation scopes",
   (stack) =>
     Effect.gen(function* () {
-      const { default: ListenerProbe } = yield* Effect.promise(
+      const { default: ListenerProbe, cloudflareAccountId } = yield* Effect.promise(
         () => import("./fixtures/listener-probe.ts"),
       );
-      const cloudflareAccountId = "f1234567890123456789012345678901";
-      yield* stack.deploy(ListenerProbe).pipe(
-        Effect.provideService(
-          CloudflareEnvironment,
-          Effect.succeed({
-            type: "apiToken",
-            source: { type: "env" },
-            accountId: cloudflareAccountId,
-            apiToken: Redacted.make("fixture-token"),
-          }),
-        ),
-      );
-      const cloudflareBinding = reconciledBindings
-        .get("ListenerProbe")
-        ?.find((binding) => binding.data?.env?.ALCHEMY_CLOUDFLARE_ACCOUNT_ID !== undefined)
-        ?.data?.env;
-      expect(cloudflareBinding).toEqual({ ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId });
+      yield* stack
+        .deploy(ListenerProbe)
+        .pipe(
+          Effect.provideService(
+            CloudflareEnvironment,
+            Effect.die("binding must use its account output"),
+          ),
+        );
       const props = reconciled.get("ListenerProbe") as FunctionZipProps;
+      expect(props.env?.ALCHEMY_CLOUDFLARE_ACCOUNT_ID).toBe(cloudflareAccountId);
       const entry = yield* writeBundle(props, "alchemy-listener-context-");
       yield* setRuntimeEnv({
         ...baseRuntimeEnv("http://127.0.0.1:0"),
         ALCHEMY_AWS_ACCOUNT_ID: "123456789012",
-        ...cloudflareBinding,
+        ALCHEMY_CLOUDFLARE_ACCOUNT_ID: props.env!.ALCHEMY_CLOUDFLARE_ACCOUNT_ID,
       });
 
       const module = (yield* Effect.promise(() => import(pathToFileURL(entry).href))) as {
@@ -673,4 +671,26 @@ test.provider(
       }
     }),
   { timeout: 45_000, exclusive: true },
+);
+
+test.provider("only a Lambda with an account binding requires Cloudflare identity", (stack) =>
+  Effect.gen(function* () {
+    const offline = Effect.die("AWS-only deploy must not resolve Cloudflare credentials");
+    yield* stack
+      .deploy(AWS.Lambda.Function("AwsOnly", { main: "./aws-only.ts" }))
+      .pipe(Effect.provideService(CloudflareEnvironment, offline));
+    expect(reconciled.get("AwsOnly")?.env?.ALCHEMY_CLOUDFLARE_ACCOUNT_ID).toBeUndefined();
+
+    const invalid = AWS.Lambda.Function(
+      "MissingBindingAccount",
+      { main: "./aws-only.ts" },
+      bindLambdaRuntimeAccount(Output.literal("")).pipe(Effect.as({})),
+    );
+    const exit = yield* Effect.exit(stack.deploy(invalid));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit))
+      expect(Cause.pretty(exit.cause)).toContain("ALCHEMY_CLOUDFLARE_ACCOUNT_ID");
+    expect(reconciled.has("MissingBindingAccount")).toBe(false);
+    yield* stack.destroy();
+  }),
 );

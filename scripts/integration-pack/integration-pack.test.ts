@@ -155,6 +155,10 @@ describe("integration package graph", () => {
     const closure = await integrationClosure(repositoryRoot);
     const names = closure.map((workspace) => workspace.name);
     expect(names).toHaveLength(24);
+    const aws = closure.find(({ name }) => name === "@alchemy.run/aws")!.manifest;
+    expect(aws.dependencies?.["@alchemy.run/cloudflare"]).toBeUndefined();
+    expect(aws.peerDependencies?.["@alchemy.run/cloudflare"]).toBeDefined();
+    expect(aws.peerDependenciesMeta?.["@alchemy.run/cloudflare"]?.optional).toBe(true);
 
     for (const required of [
       "alchemy",
