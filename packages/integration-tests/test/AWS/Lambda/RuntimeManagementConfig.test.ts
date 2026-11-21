@@ -221,6 +221,7 @@ test.provider(
       const repositoryUri = `${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/runtime`;
       const uri = `${repositoryUri}:stable`;
       const digest = `sha256:${"a".repeat(64)}`;
+      const functionArn = `arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${FUNCTION_NAME}`;
       const props = { image: { uri }, architecture: "x86_64" } satisfies Lambda.FunctionProps;
       // Historical state may contain a ZIP-only prop which current declarations reject.
       const olds = {
@@ -249,8 +250,9 @@ test.provider(
         olds: olds as unknown as Lambda.FunctionProps,
         news: props,
         output: {
-          functionArn: `arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${FUNCTION_NAME}`,
+          functionArn,
           functionName: FUNCTION_NAME,
+          qualifiedArn: functionArn,
           functionUrl: undefined,
           roleName: "runtime-fn-role",
           roleArn: `arn:aws:iam::${ACCOUNT_ID}:role/runtime-fn-role`,
