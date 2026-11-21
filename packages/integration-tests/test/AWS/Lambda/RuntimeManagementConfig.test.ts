@@ -317,10 +317,18 @@ releaseTest.provider(
             return yield* Lambda.Alias("Serving", { version, aliasName: "live" });
           }),
         )
-        .pipe(Effect.provideService(HttpClient.HttpClient, http));
+        .pipe(
+          Effect.provideService(HttpClient.HttpClient, http),
+          Effect.provide(makeCloud({}).layer),
+        );
       expect(alias.functionVersion).toBe("7");
       expect(writes).toEqual(["publish:7", "pin:7", "promote:7"]);
-      yield* stack.destroy().pipe(Effect.provideService(HttpClient.HttpClient, http));
+      yield* stack
+        .destroy()
+        .pipe(
+          Effect.provideService(HttpClient.HttpClient, http),
+          Effect.provide(makeCloud({}).layer),
+        );
     }),
   { tags: ["unit", "local", "provider:aws:lambda"] },
 );

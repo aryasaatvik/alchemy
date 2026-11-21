@@ -20,6 +20,12 @@ import { services } from "./fixtures/workflow-floci/services.ts";
 import { Approval, LoopApprovals, Probe, Rejected } from "./fixtures/workflow-floci/workflows.ts";
 
 const endpoint = process.env.WORKFLOW_FLOCI_ENDPOINT;
+const prefix = process.env.WORKFLOW_FLOCI_CONTAINER_PREFIX;
+if (endpoint !== undefined) {
+  const url = new URL(endpoint);
+  if (url.origin !== `http://127.0.0.1:${url.port}` || !prefix?.startsWith("lane1-"))
+    throw new Error("Workflow suite requires an isolated, loopback Floci instance");
+}
 const name = `alchemy-workflow-pr3-${crypto.randomUUID().slice(0, 8)}`;
 const layer = services(endpoint ?? "http://127.0.0.1:0");
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -152,10 +158,7 @@ describe.skipIf(!endpoint)("WorkflowFunction on isolated Floci", () => {
     directory = await mkdtemp(path.join(tmpdir(), "alchemy-workflow-pr3-"));
     await run(S3.createBucket({ Bucket: "pr3-workflow-attempts" }));
     // Resolve from the workspace's pinned SDK, not from the network.
-    const sdkEntry = path.resolve(
-      import.meta.dirname,
-      "../../../../../node_modules/.pnpm/@aws+durable-execution-sdk-js@2.6.0/node_modules/@aws/durable-execution-sdk-js/dist/index.mjs",
-    );
+    const sdkEntry = Bun.resolveSync("@aws/durable-execution-sdk-js", import.meta.dirname);
     for (const [entry, outfile, external] of [
       [
         path.join(import.meta.dirname, "fixtures/workflow-floci/runtime.ts"),
@@ -183,7 +186,7 @@ describe.skipIf(!endpoint)("WorkflowFunction on isolated Floci", () => {
     await run(
       Lambda.createFunction({
         FunctionName: name,
-        Runtime: "nodejs22.x",
+        Runtime: "nodejs24.x",
         Handler: "index.handler",
         Role: "arn:aws:iam::000000000000:role/pr3",
         Timeout: 60,
@@ -308,7 +311,7 @@ describe.skipIf(!endpoint)("WorkflowFunction on isolated Floci", () => {
         ),
       ),
     );
-    const containers = execFileSync("docker", ["ps", "-q", "--filter", `name=floci-aws-${name}-`], {
+    const containers = execFileSync("docker", ["ps", "-q", "--filter", `name=${prefix}-${name}-`], {
       encoding: "utf8",
     })
       .trim()

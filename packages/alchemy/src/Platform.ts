@@ -151,6 +151,8 @@ export interface Platform<
 > extends Effect.Effect<Resource & RuntimeContext, never, Resource> {
   Type: Resource["Type"];
   Provider: Provider<Resource>;
+  /** Reference a deployed instance without evaluating its runtime implementation. */
+  ref(id: string, options?: { stage?: string; stack?: string }): Effect.Effect<Resource>;
 
   <Self, Shape, Deps = never>(): {
     <
