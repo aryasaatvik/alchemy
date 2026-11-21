@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
-import { fromWebToken, type ResolvedCredentials } from "@distilled.cloud/aws/Credentials";
+import {
+  fromWebToken,
+  Credentials as ProtocolCredentials,
+  type ResolvedCredentials,
+} from "@distilled.cloud/aws/Credentials";
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import { Region, type RegionName } from "@distilled.cloud/aws/Region";
+import { Retry } from "@distilled.cloud/aws/Retry";
+import { SigningKeyCache } from "@distilled.cloud/aws/SigV4";
+import { ResponseValidation, StrictDecoder } from "@distilled.cloud/core/response-validation";
+import { ServerRetryHintCapMs } from "@distilled.cloud/core/retry";
 import { AlchemyContext } from "alchemy/AlchemyContext";
 import { orDieCredentialsUnavailable } from "alchemy/Auth/Resolve";
 import * as Binding from "alchemy/Binding";
@@ -15,6 +23,8 @@ import {
   OidcTokenError,
 } from "alchemy/RuntimeContext";
 import { Stack } from "alchemy/Stack";
+import { ConfigProvider } from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
@@ -25,6 +35,7 @@ import * as Redacted from "effect/Redacted";
 import type * as rolldown from "rolldown";
 import { DEFAULT_LOCAL_ENDPOINT } from "./AuthProvider.ts";
 import { Credentials, makeAssumeRoleResolver } from "./Credentials.ts";
+import { fromRuntimeEnv } from "./Endpoint.ts";
 import { AWSEnvironment } from "./Environment.ts";
 import { AccessKey } from "./IAM/AccessKey.ts";
 import { OpenIDConnectProvider } from "./IAM/OpenIDConnectProvider.ts";
@@ -33,6 +44,36 @@ import { Role } from "./IAM/Role.ts";
 import { User } from "./IAM/User.ts";
 import { globalRegionOf } from "./Partition.ts";
 import { CurrentRegion } from "./Region.ts";
+
+const operationContext = Context.pick(
+  ProtocolCredentials,
+  Region,
+  HttpClient.HttpClient,
+  Endpoint.Endpoint,
+  Endpoint.ServiceEndpoint,
+  Retry,
+  SigningKeyCache,
+  ResponseValidation,
+  StrictDecoder,
+  ServerRetryHintCapMs,
+  ConfigProvider,
+  FetchHttpClient.Fetch,
+  FetchHttpClient.RequestInit,
+);
+
+// Distilled operations capture their construction context. Keep only cloud
+// services so invocation scope, cancellation, and telemetry stay with each call.
+const resolveOperation = <A, E>(operation: Effect.Effect<A, E>) =>
+  operation.pipe(Effect.updateContext(operationContext));
+
+const requestHttpClient = Layer.succeed(
+  HttpClient.HttpClient,
+  HttpClient.makeWith(
+    (request: Effect.Effect<HttpClientRequest.HttpClientRequest>) =>
+      Effect.flatMap(request, HttpClient.execute).pipe(Effect.provide(FetchHttpClient.layer)),
+    Effect.succeed,
+  ),
+);
 
 /**
  * How an AWS binding reaches AWS from its host:
@@ -513,7 +554,7 @@ const withWebIdentity = Effect.fn(function* <Op>(
   const runtime = yield* CurrentRuntimeContext;
   const roleArn = runtime ? yield* runtime.get<string>(WEB_IDENTITY_ROLE_ENV) : undefined;
   if (runtime === undefined || roleArn === undefined) {
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolveOperation(operation as Effect.Effect<Op>);
   }
   const stsRegion = yield* stsRegionOf(runtime);
   const webIdentityToken =
@@ -537,12 +578,12 @@ const withWebIdentity = Effect.fn(function* <Op>(
     region !== undefined
       ? yield* region as Effect.Effect<Effect.Effect<string>>
       : Effect.map(runtime.get<string>(KEY_ENV.region), (value) => value ?? "us-east-1");
-  return yield* (operation as Effect.Effect<Op>).pipe(
+  return yield* resolveOperation(operation as Effect.Effect<Op>).pipe(
     Effect.provide([
       credentials,
       Layer.succeed(Region, callRegion as Effect.Effect<RegionName>),
-      Endpoint.fromEnv(),
-      FetchHttpClient.layer,
+      fromRuntimeEnv,
+      requestHttpClient,
     ]),
     // The web-token provider loads on first use and fails with `SdkError`
     // when its module cannot load.
@@ -570,7 +611,7 @@ export const withCredentials: <Op>(
 ) {
   // A host running as an IAM role signs with its own credentials.
   if (globalThis.__ALCHEMY_HOST_IDENTITY__ === "AWS.IAM.Role")
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolveOperation(operation as Effect.Effect<Op>);
   // A host running as a Google service account assumes its Role with an ID
   // token; it never has a key, so the bundler drops that path.
   if (globalThis.__ALCHEMY_HOST_IDENTITY__ === "GCP.IAM.ServiceAccount") {
@@ -586,13 +627,13 @@ export const withCredentials: <Op>(
       // Only the outer Effect: it binds attributes onto the host at deploy.
       yield* Effect.asVoid(region as Effect.Effect<Effect.Effect<string>>);
     }
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolveOperation(operation as Effect.Effect<Op>);
   }
 
   const runtime = yield* CurrentRuntimeContext;
   const roleArn = runtime ? yield* runtime.get<string>(KEY_ENV.roleArn) : undefined;
   if (runtime === undefined || roleArn === undefined) {
-    return yield* operation as Effect.Effect<Op>;
+    return yield* resolveOperation(operation as Effect.Effect<Op>);
   }
 
   const stsRegion = yield* stsRegionOf(runtime);
@@ -612,21 +653,24 @@ export const withCredentials: <Op>(
       } satisfies ResolvedCredentials;
     }),
   );
-  const credentials = yield* makeAssumeRoleResolver({
-    roleArn: Effect.succeed(roleArn),
-    base,
-    region: stsRegion,
-  });
+  const credentials = yield* resolveOperation(
+    makeAssumeRoleResolver({
+      roleArn: Effect.succeed(roleArn),
+      base,
+      region: stsRegion,
+    }).pipe(Effect.provide(fromRuntimeEnv)),
+  );
   const callRegion =
     region !== undefined
       ? yield* region as Effect.Effect<Effect.Effect<string>>
       : Effect.map(runtime.get<string>(KEY_ENV.region), (value) => value ?? "us-east-1");
-  return yield* (operation as Effect.Effect<Op>).pipe(
+  return yield* resolveOperation(operation as Effect.Effect<Op>).pipe(
     Effect.provide([
       Layer.succeed(Credentials, credentials),
       Layer.succeed(Region, callRegion as Effect.Effect<RegionName>),
-      Endpoint.fromEnv(),
-      FetchHttpClient.layer,
+      fromRuntimeEnv,
+      requestHttpClient,
     ]),
+    orDieCredentialsUnavailable("AWS"),
   );
 });
