@@ -310,6 +310,10 @@ export const Flag = Resource<Flag>(TypeId);
 export const isFlag = (value: unknown): value is Flag =>
   Predicate.hasProperty(value, "Type") && value.Type === TypeId;
 
+class FlagRulesUnavailable extends Data.TaggedError("FlagRulesUnavailable")<{
+  message: string;
+}> {}
+
 export const FlagProviderLive = () =>
   Provider.succeed(Flag, {
     stables: ["appId", "accountId", "key"],
@@ -388,6 +392,11 @@ export const FlagProviderLive = () =>
       const live = observed ?? (yield* getFlag(accountId, appId, key));
       // Omitted rules are unmanaged: the full-body PUT carries the live
       // rules back unchanged, so rules edited outside Alchemy survive.
+      if (news.rules === undefined && live === undefined) {
+        return yield* new FlagRulesUnavailable({
+          message: `Cannot preserve unmanaged rules for Flagship flag "${key}" in app "${appId}" before the concurrent create is visible.`,
+        });
+      }
       const rules = normalizeRules(news.rules ?? live?.rules ?? []);
       if (live) {
         const observedShape = {

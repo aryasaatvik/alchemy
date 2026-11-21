@@ -29,6 +29,7 @@ const bodySchema = Schema.Struct({
   ),
 });
 let live: typeof bodySchema.Type | undefined;
+let createRace = false;
 const writes: (typeof bodySchema.Type)[] = [];
 const externalRules = [{ priority: 1, conditions: [], serve_variation: "on" }];
 
@@ -50,6 +51,15 @@ const client = HttpClient.make((request, url) =>
         Response.json(
           { success: false, errors: [{ code: 1000, message: "Flag not found" }] },
           { status: 404 },
+        ),
+      );
+    }
+    if (request.method === "POST" && createRace) {
+      return HttpClientResponse.fromWeb(
+        request,
+        Response.json(
+          { success: false, errors: [{ code: 1000, message: "Flag already exists" }] },
+          { status: 409 },
         ),
       );
     }
@@ -134,6 +144,36 @@ describe.sequential(
           expect(writes).toEqual([]);
           yield* stack.destroy();
         }),
+    );
+    test.provider(
+      "refuses to update unmanaged rules when a concurrent create is not yet visible",
+      (stack) =>
+        Effect.gen(function* () {
+          live = undefined;
+          writes.length = 0;
+          createRace = true;
+          const failed = yield* stack
+            .deploy(
+              Flag("Race", {
+                appId: "app",
+                key: "flag",
+                defaultVariation: "off",
+                variations: { off: false, on: true },
+              }),
+            )
+            .pipe(Effect.result);
+          expect(writes).toEqual([]);
+          expect(failed._tag).toBe("Failure");
+          if (failed._tag === "Failure") {
+            expect(String(failed.failure)).toContain("Cannot preserve");
+          }
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              createRace = false;
+            }),
+          ),
+        ),
     );
   },
 );
