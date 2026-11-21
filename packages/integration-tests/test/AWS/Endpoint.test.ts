@@ -17,6 +17,7 @@ import { ProfileStoreLive } from "alchemy/Auth/Profile";
 import { Stack } from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import { layerWebCrypto } from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
@@ -148,6 +149,17 @@ describe("AWS service endpoints", { tags: ["unit", "provider:aws"] }, () => {
         );
       }
     }),
+  );
+
+  it.effect("memoizes a configured production provider layer within the same scope", () =>
+    Effect.gen(function* () {
+      const providers = AWS.providers({ local: {}, serviceEndpoints: {} });
+      const memoMap = Layer.makeMemoMapUnsafe();
+      const scope = yield* Effect.scope;
+      const first = yield* Layer.buildWithMemoMap(providers, memoMap, scope);
+      const second = yield* Layer.buildWithMemoMap(providers, memoMap, scope);
+      expect(Context.get(first, AWS.Providers)).toBe(Context.get(second, AWS.Providers));
+    }).pipe(Effect.provide(stackServices(false))),
   );
 
   it.effect("an explicit operation endpoint wins over the service map", () =>
