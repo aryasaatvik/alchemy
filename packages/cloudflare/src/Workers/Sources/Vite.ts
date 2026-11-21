@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import type * as vite from "vite";
+import { activateVitePluginOptions } from "../../VitePlugin/ActiveOptions.ts";
 import { readAssets } from "../Assets.ts";
 import { resolveBuildEnv } from "../BuildEnv.ts";
 import type { SourceDevHandle, SourceProvider } from "../Source.ts";
@@ -87,13 +88,10 @@ const makeViteLogger = (context: Context.Context<never>): vite.Logger => {
  * evaluates the user's alchemy.run.ts — an env variable set there never
  * reaches the config).
  *
- * Contract: the value is `"1"` while the process is Alchemy-orchestrated;
- * absence means not injected. It is deliberately never unset — Vite
- * re-evaluates the app config on dev-server restarts long after
- * `viteDev` returned, and concurrent `viteBuild`s in one process would
- * race a save/restore. A process that ran an Alchemy build never also
- * runs a standalone (non-Alchemy) Vite build, so the flag staying set is
- * correct for the process lifetime.
+ * Dev keeps the marker for subsequent server restarts. The build child sets
+ * it while resolving the injected config and clears it before running build
+ * hooks. A nested preview reloads the app's config without the injected
+ * plugin, so it can use `vitePlugin()` with the active build options.
  */
 const ALCHEMY_CLOUDFLARE_VITE_INJECTED = "ALCHEMY_CLOUDFLARE_VITE_INJECTED";
 
@@ -204,29 +202,43 @@ export const viteBuildInProcess = (
     });
     const context = yield* Effect.context<never>();
     yield* Effect.promise(async () => {
-      // oxlint-disable-next-line effecttsgo/process-env-in-effect -- writes a process-wide flag the Vite plugin reads; Config is read-only
-      process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED] = "1";
       const vite = await loadVite(rootDir);
-      const builder = await vite.createBuilder(
-        {
-          root: rootDir,
-          define: getDefine(env),
-          plugins: [cloudflare(pluginOptions), outputPlugin.plugin],
-          customLogger: makeViteLogger(context),
-          // Disables the NATIVE rolldown progress reporter ("transforming…",
-          // "rendering chunks…", "computing gzip size…"): it prints from
-          // Rust straight to fd 1 and cannot be intercepted from JS — vite
-          // only enables it when logLevel >= info. Info-level build
-          // summaries are suppressed with it; warnings and errors still
-          // reach the customLogger above.
-          logLevel: "warn",
-        },
-        // This is the `useLegacyBuilder` option. The Vite CLI implementation uses `null` here.
-        // Originally we used `undefined` here, but this caused the static site build to fail.
-        // https://github.com/vitejs/vite/blob/a07a4bd052ac75f916391c999c408ad5f2867e61/packages/vite/src/node/cli.ts#L367
-        null,
-      );
-      await builder.buildApp();
+      const deactivate = activateVitePluginOptions(pluginOptions);
+      const previous = process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED];
+      try {
+        let builder: vite.ViteBuilder;
+        // oxlint-disable-next-line effecttsgo/process-env-in-effect -- Vite reads this marker when resolving its config file.
+        process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED] = "1";
+        try {
+          builder = await vite.createBuilder(
+            {
+              root: rootDir,
+              define: getDefine(env),
+              plugins: [cloudflare(pluginOptions), outputPlugin.plugin],
+              customLogger: makeViteLogger(context),
+              // Disables the NATIVE rolldown progress reporter ("transforming…",
+              // "rendering chunks…", "computing gzip size…"): it prints from
+              // Rust straight to fd 1 and cannot be intercepted from JS — vite
+              // only enables it when logLevel >= info. Info-level build
+              // summaries are suppressed with it; warnings and errors still
+              // reach the customLogger above.
+              logLevel: "warn",
+            },
+            // This is the `useLegacyBuilder` option. The Vite CLI implementation uses `null` here.
+            // Originally we used `undefined` here, but this caused the static site build to fail.
+            // https://github.com/vitejs/vite/blob/a07a4bd052ac75f916391c999c408ad5f2867e61/packages/vite/src/node/cli.ts#L367
+            null,
+          );
+        } finally {
+          delete process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED];
+        }
+        await builder.buildApp();
+      } finally {
+        deactivate();
+        if (previous !== undefined) {
+          process.env[ALCHEMY_CLOUDFLARE_VITE_INJECTED] = previous;
+        }
+      }
     });
     return yield* outputPlugin.output;
   });

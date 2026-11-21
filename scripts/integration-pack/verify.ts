@@ -42,6 +42,7 @@ export const consumerSubpaths = [
   "@alchemy.run/cloudflare/Flagship",
   "@alchemy.run/cloudflare/R2",
   "@alchemy.run/cloudflare/Ruleset",
+  "@alchemy.run/cloudflare/VitePlugin",
   "@alchemy.run/cloudflare/Workers/Sources/Vite",
   "@alchemy.run/cloudflare/Zone",
   "alchemy/Command",
@@ -288,6 +289,7 @@ if (
   !${m("@alchemy.run/aws")}.Lambda ||
   !${m("@alchemy.run/cloudflare")}.Worker ||
   typeof ${m("@alchemy.run/cloudflare/CloudflareEnvironment")}.CloudflareEnvironment !== "function" ||
+  typeof ${m("@alchemy.run/cloudflare/VitePlugin")}.vitePlugin !== "function" ||
   typeof ${m("@alchemy.run/cloudflare/Workers/Sources/Vite")}.makeViteSource !== "function" ||
   typeof ${m("@alchemy.run/aws/Endpoint")}.of !== "function" ||
   typeof ${m("@alchemy.run/aws/Lambda/Function")}.lambdaEnvironmentSize !== "function" ||
@@ -385,6 +387,7 @@ ${assertModulesLoaded("Node", "modules")}
 const [Alchemy, AWS] = modules;
 const Cloudflare = modules[${consumerSubpaths.indexOf("@alchemy.run/cloudflare")}];
 const CloudflareEnvironment = modules[${consumerSubpaths.indexOf("@alchemy.run/cloudflare/CloudflareEnvironment")}];
+const VitePlugin = modules[${consumerSubpaths.indexOf("@alchemy.run/cloudflare/VitePlugin")}];
 const Vite = modules[${consumerSubpaths.indexOf("@alchemy.run/cloudflare/Workers/Sources/Vite")}];
 const [Credentials, Endpoint, S3Endpoint, ServiceQuotas] = await Promise.all([
   import("@alchemy.run/aws/Credentials"),
@@ -392,7 +395,7 @@ const [Credentials, Endpoint, S3Endpoint, ServiceQuotas] = await Promise.all([
   import("@distilled.cloud/s3/Endpoint"),
   import("@distilled.cloud/aws/service-quotas"),
 ]);
-if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironment.CloudflareEnvironment || typeof Vite.makeViteSource !== "function") {
+if (!Alchemy.Stack || !AWS.Lambda || !Cloudflare.Worker || !CloudflareEnvironment.CloudflareEnvironment || typeof Vite.makeViteSource !== "function" || typeof VitePlugin.vitePlugin !== "function") {
   throw new Error("packed Node runtime surfaces did not load");
 }
 if (Endpoint.ServiceEndpoint !== S3Endpoint.ServiceEndpoint) {
