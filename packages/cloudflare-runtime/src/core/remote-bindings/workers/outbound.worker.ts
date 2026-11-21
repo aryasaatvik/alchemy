@@ -1,4 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  artifactFetchErrorFields,
+  emitArtifactDiagnostic,
+} from "../../bindings/artifacts/ArtifactsDiagnostics.ts";
 import { decodeResponse } from "../../internal/response.shared.ts";
 import type { RemoteWorkerConfig, RemoteWorkerResult } from "../RemoteWorkerConfig.shared.ts";
 
@@ -251,9 +255,37 @@ export class RemoteBindingProxy extends DurableObject<Env> {
     }
     // Redirects go back to the binding, which follows them itself; following
     // one here would hand an Access login page back as a binding response.
-    return await fetch(
-      target,
-      new Request(request, { headers: proxiedHeaders, redirect: "manual" }),
-    );
+    const artifacts = origin.searchParams.has("MF-Artifacts-Namespace");
+    const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+    if (artifacts)
+      emitArtifactDiagnostic({ operation: "session", stage: "forward", outcome: "begin", upgrade });
+    try {
+      const response = await fetch(
+        target,
+        new Request(request, { headers: proxiedHeaders, redirect: "manual" }),
+      );
+      if (artifacts)
+        emitArtifactDiagnostic({
+          operation: "session",
+          stage: "forward",
+          outcome: "success",
+          httpStatus: response.status,
+          upgrade,
+        });
+      return response;
+    } catch (error) {
+      if (artifacts)
+        emitArtifactDiagnostic({
+          operation: "session",
+          stage: "forward",
+          outcome: "failure",
+          transport: "fetch",
+          upgrade,
+          ...artifactFetchErrorFields(error),
+          requestAborted: request.signal.aborted,
+          sessionAgeMs: Math.min(SESSION_MAX_AGE_MS, Math.max(0, Date.now() - session.createdAt)),
+        });
+      throw error;
+    }
   }
 }

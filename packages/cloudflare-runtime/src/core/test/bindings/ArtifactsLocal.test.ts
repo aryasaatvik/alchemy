@@ -1,14 +1,24 @@
 import { execFile } from "node:child_process";
-import { readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
+import * as Scope from "effect/Scope";
 import * as Artifacts from "../../bindings/artifacts/Artifacts.ts";
-import { gitEnvironment } from "../../bindings/artifacts/git-client.ts";
+import { GitClient, gitEnvironment } from "../../bindings/artifacts/git-client.ts";
+import { startGitSidecar } from "../../bindings/artifacts/git-sidecar.ts";
 import * as Docker from "../../Docker.ts";
 import * as Globals from "../../globals/Globals.ts";
 import * as Internet from "../../globals/Internet.ts";
@@ -134,16 +144,73 @@ describe("local Artifacts", () => {
   );
 });
 
-it.effect(
+// Windows may briefly retain workerd file locks; storage cleanup retries use real time.
+it.live(
   "closes listeners and removes temporary repository state with the runtime scope",
   () =>
     Effect.gen(function* () {
       let remote = "";
-      const storageLayer = Storage.layerTemp();
+      let userUrl: URL | undefined;
+      let runtimeReleased = false;
+      let firstRemoval: unknown;
+      const removalFailures: unknown[] = [];
+      const listenerState = (url: URL | undefined) =>
+        new Promise<boolean | "unknown" | "timeout">((resolve) => {
+          if (!url) return resolve("unknown");
+          const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+          const done = (state: boolean | "timeout") => {
+            socket.destroy();
+            resolve(state);
+          };
+          socket.once("connect", () => done(true));
+          socket.once("error", () => done(false));
+          socket.setTimeout(1000, () => done("timeout"));
+        });
+      const observedFs = Layer.effect(
+        FileSystem.FileSystem,
+        Effect.map(FileSystem.FileSystem, (fs) =>
+          FileSystem.FileSystem.of({
+            ...fs,
+            remove: (directory, options) =>
+              Effect.gen(function* () {
+                if (firstRemoval === undefined) {
+                  const [files, userListener, gitListener] = yield* Effect.promise(() =>
+                    Promise.all([
+                      readdir(directory, { recursive: true }).catch((error: unknown) => [
+                        String(error),
+                      ]),
+                      listenerState(userUrl),
+                      listenerState(remote ? new URL(remote) : undefined),
+                    ]),
+                  );
+                  firstRemoval = { runtimeReleased, userListener, gitListener, files };
+                }
+                return yield* fs.remove(directory, options).pipe(
+                  Effect.tapError((error) =>
+                    Effect.sync(() => {
+                      removalFailures.push({
+                        runtimeReleased,
+                        reason: error.reason,
+                        message: error.message,
+                      });
+                    }),
+                  ),
+                );
+              }),
+          }),
+        ),
+      );
+      const storageLayer = Storage.layerTemp().pipe(Layer.provide(observedFs));
       const runtimeLayer = artifactsRuntimeLayer(storageLayer);
       const root = yield* Effect.gen(function* () {
         const storage = yield* Storage.Storage;
         if (!("disk" in storage) || !storage.disk) throw new Error("Expected disk storage");
+        // Registered before start: this runs after the runtime's child scopes close.
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            runtimeReleased = true;
+          }),
+        );
         const worker = yield* startTestWorker({
           name: "artifacts-cleanup",
           compatibilityDate: "2026-09-03",
@@ -151,18 +218,37 @@ it.effect(
           modules: [{ name: "main.js", type: "ESModule", content: script }],
           bindings: [Artifacts.local({ binding: "REPOS", namespace: "cleanup" })],
         });
-        const created = yield* worker.fetchJson<{ remote: string }>("/", {
+        userUrl = worker.baseUrl;
+        const created = yield* worker.fetchJson<{ remote: string; token: string }>("/", {
           method: "POST",
           body: JSON.stringify({ op: "create" }),
         });
         remote = created.remote;
         expect(
+          yield* HttpClient.get(`${remote}/info/refs?service=git-upload-pack`, {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`x-access-token:${created.token}`).toString("base64")}`,
+            },
+          }).pipe(
+            Effect.flatMap((response) => Effect.as(response.text, response.status)),
+            Effect.provide(NodeHttpClient.layerNodeHttp),
+          ),
+        ).toBe(200);
+        expect(
           yield* Effect.promise(() =>
             readdir(`${storage.disk.path}/artifacts`, { recursive: true }),
           ),
-        ).toContainEqual(expect.stringMatching(/\.git\/HEAD$/));
+        ).toContainEqual(expect.stringMatching(/\.git[\\/]HEAD$/));
         return storage.disk.path;
-      }).pipe(Effect.provide(runtimeLayer), Effect.scoped);
+      }).pipe(
+        // Close Runtime.start's child scopes before releasing the storage layer.
+        Effect.scoped,
+        Effect.provide(runtimeLayer),
+      );
+      const cleanupDetails = JSON.stringify({ firstRemoval, removalFailures });
+      expect(firstRemoval, cleanupDetails).toMatchObject({
+        runtimeReleased: true,
+      });
       expect(
         yield* Effect.promise(() =>
           stat(root).then(
@@ -173,14 +259,20 @@ it.effect(
             },
           ),
         ),
+        cleanupDetails,
       ).toBe(false);
       expect(
-        yield* Effect.promise(() =>
-          fetch(`${remote}/info/refs?service=git-upload-pack`).then(
-            () => true,
-            () => false,
-          ),
+        // Like Workerd.test, avoid Undici's macOS setTypeOfService exception
+        // outside the fetch promise when connecting during shutdown. This
+        // probe owns its HTTP agent and consumes any unexpected response.
+        yield* HttpClient.get(`${remote}/info/refs?service=git-upload-pack`).pipe(
+          // Receiving any response proves the listener is still open, even if
+          // its body fails while draining. Only connection/request failure is false.
+          Effect.flatMap((response) => response.text.pipe(Effect.ignore, Effect.as(true))),
+          Effect.catch(() => Effect.succeed(false)),
+          Effect.provide(NodeHttpClient.layerNodeHttp),
         ),
+        cleanupDetails,
       ).toBe(false);
     }).pipe(Effect.scoped),
   { timeout: 60000 },
@@ -226,3 +318,109 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   { timeout: 60000 },
 );
+
+// Native process shutdown and Windows storage-lock retries need wall-clock time.
+it.live(
+  "shares the Git backend across two live runtimes with separate listeners and concurrent bindings",
+  () =>
+    Effect.gen(function* () {
+      const start = (name: string) =>
+        startTestWorker({
+          name,
+          compatibilityDate: "2026-09-03",
+          compatibilityFlags: [],
+          modules: [{ name: "main.js", type: "ESModule", content: script }],
+          // Registration is concurrent; both bindings must resolve to one service/socket.
+          bindings: [
+            Artifacts.local({ binding: "REPOS", namespace: "shared" }),
+            Artifacts.local({ binding: "OTHER", namespace: "shared" }),
+          ],
+        });
+      const firstScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+        Scope.close(scope, Exit.void),
+      );
+      const first = yield* start("artifacts-first").pipe(
+        Effect.provideService(Scope.Scope, firstScope),
+      );
+      const created = yield* first.fetchJson<{ id: string; token: string; remote: string }>("/", {
+        method: "POST",
+        body: JSON.stringify({ op: "create" }),
+      });
+      const second = yield* start("artifacts-second");
+      const metadata = yield* second.fetchJson<{ id: string; remote: string }>("/", {
+        method: "POST",
+        body: JSON.stringify({ op: "get" }),
+      });
+      expect(metadata.id).toBe(created.id);
+      expect(metadata.remote).not.toBe(created.remote);
+      yield* Scope.close(firstScope, Exit.void);
+      // Closing the first workerd listener must leave the shared backend usable.
+
+      for (const remote of [metadata.remote]) {
+        const response = yield* Effect.promise(() =>
+          fetch(`${remote}/info/refs?service=git-upload-pack`, {
+            headers: {
+              Authorization: `Basic ${Buffer.from(`x-access-token:${created.token}`).toString("base64")}`,
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        yield* Effect.promise(() => response.arrayBuffer());
+      }
+    }).pipe(Effect.scoped, Effect.provide(artifactsRuntimeLayer(Storage.layerTemp()))),
+  { timeout: 60000 },
+);
+
+it("preserves a live import when another sidecar starts and cleans proven abandoned staging", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "artifacts-owners-"));
+  let accept!: () => void;
+  let release!: () => void;
+  const accepted = new Promise<void>((resolve) => {
+    accept = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const origin = createServer(async (_request, response) => {
+    accept();
+    await held;
+    response.writeHead(503).end();
+  });
+  await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+  const address = origin.address();
+  if (!address || typeof address === "string") throw new Error("Expected origin port");
+  const first = await startGitSidecar(root);
+  let second: Awaited<ReturnType<typeof startGitSidecar>> | undefined;
+  const importing = new GitClient(path.join(root, `${"a".repeat(32)}.git`))
+    .importFrom(`http://127.0.0.1:${address.port}/source.git`)
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  try {
+    await accepted;
+    const active = (await readdir(root)).find((name) =>
+      name.startsWith(`.artifacts-import-${process.pid}-`),
+    );
+    expect(active).toBeDefined();
+    // Obtain a PID which has actually exited, rather than guessing a free PID.
+    const { stdout } = await exec(process.execPath, [
+      "-e",
+      "process.stdout.write(String(process.pid))",
+    ]);
+    const abandoned = `.artifacts-stage-${stdout}-ABCDEF`;
+    await mkdir(path.join(root, abandoned));
+    second = await startGitSidecar(root);
+    expect(await readdir(root)).toContain(active);
+    expect(await readdir(root)).not.toContain(abandoned);
+    await writeFile(path.join(root, active!, "still-owned"), "untouched");
+  } finally {
+    release();
+    expect(await importing).toBeInstanceOf(Error);
+    await second?.close();
+    await first.close();
+    origin.closeAllConnections();
+    await new Promise<void>((resolve) => origin.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);

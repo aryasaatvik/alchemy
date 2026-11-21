@@ -1,5 +1,6 @@
 import { newWorkersRpcResponse } from "capnweb";
 import { EmailMessage } from "cloudflare:email";
+import { ArtifactsBindingProxy } from "../../bindings/artifacts/ArtifactsRpc.ts";
 import { makeErrorResponse } from "../../internal/response.shared.ts";
 import { ConfigError, SystemError } from "../../RuntimeError.shared.ts";
 
@@ -66,6 +67,10 @@ function getExposedJSRPCBinding(request: Request, env: Env) {
         }
       },
     };
+  }
+
+  if (url.searchParams.has("MF-Artifacts-Namespace")) {
+    return new ArtifactsBindingProxy(targetBinding as Artifacts);
   }
 
   if (url.searchParams.has("MF-Dispatch-Namespace-Options")) {

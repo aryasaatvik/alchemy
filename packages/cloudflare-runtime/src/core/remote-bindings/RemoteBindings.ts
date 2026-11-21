@@ -10,6 +10,10 @@ const ClientWorker = {
   worker: () =>
     loadInternalWorker("#cloudflare-runtime-core-worker/remote-bindings/workers/client.worker"),
 };
+const ArtifactsClientWorker = {
+  worker: () =>
+    loadInternalWorker("#cloudflare-runtime-core-worker/bindings/artifacts/client.worker"),
+};
 const OutboundWorker = {
   worker: () =>
     loadInternalWorker("#cloudflare-runtime-core-worker/remote-bindings/workers/outbound.worker"),
@@ -115,9 +119,20 @@ export const RemoteBindingsLive = Layer.effect(
           globalOutbound: { name: outbound.name },
         },
       } satisfies WorkerdConfig.Service;
-      return {
-        services: [client, outbound],
-      };
+      const services: Array<WorkerdConfig.Service> = [client, outbound];
+      if (config.bindings.some((binding) => binding.type === "artifacts")) {
+        services.push({
+          name: "remote-bindings:artifacts-client",
+          worker: {
+            compatibilityDate: DEFAULT_COMPATIBILITY_DATE,
+            modules: formatInternalWorkerModules(
+              yield* Effect.promise(ArtifactsClientWorker.worker),
+            ),
+            globalOutbound: { name: outbound.name },
+          },
+        });
+      }
+      return { services };
     });
     return RemoteBindings.of(
       Effect.gen(function* () {
@@ -133,6 +148,17 @@ export const RemoteBindingsLive = Layer.effect(
             register: (binding) =>
               Effect.sync(() => {
                 bindings.push(binding);
+                if (binding.type === "artifacts") {
+                  return {
+                    name: "remote-bindings:artifacts-client",
+                    props: {
+                      json: JSON.stringify({
+                        binding: binding.name,
+                        artifactsNamespace: binding.namespace,
+                      }),
+                    },
+                  };
+                }
                 return {
                   name: "remote-bindings:client",
                   props: {

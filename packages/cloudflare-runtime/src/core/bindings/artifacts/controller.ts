@@ -11,24 +11,22 @@ export interface LocalArtifactsBackend {
 
 // Runtime binding calls are asynchronous; the backend can share the host event loop.
 export class ArtifactsController {
-  private backends = new Map<string, Promise<LocalArtifactsBackend>>();
+  private backends = new Map<string, Promise<GitSidecar>>();
 
-  get(root: string, gitPort?: number): Promise<LocalArtifactsBackend> {
+  async get(root: string, gitPort?: number): Promise<LocalArtifactsBackend> {
+    if (gitPort !== undefined && (!Number.isInteger(gitPort) || gitPort < 1 || gitPort > 65535)) {
+      throw new Error("Local Artifacts gitPort must be an integer between 1 and 65535");
+    }
     let backend = this.backends.get(root);
     if (!backend) {
-      backend = this.start(root, gitPort);
+      backend = startGitSidecar(root);
       this.backends.set(root, backend);
       void backend.catch(() => {
         if (this.backends.get(root) === backend) this.backends.delete(root);
       });
     }
-    return backend;
-  }
-
-  private async start(root: string, gitPort?: number): Promise<LocalArtifactsBackend> {
-    if (gitPort !== undefined && (!Number.isInteger(gitPort) || gitPort < 1 || gitPort > 65535)) {
-      throw new Error("Local Artifacts gitPort must be an integer between 1 and 65535");
-    }
+    const sidecar = await backend;
+    // Each runtime owns its workerd listener; only the storage backend is shared.
     const port =
       gitPort ??
       (await new Promise<number>((resolve, reject) => {
@@ -44,12 +42,12 @@ export class ArtifactsController {
           server.close((error) => (error ? reject(error) : resolve(address.port)));
         });
       }));
-    return { port, sidecar: await startGitSidecar(root) };
+    return { port, sidecar };
   }
 
   async dispose(): Promise<void> {
     const backends = [...this.backends.values()];
     this.backends.clear();
-    await Promise.all(backends.map(async (backend) => (await backend).sidecar.close()));
+    await Promise.all(backends.map(async (backend) => (await backend).close()));
   }
 }
