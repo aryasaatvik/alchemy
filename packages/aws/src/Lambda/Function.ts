@@ -3521,7 +3521,10 @@ export const FunctionProvider = () =>
           if (olds.reservedConcurrentExecutions !== news.reservedConcurrentExecutions) {
             return { action: "update" };
           }
-          if (managesRuntime(news.runtimeManagementConfig, olds.runtimeManagementConfig)) {
+          if (
+            !isFunctionImageProps(news) &&
+            managesRuntime(news.runtimeManagementConfig, olds.runtimeManagementConfig)
+          ) {
             const desired = news.runtimeManagementConfig ?? DefaultRuntimeManagementConfig;
             const observed = yield* observeRuntimeManagementConfig(
               output.functionName,
@@ -3590,12 +3593,11 @@ export const FunctionProvider = () =>
           const reservedConcurrentExecutions = yield* getReservedConcurrentExecutions(
             fn.FunctionName,
           );
-          const runtimeManagementConfig = managesRuntime(
-            olds?.runtimeManagementConfig,
-            output?.runtimeManagementConfig,
-          )
-            ? yield* observeRuntimeManagementConfig(fn.FunctionName, alias?.FunctionVersion)
-            : undefined;
+          const runtimeManagementConfig =
+            fn.PackageType !== "Image" &&
+            managesRuntime(olds?.runtimeManagementConfig, output?.runtimeManagementConfig)
+              ? yield* observeRuntimeManagementConfig(fn.FunctionName, alias?.FunctionVersion)
+              : undefined;
           // Reuse the persisted output where we have it (e.g. code hash) so
           // diff doesn't see drift it can't reconstruct from the API.
           const attrs = {

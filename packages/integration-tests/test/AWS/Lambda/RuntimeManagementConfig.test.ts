@@ -18,6 +18,7 @@ import * as Test from "@alchemy.run/test/Alchemy";
 import { mock as mockCredentials } from "@distilled.cloud/aws/Credentials";
 import * as Region from "@distilled.cloud/aws/Region";
 import * as Provider from "alchemy/Provider";
+import { sha256Object } from "alchemy/Util/sha256";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -211,6 +212,70 @@ test.provider(
       });
     }),
   { tags, timeout: 60_000 },
+);
+
+test.provider(
+  "diff ignores a managed runtime pin left in old image props",
+  () =>
+    Effect.gen(function* () {
+      const repositoryUri = `${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/runtime`;
+      const uri = `${repositoryUri}:stable`;
+      const digest = `sha256:${"a".repeat(64)}`;
+      const props = { image: { uri }, architecture: "x86_64" } satisfies Lambda.FunctionProps;
+      // Historical state may contain a ZIP-only prop which current declarations reject.
+      const olds = {
+        ...props,
+        runtimeManagementConfig: { updateRuntimeOn: "Manual", runtimeVersionArn: PINNED },
+      };
+      const provider = yield* Provider.findProvider(Lambda.Function);
+      const hash = (yield* sha256Object({ uri, digest })).slice(0, 32);
+      const http = HttpClient.make((request) => {
+        expect(request.headers["x-amz-target"]).toBe(
+          "AmazonEC2ContainerRegistry_V20150921.DescribeImages",
+        );
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              imageDetails: [{ imageDigest: digest }],
+            }),
+          ),
+        );
+      });
+      const diff = yield* provider.diff!({
+        id: "RuntimeImage",
+        fqn: "RuntimeImage",
+        instanceId: "0123456789abcdef0123456789abcdef",
+        olds: olds as unknown as Lambda.FunctionProps,
+        news: props,
+        output: {
+          functionArn: `arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${FUNCTION_NAME}`,
+          functionName: FUNCTION_NAME,
+          functionUrl: undefined,
+          roleName: "runtime-fn-role",
+          roleArn: `arn:aws:iam::${ACCOUNT_ID}:role/runtime-fn-role`,
+          code: {
+            hash,
+            image: {
+              source: "uri",
+              imageUri: uri,
+              resolvedImageUri: `${repositoryUri}@${digest}`,
+              digest,
+              repositoryUri,
+              repositoryName: "runtime",
+              ownsRepository: false,
+            },
+          },
+        },
+        oldBindings: [],
+        newBindings: [],
+      }).pipe(
+        Effect.provideService(HttpClient.HttpClient, http),
+        Effect.provide(makeCloud({}).layer),
+      );
+      expect(diff).toEqual({ action: "noop" });
+    }),
+  { tags },
 );
 
 test.provider(
