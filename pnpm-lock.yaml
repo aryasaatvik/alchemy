@@ -9360,6 +9360,9 @@ importers:
 
   packages/aws:
     dependencies:
+      '@alchemy.run/cloudflare':
+        specifier: workspace:*
+        version: link:../cloudflare
       '@alchemy.run/docker':
         specifier: workspace:*
         version: link:../docker

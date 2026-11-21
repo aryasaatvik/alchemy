@@ -2,6 +2,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as AWS from "@alchemy.run/aws";
 import type { FunctionProps, FunctionZipProps } from "@alchemy.run/aws/Lambda/Function";
 import { makeFunctionBundler } from "@alchemy.run/aws/Lambda/FunctionBundle";
+import { CloudflareEnvironment } from "@alchemy.run/cloudflare/CloudflareEnvironment";
 import { expect } from "@alchemy.run/test";
 import * as Test from "@alchemy.run/test/Alchemy";
 import { Credentials } from "@distilled.cloud/aws";
@@ -16,6 +17,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
 import AliasCallerLive, { AliasWorkflowCaller } from "./fixtures/alias-workflow-caller.ts";
 import HostLive from "./fixtures/alias-workflow-host.ts";
 import NestedDurableParentLive, { NestedDurableParent } from "./fixtures/nested-durable-parent.ts";
@@ -24,7 +26,9 @@ import SelfDurableLive, { SelfDurable } from "./fixtures/self-durable.ts";
 const reconciled = new Map<string, FunctionProps>();
 const reconciledBindings = new Map<
   string,
-  ReadonlyArray<{ data?: { policyStatements?: ReadonlyArray<unknown> } }>
+  ReadonlyArray<{
+    data?: { env?: Record<string, string>; policyStatements?: ReadonlyArray<unknown> };
+  }>
 >();
 
 const functionAttributes = (id: string): AWS.Lambda.Function["Attributes"] => ({
@@ -593,12 +597,29 @@ test.provider(
       const { default: ListenerProbe } = yield* Effect.promise(
         () => import("./fixtures/listener-probe.ts"),
       );
-      yield* stack.deploy(ListenerProbe);
+      const cloudflareAccountId = "f1234567890123456789012345678901";
+      yield* stack.deploy(ListenerProbe).pipe(
+        Effect.provideService(
+          CloudflareEnvironment,
+          Effect.succeed({
+            type: "apiToken",
+            source: { type: "env" },
+            accountId: cloudflareAccountId,
+            apiToken: Redacted.make("fixture-token"),
+          }),
+        ),
+      );
+      const cloudflareBinding = reconciledBindings
+        .get("ListenerProbe")
+        ?.find((binding) => binding.data?.env?.ALCHEMY_CLOUDFLARE_ACCOUNT_ID !== undefined)
+        ?.data?.env;
+      expect(cloudflareBinding).toEqual({ ALCHEMY_CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId });
       const props = reconciled.get("ListenerProbe") as FunctionZipProps;
       const entry = yield* writeBundle(props, "alchemy-listener-context-");
       yield* setRuntimeEnv({
         ...baseRuntimeEnv("http://127.0.0.1:0"),
         ALCHEMY_AWS_ACCOUNT_ID: "123456789012",
+        ...cloudflareBinding,
       });
 
       const module = (yield* Effect.promise(() => import(pathToFileURL(entry).href))) as {
@@ -634,6 +655,11 @@ test.provider(
           requestId,
           hasRuntimeContext: true,
           runtimeAccountId: "123456789012",
+          cloudflareIdentity: {
+            type: "runtime",
+            accountId: cloudflareAccountId,
+            source: { type: "runtime" },
+          },
         });
         if (route === "deferred") {
           expect(body).toMatchObject({

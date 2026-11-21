@@ -1321,6 +1321,7 @@
     "build:package": "node scripts/build.ts"
   },
   "dependencies": {
+    "@alchemy.run/cloudflare": "workspace:*",
     "@alchemy.run/docker": "workspace:*",
     "@alchemy.run/kubernetes": "workspace:*",
     "@alchemy.run/sql": "workspace:*",

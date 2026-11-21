@@ -4,6 +4,7 @@
  * handler this returns — see `alchemy/Runtime/Bootstrap` for why the entry is a
  * shim.
  */
+import { runtimeIdentityLayer } from "@alchemy.run/cloudflare/CloudflareEnvironmentService";
 import * as Credentials from "@distilled.cloud/aws/Credentials";
 import * as Endpoint from "@distilled.cloud/aws/Endpoint";
 import * as Region from "@distilled.cloud/aws/Region";
@@ -113,6 +114,7 @@ export const bootstrap = async (entrypoint: unknown): Promise<unknown> => {
 
   const entryLayer = entrypointLayer(entrypoint).pipe(
     Layer.provideMerge(stackFromEnv),
+    Layer.provideMerge(runtimeIdentityLayer(process.env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID)),
     Layer.provideMerge(awsEnvironment),
     Layer.provideMerge(Credentials.fromEnv()),
     Layer.provideMerge(Region.fromEnv()),

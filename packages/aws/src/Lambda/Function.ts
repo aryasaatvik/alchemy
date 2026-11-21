@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CloudflareEnvironment } from "@alchemy.run/cloudflare/CloudflareEnvironmentService";
 import * as logs from "@distilled.cloud/aws/cloudwatch-logs";
 import type { Credentials } from "@distilled.cloud/aws/Credentials";
 import type { Endpoint } from "@distilled.cloud/aws/Endpoint";
@@ -1768,7 +1769,27 @@ export const Function: Platform<
   // The custom-domain front door integrates the Function's own ARN, so it
   // composes AFTER the Function resource is declared.
   onCreate: (resource, props) =>
-    composeFunctionDomain(resource as Function, (props as FunctionProps | undefined)?.domain),
+    Effect.gen(function* () {
+      const fn = resource as Function;
+      if (!globalThis.__ALCHEMY_RUNTIME__) {
+        const identity = yield* Effect.serviceOption(CloudflareEnvironment);
+        const accountId = Option.isSome(identity)
+          ? yield* identity.value.pipe(
+              Effect.map((environment) => environment.accountId),
+              // Cloudflare may be installed but unconfigured in an AWS-only project.
+              Effect.catchDefect(() => Effect.succeed(undefined)),
+            )
+          : undefined;
+        if (accountId !== undefined) {
+          // Carry only the account in the provider's bindings so local
+          // reconciliation receives it across the sidecar boundary too.
+          yield* fn.bind`CloudflareRuntimeIdentity`({
+            env: { ALCHEMY_CLOUDFLARE_ACCOUNT_ID: accountId },
+          });
+        }
+      }
+      yield* composeFunctionDomain(fn, (props as FunctionProps | undefined)?.domain);
+    }),
   createRuntimeContext: (
     id: string,
   ): FunctionContext<FunctionInitServices, FunctionInvocationServices> => {

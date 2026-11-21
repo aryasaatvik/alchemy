@@ -12,7 +12,7 @@ import {
 import type { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { CloudflareEnvironment } from "../CloudflareEnvironmentService.ts";
+import { runtimeIdentityLayer } from "../CloudflareEnvironmentService.ts";
 import {
   ExportedHandlerMethods,
   WorkerExecutionContext,
@@ -34,11 +34,10 @@ export type WorkerBuild<Export = any> = SharedWorkerBuild<Export, WorkerRuntimeC
 const buildOptions: SharedBuildOptions = {
   ...workerdBuildOptions,
   extra: (env) =>
-    Layer.succeed(
-      CloudflareEnvironment,
-      // TODO(sam): fix this with maybe a CloudflareAccountId Effect service
-      // @ts-expect-error - this is hacky, but we only need and have this property
-      Effect.succeed({ account: (env as any).ALCHEMY_CLOUDFLARE_ACCOUNT_ID }),
+    runtimeIdentityLayer(
+      typeof env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID === "string"
+        ? env.ALCHEMY_CLOUDFLARE_ACCOUNT_ID
+        : undefined,
     ),
 };
 

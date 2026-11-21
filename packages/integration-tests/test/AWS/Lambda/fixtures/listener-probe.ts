@@ -1,4 +1,5 @@
 import * as AWS from "@alchemy.run/aws";
+import { CloudflareEnvironment } from "@alchemy.run/cloudflare/CloudflareEnvironment";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { Stage } from "alchemy/Stage";
 import * as Context from "effect/Context";
@@ -46,6 +47,7 @@ export default class ListenerProbe extends AWS.Lambda.Function<ListenerProbe>()(
         const config = yield* Effect.serviceOption(ApplicationConfig);
         const requestBuild = yield* RequestValue;
         const runtimeContext = yield* Effect.serviceOption(RuntimeContext);
+        const cloudflareIdentity = yield* CloudflareEnvironment.current;
         const runtimeAccountId = yield* Effect.sync(() => process.env.ALCHEMY_AWS_ACCOUNT_ID);
         const snapshot = yield* Effect.sync(() => {
           const freshScope = scope !== state.previousScope;
@@ -75,6 +77,7 @@ export default class ListenerProbe extends AWS.Lambda.Function<ListenerProbe>()(
           initHasHandlerContext: init?.hasHandlerContext,
           hasRuntimeContext: Option.isSome(runtimeContext),
           runtimeAccountId,
+          cloudflareIdentity,
         });
       }).pipe(Effect.provide(requestValue), Effect.orDie);
 
